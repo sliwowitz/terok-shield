@@ -118,24 +118,28 @@ class TestFirewallBlocking:
         assert http6.returncode != 0, "HTTP over IPv6 should be blocked"
 
     def test_reject_returns_icmp_error(self, container: str, container_pid: str) -> None:
-        """Blocked traffic receives ICMP admin-prohibited (reject, not drop/timeout)."""
+        """Blocked traffic receives ICMP reject (fast failure, not drop/timeout).
+
+        A ``reject`` rule sends an ICMP error back immediately, so the
+        connection fails in well under the timeout.  A ``drop`` rule
+        would silently discard packets, causing the client to hang until
+        the full timeout expires.  We verify reject behavior by measuring
+        elapsed time rather than parsing tool-specific error messages.
+        """
+        import time
 
         r = nsenter_nft(container_pid, stdin=standard_ruleset())
         assert r.returncode == 0, f"Ruleset apply failed: {r.stderr}"
 
-        # wget to a blocked target with short timeout — stderr should show reject
-        post = _wget(container, BLOCKED_TARGET_HTTP, timeout=5)
-        assert post.returncode != 0
-        stderr_lower = post.stderr.lower()
-        reject_phrases = (
-            "network unreachable",
-            "host is unreachable",
-            "prohibited",
-            "refused",
-            "network error",
-        )
-        assert any(phrase in stderr_lower for phrase in reject_phrases), (
-            f"Expected ICMP reject indication in stderr, got: {post.stderr!r}"
+        wget_timeout = 10
+        t0 = time.monotonic()
+        post = _wget(container, BLOCKED_TARGET_HTTP, timeout=wget_timeout)
+        elapsed = time.monotonic() - t0
+
+        assert post.returncode != 0, "Blocked target should be rejected"
+        assert elapsed < wget_timeout / 2, (
+            f"Connection took {elapsed:.1f}s (timeout={wget_timeout}s) — "
+            f"looks like drop (silent timeout), not reject (ICMP error)"
         )
 
     def test_rfc1918_still_blocked_when_not_whitelisted(
