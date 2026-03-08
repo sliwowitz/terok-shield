@@ -44,18 +44,32 @@ def test_cli_no_command(capsys) -> None:
 
 
 def test_cli_setup(capsys) -> None:
-    """CLI setup subcommand prints placeholder."""
+    """CLI setup subcommand completes without error."""
+    from unittest import mock
+
     from terok_shield.cli import main
 
-    main(["setup"])
+    with mock.patch("terok_shield.cli.shield_setup"):
+        main(["setup"])
     captured = capsys.readouterr()
-    assert "terok-shield setup:" in captured.out
+    assert "setup complete" in captured.out.lower()
 
 
 def test_cli_status(capsys) -> None:
-    """CLI status subcommand prints placeholder."""
+    """CLI status subcommand prints mode info."""
+    from unittest import mock
+
     from terok_shield.cli import main
 
-    main(["status"])
+    with mock.patch(
+        "terok_shield.cli.shield_status",
+        return_value={
+            "mode": "standard",
+            "audit_enabled": True,
+            "profiles": [],
+            "log_files": [],
+        },
+    ):
+        main(["status"])
     captured = capsys.readouterr()
-    assert "terok-shield status:" in captured.out
+    assert "standard" in captured.out.lower()

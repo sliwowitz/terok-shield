@@ -1,10 +1,307 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""terok-shield: nftables-based egress firewalling for Podman containers."""
+"""terok-shield: nftables-based egress firewalling for Podman containers.
+
+Public API for standalone use and integration with terok.
+"""
+
+import ipaddress
 
 __version__ = "0.1.0"
 
+from .audit import list_log_files, log_event, tail_log
 from .config import ShieldConfig, ShieldMode, load_shield_config
+from .dns import resolve_and_cache
+from .profiles import compose_profiles, list_profiles
+from .run import dig
 
-__all__ = ["ShieldConfig", "ShieldMode", "load_shield_config"]
+
+def _load_config(config: ShieldConfig | None) -> ShieldConfig:
+    """Return the given config or load the default."""
+    return config if config is not None else load_shield_config()
+
+
+def _is_ip(value: str) -> bool:
+    """Return True if value is an IPv4 address or CIDR."""
+    try:
+        if "/" in value:
+            ipaddress.IPv4Network(value, strict=False)
+        else:
+            ipaddress.IPv4Address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def shield_setup(*, config: ShieldConfig | None = None, hardened: bool = False) -> None:
+    """Run shield setup (install hook or verify bridge).
+
+    Args:
+        config: Shield configuration (loads default if None).
+        hardened: If True, set up hardened mode (bridge network).
+    """
+    cfg = _load_config(config)
+    if hardened:
+        from . import hardened as hw
+
+        hw.setup(cfg)
+    else:
+        from . import standard as sw
+
+        sw.setup(cfg)
+
+
+def shield_status(*, config: ShieldConfig | None = None) -> dict:
+    """Return current shield status information.
+
+    Args:
+        config: Shield configuration (loads default if None).
+
+    Returns:
+        Dict with mode, profiles, audit_enabled, and log_files.
+    """
+    cfg = _load_config(config)
+    return {
+        "mode": cfg.mode.value,
+        "profiles": list_profiles(),
+        "audit_enabled": cfg.audit_enabled,
+        "log_files": list_log_files(),
+    }
+
+
+def shield_pre_start(
+    container: str,
+    profiles: list[str] | None = None,
+    *,
+    config: ShieldConfig | None = None,
+) -> list[str]:
+    """Prepare shield for container start.
+
+    Returns extra podman args (including network args).
+
+    Args:
+        container: Container name.
+        profiles: Profile names (defaults to config.default_profiles).
+        config: Shield configuration (loads default if None).
+
+    Returns:
+        Extra arguments for ``podman run``.
+    """
+    cfg = _load_config(config)
+    if profiles is None:
+        profiles = list(cfg.default_profiles)
+
+    log_event(container, "setup", detail=f"profiles={','.join(profiles)}")
+
+    if cfg.mode == ShieldMode.HARDENED:
+        from . import hardened
+
+        return hardened.pre_start(cfg, container, profiles)
+    else:
+        from . import standard
+
+        return standard.pre_start(cfg, container, profiles)
+
+
+def shield_post_start(
+    container: str,
+    profiles: list[str] | None = None,
+    *,
+    config: ShieldConfig | None = None,
+) -> None:
+    """Post-start hook.  Only needed for hardened mode.
+
+    Args:
+        container: Container name.
+        profiles: Profile names (defaults to config.default_profiles).
+        config: Shield configuration (loads default if None).
+    """
+    cfg = _load_config(config)
+    if cfg.mode != ShieldMode.HARDENED:
+        return
+
+    if profiles is None:
+        profiles = list(cfg.default_profiles)
+
+    from . import hardened
+
+    hardened.post_start(cfg, container, profiles)
+    log_event(container, "setup", detail="hardened post_start complete")
+
+
+def shield_pre_stop(
+    container: str,
+    *,
+    config: ShieldConfig | None = None,
+) -> None:
+    """Pre-stop hook.  Only needed for hardened mode.
+
+    Args:
+        container: Container name.
+        config: Shield configuration (loads default if None).
+    """
+    cfg = _load_config(config)
+    if cfg.mode != ShieldMode.HARDENED:
+        return
+
+    from . import hardened
+
+    hardened.pre_stop(container)
+    log_event(container, "teardown")
+
+
+def shield_allow(
+    container: str,
+    target: str,
+    *,
+    config: ShieldConfig | None = None,
+) -> list[str]:
+    """Live-allow a domain or IP for a running container.
+
+    If *target* is a domain, resolves it first.
+
+    Args:
+        container: Container name or ID.
+        target: Domain name or IPv4 address/CIDR.
+        config: Shield configuration (loads default if None).
+
+    Returns:
+        List of IPs that were allowed.
+    """
+    cfg = _load_config(config)
+    ips = [target] if _is_ip(target) else dig(target)
+
+    if cfg.mode == ShieldMode.HARDENED:
+        from . import hardened
+
+        for ip in ips:
+            hardened.allow_ip(container, ip)
+    else:
+        from . import standard
+
+        for ip in ips:
+            standard.allow_ip(container, ip)
+
+    for ip in ips:
+        log_event(container, "allowed", dest=ip, detail=f"target={target}")
+    return ips
+
+
+def shield_deny(
+    container: str,
+    target: str,
+    *,
+    config: ShieldConfig | None = None,
+) -> list[str]:
+    """Live-deny a domain or IP for a running container.
+
+    If *target* is a domain, resolves it first.  Failures to remove
+    individual IPs are silently ignored (best-effort).
+
+    Args:
+        container: Container name or ID.
+        target: Domain name or IPv4 address/CIDR.
+        config: Shield configuration (loads default if None).
+
+    Returns:
+        List of IPs that were denied.
+    """
+    cfg = _load_config(config)
+    ips = [target] if _is_ip(target) else dig(target)
+
+    if cfg.mode == ShieldMode.HARDENED:
+        from . import hardened
+
+        for ip in ips:
+            try:
+                hardened.deny_ip(container, ip)
+            except Exception:
+                pass
+    else:
+        from . import standard
+
+        for ip in ips:
+            try:
+                standard.deny_ip(container, ip)
+            except Exception:
+                pass
+
+    for ip in ips:
+        log_event(container, "denied", dest=ip, detail=f"target={target}")
+    return ips
+
+
+def shield_rules(
+    container: str,
+    *,
+    config: ShieldConfig | None = None,
+) -> str:
+    """Return current nft rules for a container.
+
+    Args:
+        container: Container name or ID.
+        config: Shield configuration (loads default if None).
+
+    Returns:
+        The nft ruleset/set output.
+    """
+    cfg = _load_config(config)
+    if cfg.mode == ShieldMode.HARDENED:
+        from . import hardened
+
+        return hardened.list_rules(container)
+    else:
+        from . import standard
+
+        return standard.list_rules(container)
+
+
+def shield_resolve(
+    container: str,
+    profiles: list[str] | None = None,
+    *,
+    config: ShieldConfig | None = None,
+    force: bool = False,
+) -> list[str]:
+    """Resolve DNS profiles and cache the results.
+
+    Args:
+        container: Container name (cache key).
+        profiles: Profile names (defaults to config.default_profiles).
+        config: Shield configuration (loads default if None).
+        force: If True, bypass cache freshness and re-resolve.
+
+    Returns:
+        List of resolved IPs + raw IPs/CIDRs.
+    """
+    cfg = _load_config(config)
+    if profiles is None:
+        profiles = list(cfg.default_profiles)
+
+    entries = compose_profiles(profiles)
+    if not entries:
+        return []
+
+    max_age = 0 if force else 3600
+    return resolve_and_cache(entries, container, max_age=max_age)
+
+
+__all__ = [
+    "ShieldConfig",
+    "ShieldMode",
+    "list_log_files",
+    "list_profiles",
+    "load_shield_config",
+    "log_event",
+    "shield_allow",
+    "shield_deny",
+    "shield_post_start",
+    "shield_pre_start",
+    "shield_pre_stop",
+    "shield_resolve",
+    "shield_rules",
+    "shield_setup",
+    "shield_status",
+    "tail_log",
+]
