@@ -26,6 +26,7 @@ from ..testnet import (
     ALLOWED_TARGET_HTTPS,
     ALLOWED_TARGET_IPS,
     BLOCKED_TARGET_HTTP,
+    BLOCKED_TARGET_IP,
     GOOGLE_DNS_IP,
     IPV6_CLOUDFLARE,
     IPV6_GOOGLE,
@@ -168,6 +169,48 @@ class TestFirewallBlocking:
         assert allow_pos != -1, "allow_v4 set must be present"
         assert rfc_pos != -1, "RFC1918 reject rules must be present"
         assert allow_pos < rfc_pos, "Allow set must precede RFC1918 reject rules"
+
+
+# ── ICMP error detection via shield_probe ─────────────
+
+
+@pytest.mark.integration
+@podman_missing
+@nft_missing
+@pytest.mark.usefixtures("nft_in_netns")
+class TestShieldProbe:
+    """Verify shield_probe detects the exact ICMP admin-prohibited code."""
+
+    def _run_probe(self, container: str, host: str, port: int = 443, timeout: int = 15) -> dict:
+        """Run shield_probe.py inside the container and return parsed JSON."""
+        r = _exec(
+            container, "python3", "/usr/local/bin/shield_probe.py", host, str(port), timeout=timeout
+        )
+        assert r.returncode == 0, f"shield_probe failed: {r.stderr}"
+        return json.loads(r.stdout)
+
+    def test_admin_prohibited_detected(self, probe_container: str) -> None:
+        """Blocked traffic reports ICMP type 3, code 13 (admin-prohibited)."""
+        # Apply the standard-mode firewall.
+        pid = subprocess.run(
+            ["podman", "inspect", "--format", "{{.State.Pid}}", probe_container],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        r = nsenter_nft(pid, stdin=standard_ruleset())
+        assert r.returncode == 0, f"Ruleset apply failed: {r.stderr}"
+
+        result = self._run_probe(probe_container, BLOCKED_TARGET_IP)
+        assert result["result"] == "icmp-error", f"Expected icmp-error, got: {result}"
+        assert result["icmp_type"] == 3, f"Expected ICMP type 3, got: {result}"
+        assert result["icmp_code"] == 13, f"Expected ICMP code 13, got: {result}"
+        assert result["icmp_code_name"] == "admin-prohibited"
+
+    def test_allowed_ip_is_open(self, probe_container: str) -> None:
+        """Without a firewall, probe reports open/timeout (not icmp-error)."""
+        result = self._run_probe(probe_container, ALLOWED_TARGET_IPS[0], port=53)
+        assert result["result"] != "icmp-error", f"Unexpected ICMP error: {result}"
 
 
 # ── Firewall enforcement: allowing ──────────────────────
