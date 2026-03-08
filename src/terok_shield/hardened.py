@@ -153,7 +153,7 @@ def post_start(
     IPs, and adds a forward rule.
 
     Args:
-        config: Shield configuration.
+        _config: Shield configuration (unused, kept for API consistency).
         container: Container name.
         profiles: Profile names (for dnsmasq nftset generation).
     """
