@@ -127,7 +127,13 @@ class TestFirewallBlocking:
         post = _wget(container, BLOCKED_TARGET_HTTP, timeout=5)
         assert post.returncode != 0
         stderr_lower = post.stderr.lower()
-        reject_phrases = ("network unreachable", "prohibited", "refused", "network error")
+        reject_phrases = (
+            "network unreachable",
+            "host is unreachable",
+            "prohibited",
+            "refused",
+            "network error",
+        )
         assert any(phrase in stderr_lower for phrase in reject_phrases), (
             f"Expected ICMP reject indication in stderr, got: {post.stderr!r}"
         )
