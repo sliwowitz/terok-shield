@@ -30,6 +30,11 @@ depends_on = [
     "terok_shield.nft_constants",
 ]
 
+# Shared utilities — standalone, no internal deps
+[[modules]]
+path = "terok_shield.util"
+depends_on = []
+
 # Subprocess helpers — standalone, no internal deps
 [[modules]]
 path = "terok_shield.run"
@@ -47,12 +52,13 @@ depends_on = [
     "terok_shield.config",
 ]
 
-# DNS resolution and caching — depends on config + run
+# DNS resolution and caching — depends on config + run + util
 [[modules]]
 path = "terok_shield.dns"
 depends_on = [
     "terok_shield.config",
     "terok_shield.run",
+    "terok_shield.util",
 ]
 
 # Profile loading — depends on config
@@ -93,6 +99,7 @@ depends_on = [
     "terok_shield.nft_constants",
     "terok_shield.profiles",
     "terok_shield.run",
+    "terok_shield.util",
 ]
 
 # CLI — depends on package root (public API)
@@ -113,4 +120,5 @@ depends_on = [
     "terok_shield.profiles",
     "terok_shield.run",
     "terok_shield.standard",
+    "terok_shield.util",
 ]

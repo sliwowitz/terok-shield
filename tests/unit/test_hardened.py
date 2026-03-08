@@ -309,6 +309,23 @@ class TestSafeDomain(unittest.TestCase):
         """Rejects empty strings."""
         self.assertFalse(_safe_domain(""))
 
+    def test_rejects_consecutive_dots(self):
+        """Rejects domains with consecutive dots."""
+        self.assertFalse(_safe_domain("exam..ple.com"))
+        self.assertFalse(_safe_domain("a..b"))
+
+    def test_single_label(self):
+        """Accepts single-label domains."""
+        self.assertTrue(_safe_domain("localhost"))
+
+    def test_rejects_leading_hyphen_in_label(self):
+        """Rejects labels starting with a hyphen."""
+        self.assertFalse(_safe_domain("-example.com"))
+
+    def test_rejects_trailing_hyphen_in_label(self):
+        """Rejects labels ending with a hyphen."""
+        self.assertFalse(_safe_domain("example-.com"))
+
 
 class TestUpdateDnsmasqNftsetsWarning(unittest.TestCase):
     """Test _update_dnsmasq_nftsets logs warnings for invalid domains."""

@@ -9,7 +9,6 @@ bridge and is filtered at the forward chain.  Requires both the bridge
 network and ``dnsmasq`` to be present on the host.
 """
 
-import ipaddress
 import logging
 import re
 
@@ -33,11 +32,14 @@ from .nft import (
 from .nft_constants import NFT_TABLE_NAME
 from .profiles import compose_profiles
 from .run import ExecError, nft_via_rootless_netns, podman_inspect, run as run_cmd
+from .util import is_ipv4
 
 logger = logging.getLogger(__name__)
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_SAFE_DOMAIN = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.?$")
+_SAFE_DOMAIN = re.compile(
+    r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\.?$"
+)
 
 
 def setup(_config: ShieldConfig) -> None:
@@ -301,14 +303,7 @@ def list_rules(container: str) -> str:
 
 def _is_ip_entry(entry: str) -> bool:
     """Return True if entry is an IPv4 address or CIDR."""
-    try:
-        if "/" in entry:
-            ipaddress.IPv4Network(entry, strict=False)
-        else:
-            ipaddress.IPv4Address(entry)
-        return True
-    except ValueError:
-        return False
+    return is_ipv4(entry)
 
 
 def _safe_domain(domain: str) -> bool:

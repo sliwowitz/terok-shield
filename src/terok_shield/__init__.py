@@ -6,8 +6,6 @@
 Public API for standalone use and integration with terok.
 """
 
-import ipaddress
-
 __version__ = "0.1.0"
 
 from .audit import list_log_files, log_event, tail_log
@@ -15,23 +13,12 @@ from .config import ShieldConfig, ShieldMode, load_shield_config
 from .dns import resolve_and_cache
 from .profiles import compose_profiles, list_profiles
 from .run import dig
+from .util import is_ipv4 as _is_ip
 
 
 def _load_config(config: ShieldConfig | None) -> ShieldConfig:
     """Return the given config or load the default."""
     return config if config is not None else load_shield_config()
-
-
-def _is_ip(value: str) -> bool:
-    """Return True if value is an IPv4 address or CIDR."""
-    try:
-        if "/" in value:
-            ipaddress.IPv4Network(value, strict=False)
-        else:
-            ipaddress.IPv4Address(value)
-        return True
-    except ValueError:
-        return False
 
 
 def shield_setup(*, config: ShieldConfig | None = None) -> None:
