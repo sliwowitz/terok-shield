@@ -47,14 +47,11 @@ def _exec(container: str, *cmd: str, timeout: int = 10) -> subprocess.CompletedP
     )
 
 
-def _wget(
-    container: str, url: str, timeout: int = 5, *, ipv4_only: bool = True
-) -> subprocess.CompletedProcess:
+def _wget(container: str, url: str, timeout: int = 5) -> subprocess.CompletedProcess:
     """Attempt an outbound HTTP/HTTPS request from inside a container."""
-    flags = ["-q", "--spider", f"--timeout={timeout}"]
-    if ipv4_only:
-        flags.insert(0, "-4")
-    return _exec(container, "wget", *flags, url, timeout=timeout + 5)
+    return _exec(
+        container, "wget", "-q", "--spider", f"--timeout={timeout}", url, timeout=timeout + 5
+    )
 
 
 # ── Firewall enforcement: blocking ──────────────────────
@@ -117,7 +114,7 @@ class TestFirewallBlocking:
         assert ping_g.returncode != 0, "IPv6 ping to Google should be blocked"
 
         # Functional: HTTP over IPv6 literal (must not force IPv4)
-        http6 = _wget(container, IPV6_HTTP_URL, timeout=5, ipv4_only=False)
+        http6 = _wget(container, IPV6_HTTP_URL, timeout=5)
         assert http6.returncode != 0, "HTTP over IPv6 should be blocked"
 
     def test_reject_returns_icmp_error(self, container: str, container_pid: str) -> None:
