@@ -9,7 +9,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from terok_shield.config import ANNOTATION_KEY, ANNOTATION_NAME_KEY
+from terok_shield.config import ANNOTATION_KEY, ANNOTATION_NAME_KEY, ShieldConfig
 from terok_shield.nft_constants import RFC1918
 from terok_shield.oci_hook import _parse_oci_state, _read_resolved_ips, apply_hook, hook_main
 from terok_shield.run import ExecError
@@ -393,12 +393,14 @@ class TestIpClassification(unittest.TestCase):
 class TestHookMain(unittest.TestCase):
     """Tests for hook_main entry point."""
 
+    @unittest.mock.patch("terok_shield.oci_hook.load_shield_config")
     @unittest.mock.patch("terok_shield.oci_hook.apply_hook")
-    def test_success(self, mock_apply: unittest.mock.Mock) -> None:
+    def test_success(self, mock_apply: unittest.mock.Mock, mock_cfg: unittest.mock.Mock) -> None:
         """Return 0 on success (hook mode createRuntime)."""
+        mock_cfg.return_value = ShieldConfig(loopback_ports=(1234,))
         rc = hook_main(_oci_state("test-ctr", 42))
         self.assertEqual(rc, 0)
-        mock_apply.assert_called_once_with("test-ctr", "42")
+        mock_apply.assert_called_once_with("test-ctr", "42", loopback_ports=(1234,))
 
     @unittest.mock.patch("terok_shield.oci_hook.apply_hook")
     def test_invalid_json(self, mock_apply: unittest.mock.Mock) -> None:
@@ -407,9 +409,13 @@ class TestHookMain(unittest.TestCase):
         self.assertEqual(rc, 1)
         mock_apply.assert_not_called()
 
+    @unittest.mock.patch("terok_shield.oci_hook.load_shield_config")
     @unittest.mock.patch("terok_shield.oci_hook.apply_hook", side_effect=RuntimeError("boom"))
-    def test_runtime_error(self, mock_apply: unittest.mock.Mock) -> None:
+    def test_runtime_error(
+        self, mock_apply: unittest.mock.Mock, mock_cfg: unittest.mock.Mock
+    ) -> None:
         """Return 1 on RuntimeError from apply_hook."""
+        mock_cfg.return_value = ShieldConfig()
         rc = hook_main(_oci_state())
         self.assertEqual(rc, 1)
 
