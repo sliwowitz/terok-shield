@@ -9,6 +9,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from terok_shield.config import ANNOTATION_KEY, ANNOTATION_NAME_KEY
 from terok_shield.nft_constants import RFC1918
 from terok_shield.oci_hook import _parse_oci_state, _read_resolved_ips, apply_hook, hook_main
 from terok_shield.run import ExecError
@@ -29,9 +30,16 @@ _VALID_LIST_OUTPUT = (
 )
 
 
-def _oci_state(cid: str = "abc123", pid: int = 42) -> str:
+def _oci_state(
+    cid: str = "abc123",
+    pid: int = 42,
+    annotations: dict[str, str] | None = None,
+) -> str:
     """Return a minimal OCI state JSON string."""
-    return json.dumps({"id": cid, "pid": pid})
+    state: dict = {"id": cid, "pid": pid}
+    if annotations is not None:
+        state["annotations"] = annotations
+    return json.dumps(state)
 
 
 class TestParseOciState(unittest.TestCase):
@@ -39,19 +47,34 @@ class TestParseOciState(unittest.TestCase):
 
     def test_valid_state(self) -> None:
         """Parse valid OCI state."""
-        cid, pid = _parse_oci_state(_oci_state("mycontainer", 1234))
+        cid, pid, annotations = _parse_oci_state(_oci_state("mycontainer", 1234))
         self.assertEqual(cid, "mycontainer")
         self.assertEqual(pid, "1234")
+        self.assertEqual(annotations, {})
+
+    def test_with_annotations(self) -> None:
+        """Parse state with annotations."""
+        ann = {ANNOTATION_KEY: "dev-standard", ANNOTATION_NAME_KEY: "my-ctr"}
+        cid, pid, annotations = _parse_oci_state(_oci_state("abc", 1, annotations=ann))
+        self.assertEqual(annotations[ANNOTATION_KEY], "dev-standard")
+        self.assertEqual(annotations[ANNOTATION_NAME_KEY], "my-ctr")
 
     def test_missing_id(self) -> None:
         """Raise ValueError for missing id."""
         with self.assertRaises(ValueError):
             _parse_oci_state(json.dumps({"pid": 42}))
 
-    def test_missing_pid(self) -> None:
-        """Raise ValueError for missing pid."""
-        with self.assertRaises(ValueError):
-            _parse_oci_state(json.dumps({"id": "abc"}))
+    def test_missing_pid_returns_empty(self) -> None:
+        """Return empty pid string when pid is absent (poststop)."""
+        cid, pid, _ = _parse_oci_state(json.dumps({"id": "abc"}))
+        self.assertEqual(cid, "abc")
+        self.assertEqual(pid, "")
+
+    def test_zero_pid_returns_empty(self) -> None:
+        """Return empty pid string when pid is zero (poststop)."""
+        cid, pid, _ = _parse_oci_state(json.dumps({"id": "abc", "pid": 0}))
+        self.assertEqual(cid, "abc")
+        self.assertEqual(pid, "")
 
     def test_invalid_json(self) -> None:
         """Raise ValueError for invalid JSON."""
@@ -68,6 +91,13 @@ class TestParseOciState(unittest.TestCase):
         for value in ["[]", '"string"', "123", "true"]:
             with self.assertRaises(ValueError, msg=f"Should reject: {value}"):
                 _parse_oci_state(value)
+
+    def test_non_dict_annotations_ignored(self) -> None:
+        """Non-dict annotations are treated as empty."""
+        _, _, annotations = _parse_oci_state(
+            json.dumps({"id": "abc", "pid": 1, "annotations": "not-a-dict"})
+        )
+        self.assertEqual(annotations, {})
 
 
 class TestReadResolvedIps(unittest.TestCase):
@@ -365,7 +395,7 @@ class TestHookMain(unittest.TestCase):
 
     @unittest.mock.patch("terok_shield.oci_hook.apply_hook")
     def test_success(self, mock_apply: unittest.mock.Mock) -> None:
-        """Return 0 on success."""
+        """Return 0 on success (hook mode createRuntime)."""
         rc = hook_main(_oci_state("test-ctr", 42))
         self.assertEqual(rc, 0)
         mock_apply.assert_called_once_with("test-ctr", "42")
@@ -382,3 +412,14 @@ class TestHookMain(unittest.TestCase):
         """Return 1 on RuntimeError from apply_hook."""
         rc = hook_main(_oci_state())
         self.assertEqual(rc, 1)
+
+    def test_hook_mode_requires_pid(self) -> None:
+        """Return 1 when hook mode state has no valid PID."""
+        rc = hook_main(json.dumps({"id": "abc", "pid": 0}))
+        self.assertEqual(rc, 1)
+
+    def test_poststop_noop(self) -> None:
+        """Poststop is a no-op returning 0."""
+        state = _oci_state(pid=0)
+        rc = hook_main(state, stage="poststop")
+        self.assertEqual(rc, 0)

@@ -22,34 +22,29 @@ def _load_config(config: ShieldConfig | None) -> ShieldConfig:
 
 
 def _mode_module(mode: ShieldMode):  # noqa: ANN202 – returns module
-    """Return the backend module for the given mode."""
-    if mode == ShieldMode.BRIDGE:
-        from . import mode_bridge
+    """Return the backend module for the given mode.
 
-        return mode_bridge
+    Currently only hook mode is supported.  Future modes will add
+    branches here.
+    """
+    if mode == ShieldMode.HOOK:
+        from . import mode_hook
 
-    from . import mode_hook
+        return mode_hook
 
-    return mode_hook
+    raise ValueError(f"Unsupported shield mode: {mode!r}")
 
 
 def shield_setup(*, config: ShieldConfig | None = None) -> None:
-    """Run shield setup (install hook or verify bridge).
+    """Run shield setup (install hook).
 
-    Dispatches to hook or bridge setup based on ``config.mode``.
+    Dispatches to the appropriate mode setup based on ``config.mode``.
 
     Args:
         config: Shield configuration (loads default if None).
     """
     cfg = _load_config(config)
-    if cfg.mode == ShieldMode.BRIDGE:
-        from . import mode_bridge
-
-        mode_bridge.setup(cfg)
-    else:
-        from . import mode_hook
-
-        mode_hook.setup(cfg)
+    _mode_module(cfg.mode).setup(cfg)
 
 
 def shield_status(*, config: ShieldConfig | None = None) -> dict:
@@ -92,67 +87,11 @@ def shield_pre_start(
     if profiles is None:
         profiles = list(cfg.default_profiles)
 
-    if cfg.mode == ShieldMode.BRIDGE:
-        from . import mode_bridge
-
-        result = mode_bridge.pre_start(cfg, container, profiles)
-    else:
-        from . import mode_hook
-
-        result = mode_hook.pre_start(cfg, container, profiles)
+    result = _mode_module(cfg.mode).pre_start(cfg, container, profiles)
 
     if cfg.audit_enabled:
         log_event(container, "setup", detail=f"profiles={','.join(profiles)}")
     return result
-
-
-def shield_post_start(
-    container: str,
-    profiles: list[str] | None = None,
-    *,
-    config: ShieldConfig | None = None,
-) -> None:
-    """Post-start hook.  Only needed for bridge mode.
-
-    Args:
-        container: Container name.
-        profiles: Profile names (defaults to config.default_profiles).
-        config: Shield configuration (loads default if None).
-    """
-    cfg = _load_config(config)
-    if cfg.mode != ShieldMode.BRIDGE:
-        return
-
-    if profiles is None:
-        profiles = list(cfg.default_profiles)
-
-    from . import mode_bridge
-
-    mode_bridge.post_start(cfg, container, profiles)
-    if cfg.audit_enabled:
-        log_event(container, "setup", detail="bridge post_start complete")
-
-
-def shield_pre_stop(
-    container: str,
-    *,
-    config: ShieldConfig | None = None,
-) -> None:
-    """Pre-stop hook.  Only needed for bridge mode.
-
-    Args:
-        container: Container name.
-        config: Shield configuration (loads default if None).
-    """
-    cfg = _load_config(config)
-    if cfg.mode != ShieldMode.BRIDGE:
-        return
-
-    from . import mode_bridge
-
-    mode_bridge.pre_stop(container)
-    if cfg.audit_enabled:
-        log_event(container, "teardown")
 
 
 def shield_allow(
@@ -284,9 +223,7 @@ __all__ = [
     "log_event",
     "shield_allow",
     "shield_deny",
-    "shield_post_start",
     "shield_pre_start",
-    "shield_pre_stop",
     "shield_resolve",
     "shield_rules",
     "shield_setup",
