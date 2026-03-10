@@ -43,7 +43,7 @@ class TestShieldConfig(unittest.TestCase):
         """Config is immutable."""
         cfg = ShieldConfig()
         with self.assertRaises(AttributeError):
-            cfg.mode = ShieldMode.HOOK  # type: ignore[misc]
+            cfg.mode = ShieldMode.BRIDGE  # type: ignore[misc]
 
 
 class TestPathHelpers(unittest.TestCase):
@@ -300,6 +300,42 @@ class TestAutoDetectMode(unittest.TestCase):
         from terok_shield.config import _auto_detect_mode
 
         self.assertEqual(_auto_detect_mode(), ShieldMode.HOOK)
+
+    @unittest.mock.patch(
+        "shutil.which",
+        side_effect=lambda n: {
+            "nft": "/usr/sbin/nft",
+            "dnsmasq": "/usr/sbin/dnsmasq",
+        }.get(n),
+    )
+    @unittest.mock.patch("subprocess.run")
+    def test_bridge_when_bridge_and_dnsmasq(
+        self, mock_run: unittest.mock.Mock, _which: unittest.mock.Mock
+    ) -> None:
+        """Return BRIDGE with warning when podman bridge network exists and dnsmasq available."""
+        from terok_shield.config import _auto_detect_mode
+
+        mock_run.return_value = unittest.mock.Mock(returncode=0)
+        with self.assertWarns(UserWarning) as ctx:
+            self.assertEqual(_auto_detect_mode(), ShieldMode.BRIDGE)
+        self.assertIn("incomplete", str(ctx.warning))
+
+    @unittest.mock.patch(
+        "shutil.which",
+        side_effect=lambda n: {
+            "dnsmasq": "/usr/sbin/dnsmasq",
+        }.get(n),
+    )
+    @unittest.mock.patch("subprocess.run")
+    def test_bridge_without_nft_raises(
+        self, mock_run: unittest.mock.Mock, _which: unittest.mock.Mock
+    ) -> None:
+        """Raise RuntimeError when bridge network + dnsmasq exist but nft is missing."""
+        from terok_shield.config import _auto_detect_mode
+
+        mock_run.return_value = unittest.mock.Mock(returncode=0)
+        with self.assertRaises(RuntimeError):
+            _auto_detect_mode()
 
 
 class TestLoopbackPortsValidation(unittest.TestCase):

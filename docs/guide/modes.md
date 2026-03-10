@@ -1,7 +1,8 @@
 # Firewall Modes
 
-terok-shield uses **hook mode** — an OCI hook that applies nftables rules inside
-each container's own network namespace.
+terok-shield supports two operating modes. Both enforce the same default-deny
+policy — they differ in where the nftables rules are applied and how traffic
+flows.
 
 ## Hook mode
 
@@ -64,5 +65,100 @@ podman run \
   my-image
 ```
 
-!!! note "Future modes"
-    Additional modes for different network topologies may be added in the future.
+## Bridge mode
+
+Uses a dedicated bridge network (`ctr-egress`) with nftables rules applied in
+podman's rootless-netns. All container traffic traverses the bridge and is
+filtered centrally. Requires infrastructure (`ctr-egress` bridge + `dnsmasq`).
+
+```text
+┌─────────────────────────────────────────────────┐
+│ rootless-netns                                  │
+│                                                 │
+│  ┌───────────────────────────────────────────┐  │
+│  │ nftables (forward chain)                 │  │
+│  │ policy: DROP                             │  │
+│  │ per-container allow sets + forward rules │  │
+│  └───────────────────────────────────────────┘  │
+│              │                                  │
+│     ┌────────┴────────┐                         │
+│     │  ctr-egress     │  (bridge network)       │
+│     │  10.91.0.0/24   │                         │
+│     └────┬───────┬────┘                         │
+│          │       │                              │
+│    ┌─────┘       └─────┐                        │
+│    ▼                   ▼                        │
+│ Container A       Container B                   │
+└─────────────────────────────────────────────────┘
+```
+
+### How it works
+
+1. A named bridge network (`ctr-egress`, subnet `10.91.0.0/24`) is created
+   with dnsmasq providing DNS
+2. Containers are started on this bridge network instead of the default pasta/slirp
+3. nftables rules in the rootless-netns forward chain filter all traffic passing
+   through the bridge
+4. Each container gets its own allow set and forward rules, managed via the
+   Python API lifecycle hooks
+
+### Chain evaluation order
+
+```text
+IPv6 drop → established → DNS → gate → allow_v4 → RFC1918 reject → ICMP → intra-bridge → deny all
+```
+
+### When to use
+
+- Multiple containers that share a controlled network
+- When you want centralized firewall management
+- Rules live outside the container's namespace entirely
+
+### Prerequisites
+
+- `nft` binary
+- `dnsmasq` for bridge DNS
+- The bridge network must exist before setup:
+
+```bash
+podman network create --subnet 10.91.0.0/24 --gateway 10.91.0.1 ctr-egress
+```
+
+### Setup
+
+```bash
+terok-shield setup --bridge
+```
+
+### Running containers (via Python API)
+
+Bridge mode is typically used via the Python API rather than the CLI, because
+it requires lifecycle hooks around `podman run`:
+
+```python
+from terok_shield import shield_pre_start, shield_post_start, shield_pre_stop
+
+# Before podman run — returns args like ["--network", "ctr-egress", "--dns", "10.91.0.1"]
+args = shield_pre_start("my-container", ["dev-standard"])
+
+# Start container with the returned args
+# podman run <args> my-image
+
+# After container starts — creates per-container rules in rootless-netns
+shield_post_start("my-container", ["dev-standard"])
+
+# Before stopping — cleans up per-container rules
+shield_pre_stop("my-container")
+```
+
+## Comparison
+
+| | Hook | Bridge |
+|--|------|--------|
+| **Network** | pasta/slirp (default) | Named bridge (`ctr-egress`) |
+| **Firewall location** | Container's netns | rootless-netns (shared) |
+| **Isolation** | Per-container | Centralized |
+| **Requirements** | `nft` | `nft` + `dnsmasq` + bridge |
+| **Setup** | `terok-shield setup` | Bridge creation + `terok-shield setup --bridge` |
+| **Container start** | Podman annotation + hooks-dir | Python API lifecycle hooks |
+| **Best for** | Simple deployments | Multi-container environments |

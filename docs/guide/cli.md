@@ -4,16 +4,19 @@ All commands are invoked as `terok-shield <command> [options]`.
 
 ## setup
 
-Install the firewall hook.
+Install the firewall hook (hook mode) or verify bridge prerequisites
+(bridge mode).
 
 ```bash
-terok-shield setup
+terok-shield setup              # hook mode — installs OCI hook
+terok-shield setup --bridge     # bridge mode — verifies bridge network
 ```
 
 **What it does:**
 
 - Creates shield directories (`hooks/`, `logs/`, `dns/`, `resolved/`, `profiles/`)
-- Generates the OCI hook entrypoint script and JSON descriptor
+- **Hook**: generates the OCI hook entrypoint script and JSON descriptor
+- **Bridge**: verifies that the `ctr-egress` bridge network exists
 
 Run this once after installation.
 

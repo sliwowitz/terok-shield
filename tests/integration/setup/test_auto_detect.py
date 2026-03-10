@@ -21,6 +21,6 @@ class TestAutoDetect:
         assert isinstance(mode, ShieldMode)
 
     def test_at_least_hook_with_nft(self, nft_in_netns: None) -> None:
-        """If nft works in a container netns, auto-detect returns HOOK."""
+        """If nft works in a container netns, auto-detect returns at least HOOK."""
         mode = _auto_detect_mode()
-        assert mode == ShieldMode.HOOK
+        assert mode in (ShieldMode.HOOK, ShieldMode.BRIDGE)

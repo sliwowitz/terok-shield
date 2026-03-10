@@ -147,3 +147,9 @@ make test-map               # generate integration test map (Markdown)
 - **Minimal changes**: Make surgical, focused changes
 - **Existing tests**: Never remove or modify unrelated tests
 - **Dependencies**: Use Poetry; the only runtime dependency is PyYAML
+
+## Branch Note: `feature/bridge-mode`
+
+This branch re-introduces bridge mode as an alternative to the OCI hook mode on master.
+It is periodically rebased on master and is not yet ready for merge. See `mode_bridge.py`
+for the implementation. The original bridge mode was removed in commit `7d7f275`.

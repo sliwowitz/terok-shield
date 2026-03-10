@@ -18,13 +18,14 @@ destinations — everything else is rejected with an ICMP error.
 - **Audit logging** — JSON-lines lifecycle logs + kernel-level per-packet nftables logs
 - **Live allow/deny** — add or remove IPs at runtime without restarting the container
 
-### Hook mode
+### Two operating modes
 
-Uses an OCI hook to apply per-container nftables rules inside each container's
-network namespace. Works with pasta/slirp (rootless default). Only requires the
-`nft` binary.
+| Mode | Network | Firewall scope | Requirements |
+|------|---------|----------------|--------------|
+| **Hook** | pasta/slirp (rootless default) | Per-container netns via OCI hook | `nft` binary |
+| **Bridge** | Named bridge (`ctr-egress`) | rootless-netns (shared) | `nft` + `dnsmasq` + bridge network |
 
-See [Firewall Modes](guide/modes.md) for details.
+See [Firewall Modes](guide/modes.md) for details on when to use each.
 
 ## Quick start
 
@@ -80,6 +81,6 @@ terok-shield logs --container my-container -n 10   # recent audit log
 - [Getting Started](guide/getting_started.md) — full setup walkthrough
 - [Allowlist Profiles](guide/profiles.md) — bundled profiles and custom allowlists
 - [CLI Reference](guide/cli.md) — all commands and options
-- [Firewall Modes](guide/modes.md) — hook mode details
+- [Firewall Modes](guide/modes.md) — hook vs. bridge
 - [Configuration](guide/configuration.md) — config file, paths, caching
 - [Audit Logging](guide/logging.md) — log format and inspection

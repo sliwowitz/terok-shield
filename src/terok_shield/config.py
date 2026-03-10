@@ -5,25 +5,28 @@
 
 import enum
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 from .nft_constants import (
+    BRIDGE_GATEWAY as BRIDGE_GATEWAY,  # noqa: F401
+    BRIDGE_SUBNET as BRIDGE_SUBNET,  # noqa: F401
     PASTA_DNS as PASTA_DNS,  # noqa: F401
 )
 
+BRIDGE_NETWORK = "ctr-egress"
+
 ANNOTATION_KEY = "terok.shield.profiles"
 ANNOTATION_NAME_KEY = "terok.shield.name"
+ANNOTATION_MODE_KEY = "terok.shield.mode"
 
 
 class ShieldMode(enum.Enum):
-    """Operating mode for the shield firewall.
-
-    Currently only HOOK is supported.  Future modes (e.g. bridge)
-    will add members here.
-    """
+    """Operating mode for the shield firewall."""
 
     HOOK = "hook"
+    BRIDGE = "bridge"
 
 
 @dataclass(frozen=True)
@@ -141,10 +144,11 @@ def load_shield_config() -> ShieldConfig:
     mode_str = section.get("mode", "auto")
     if mode_str == "auto":
         mode = _auto_detect_mode()
-    elif mode_str == "hook":
-        mode = ShieldMode.HOOK
     else:
-        raise ValueError(f"Unknown shield mode: {mode_str!r}")
+        try:
+            mode = ShieldMode(mode_str)
+        except ValueError:
+            raise ValueError(f"Unknown shield mode: {mode_str!r}") from None
 
     raw_profiles = section.get("default_profiles", ["dev-standard"])
     if not isinstance(raw_profiles, list):
@@ -197,15 +201,39 @@ def _parse_loopback_ports(raw: object) -> tuple[int, ...]:
 def _auto_detect_mode() -> ShieldMode:
     """Auto-detect the best available shield mode.
 
-    Currently only hook mode is supported.  Future modes (e.g. bridge)
-    will add detection logic here.
+    Checks for bridge mode prerequisites (podman bridge network + dnsmasq),
+    falls back to hook mode (nft binary).
 
     Raises:
         RuntimeError: If no supported shield mode is available.
     """
     import shutil
+    import subprocess
 
+    # Check for bridge mode prerequisites (bridge network + dnsmasq + nft)
+    try:
+        subprocess.run(
+            ["podman", "network", "exists", BRIDGE_NETWORK],
+            check=True,
+            capture_output=True,
+        )
+        if shutil.which("dnsmasq") and shutil.which("nft"):
+            warnings.warn(
+                "Bridge mode detected but support is incomplete — "
+                "manual network/dnsmasq setup is required. "
+                "See https://github.com/terok-ai/terok-shield/issues/43 "
+                "Set mode: hook in config.yml to silence this warning.",
+                stacklevel=2,
+            )
+            return ShieldMode.BRIDGE
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # Hook mode requires OCI hook support (nft binary)
     if shutil.which("nft"):
         return ShieldMode.HOOK
 
-    raise RuntimeError("No supported shield mode available. Install nft for hook mode.")
+    raise RuntimeError(
+        "No supported shield mode available. "
+        "Install nft (hook mode) or set up a podman bridge network with dnsmasq (bridge mode)."
+    )
