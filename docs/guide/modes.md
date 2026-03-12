@@ -16,7 +16,7 @@ own network namespace.
 │  │ nftables (applied by OCI hook)    │  │
 │  │ policy: DROP                      │  │
 │  │ allow: DNS, lo, @allow_v4/v6      │  │
-│  │ reject: RFC1918, v6-private       │  │
+│  │ reject: RFC1918, RFC4193           │  │
 │  └────────────────────────────────────┘  │
 │                                          │
 │  Workload (CAP_NET_ADMIN dropped)        │
@@ -25,19 +25,20 @@ own network namespace.
 
 ### How it works
 
-1. `terok-shield setup` installs an OCI hook — a JSON descriptor and shell
-   script in `~/.local/state/terok-shield/hooks/`
+1. `Shield.pre_start()` installs hooks into the container's state directory,
+   resolves DNS to `profile.allowed`, and returns podman args with OCI
+   annotations (`state_dir`, `loopback_ports`, `version`)
 2. When podman creates a container with the `terok.shield.profiles` annotation,
    it fires the hook at the `createRuntime` stage
-3. The hook reads the container's PID, enters its network namespace via
-   `nsenter`, and applies nftables rules
+3. The hook reads `state_dir` from annotations, enters the container's network
+   namespace via `nsenter`, and applies nftables rules
 4. The workload starts with `CAP_NET_ADMIN` and `CAP_NET_RAW` dropped, so it
    cannot modify the rules
 
 ### Chain evaluation order
 
 ```text
-loopback → established → DNS → loopback ports → allow_v4/v6 → RFC1918 reject → v6-private reject → deny all
+loopback → established → DNS → loopback ports → allow_v4/v6 → private-range reject (RFC1918 + RFC4193) → deny all
 ```
 
 ### When to use
@@ -46,19 +47,39 @@ loopback → established → DNS → loopback ports → allow_v4/v6 → RFC1918 
 - When you want per-container isolation (each container has its own firewall)
 - Simplest setup — just needs `nft` binary
 
-### Setup
+### Per-container state bundle
 
-```bash
-terok-shield setup
+Each container's hooks and state are isolated in its own directory:
+
+```text
+{state_dir}/
+├── hooks/                                  # OCI hook descriptors
+├── terok-shield-hook                       # Hook entrypoint script
+├── profile.allowed                         # IPs from DNS resolution
+├── live.allowed                            # IPs from allow/deny
+└── audit.jsonl                             # Per-container audit log
 ```
 
 ### Running containers
+
+Via the Python API (recommended — this is how terok uses it):
+
+```python
+from terok_shield import Shield, ShieldConfig
+shield = Shield(ShieldConfig(state_dir=Path("~/.local/state/terok-shield/containers/my-ctr")))
+extra_args = shield.pre_start("my-ctr", ["dev-standard"])
+# pass extra_args to podman run
+```
+
+Or manually with the CLI-provided annotations:
 
 ```bash
 podman run \
   --name my-container \
   --annotation terok.shield.profiles=dev-standard \
-  --hooks-dir ~/.local/state/terok-shield/hooks \
+  --annotation terok.shield.state_dir=$HOME/.local/state/terok-shield/containers/my-container \
+  --annotation terok.shield.version=1 \
+  --hooks-dir ~/.local/state/terok-shield/containers/my-container/hooks \
   --cap-drop NET_ADMIN --cap-drop NET_RAW \
   --security-opt no-new-privileges \
   my-image

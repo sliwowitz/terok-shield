@@ -67,8 +67,8 @@ Environment requirements are expressed via pytest markers:
 | `needs_podman` | podman + nft (+ internet) | No |
 
 Directories group tests by what they test: `setup/`, `launch/`, `blocking/`,
-`allow_deny/`, `dns/`, `observability/`, `safety/`, `cli/`. See the
-[Integration Test Map](test_map.md) for a full listing.
+`allow_deny/`, `dns/`, `bypass/`, `observability/`, `safety/`, `cli/`. See
+the [Integration Test Map](test_map.md) for a full listing.
 
 Skip guards (`podman_missing`, `nft_missing`, `dig_missing`) handle
 graceful degradation when binaries are absent.
@@ -79,8 +79,9 @@ Tests** workflow (`workflow_dispatch`).
 
 ### Network access
 
-Integration tests in `network/` and `podman/` make outbound connections to
-public DNS services (Cloudflare, Google). All targets are defined in
+Integration tests marked `needs_internet` or `needs_podman` make outbound
+connections to public DNS services (Cloudflare, Google). All targets are
+defined in
 [`tests/testnet.py`](https://github.com/terok-ai/terok-shield/blob/master/tests/testnet.py).
 No private or authenticated endpoints are contacted.
 

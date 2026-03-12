@@ -88,7 +88,7 @@ make spdx NAME="Real Human Name" FILES="src/terok_shield/new_file.py"  # Add SPD
 `nft.py` is the auditable security boundary:
 - **Only stdlib + `nft_constants.py` imports** (`ipaddress`, `re`, `textwrap`, and the literals-only `nft_constants`)
 - All inputs validated (`safe_ip()`, `safe_name()`) before string interpolation
-- Allowlisting RFC1918 addresses or large CIDRs generates a notice in the audit log
+- Allowlisting private-range addresses (RFC 1918/RFC 4193) or large CIDRs generates a notice in the audit log
 - Enforced by AST import isolation test + bandit SAST
 
 ## Module Boundaries (tach)
@@ -117,7 +117,7 @@ Integration tests live in `tests/integration/` and are organized by **workflow/f
 |-----------|--------------|
 | `setup/` | Hook install, config paths, profiles, auto-detect |
 | `launch/` | pre_start, apply_hook, hook_main, nft apply |
-| `blocking/` | Default-deny, IPv6 drop, RFC1918, ICMP probe |
+| `blocking/` | Default-deny, IPv6 drop, private-range reject, ICMP probe |
 | `allow_deny/` | shield_allow/deny, CLI allow/deny, nft elements |
 | `dns/` | resolve, caching, force-refresh, profile→DNS pipeline |
 | `bypass/` | shield down/up, state detection, bypass traffic, lifecycle E2E |
@@ -141,6 +141,51 @@ make test-map               # generate integration test map (Markdown)
 - `tests/integration/conftest.py` provides all shared fixtures: `container`, `container_pid`, `nft_in_netns`, `shielded_container`, `shield_env`, `nsenter_nft()`
 - `tests/integration/helpers.py` provides assertion helpers: `assert_blocked`, `assert_reachable`, `assert_ruleset_applied`, `exec_in_container`, `wget`
 - nft commands run inside the container's network namespace via `podman unshare nsenter -t PID -n nft` (not the host netns — rootless nft only has `CAP_NET_ADMIN` inside container-owned namespaces)
+
+## Architecture
+
+The library is a pure function of its inputs. Given a `ShieldConfig` with `state_dir`, it writes to that directory and nowhere else. No env-var reading, no config-file parsing inside the library.
+
+### Core types
+
+- **`ShieldConfig`** (frozen dataclass) — per-container configuration with required `state_dir: Path`
+- **`Shield`** (facade) — public API; delegates to collaborators injected via constructor
+- **`HookMode`** (strategy) — nft-based hook mode implementation of `ShieldModeBackend` protocol
+- **`HookExecutor`** (command) — applies nft ruleset inside a container's netns
+- **`AuditLogger`** — writes JSONL audit events to a single file
+- **`DnsResolver`** — stateless DNS resolution; takes explicit `cache_path` parameter
+- **`ProfileLoader`** — loads `.txt` allowlists from bundled + user directories
+- **`RulesetBuilder`** — generates and verifies nft rulesets
+
+### Per-container state bundle
+
+Each container gets an isolated `state_dir` with this layout:
+
+```text
+{state_dir}/
+├── hooks/
+│   ├── terok-shield-createRuntime.json
+│   └── terok-shield-poststop.json
+├── terok-shield-hook              # entrypoint script
+├── profile.allowed                # IPs from DNS resolution
+├── live.allowed                   # IPs from allow/deny
+└── audit.jsonl                    # per-container audit log
+```
+
+Path functions in `state.py` derive all paths from `state_dir`. `BUNDLE_VERSION` in `state.py` provides a cross-process contract between `pre_start()` and the OCI hook.
+
+### Data flow
+
+1. **CLI / terok** constructs `ShieldConfig(state_dir=...)` and creates `Shield(config)`
+2. **`Shield.pre_start()`** installs hooks, resolves DNS → writes `profile.allowed`, sets OCI annotations (`state_dir`, `loopback_ports`, `version`), returns podman args
+3. **OCI hook** (`hook_main()`) reads annotations, constructs `HookExecutor(state_dir=...)`, reads `profile.allowed` + `live.allowed`, applies nft ruleset
+4. **`Shield.allow()` / `deny()`** modify nft sets immediately + persist to `live.allowed`
+5. **`Shield.up()`** re-applies ruleset, restoring IPs from both allowlist files
+
+### Configuration layer separation
+
+- **Library** (`config.py`): Pure data definitions — `ShieldConfig`, `ShieldMode`, `ShieldState`, `ShieldModeBackend` protocol, annotation constants
+- **CLI** (`cli.py`): Config construction — reads `config.yml`, env vars, XDG paths; builds `ShieldConfig` for each command
 
 ## Key Guidelines
 

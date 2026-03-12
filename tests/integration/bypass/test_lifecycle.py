@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from terok_shield import Shield, ShieldConfig, ShieldState
+from terok_shield import Shield, ShieldConfig, ShieldState, state
 from tests.testnet import (
     ALLOWED_TARGET_HTTP,
     ALLOWED_TARGET_IPS,
@@ -24,11 +24,13 @@ from tests.testnet import (
 )
 
 from ..conftest import CTR_PREFIX, IMAGE, nft_missing, podman_missing
-from ..helpers import assert_blocked, assert_connectable, assert_reachable, start_shielded_container
-
-
-def _shield() -> Shield:
-    return Shield(ShieldConfig())
+from ..helpers import (
+    assert_blocked,
+    assert_connectable,
+    assert_reachable,
+    disposable_shield as _shield,
+    start_shielded_container,
+)
 
 
 @pytest.mark.needs_podman
@@ -149,24 +151,24 @@ class TestBypassModeSwitch:
 class TestBypassWithAllowDeny:
     """Verify allow/deny interactions during bypass."""
 
-    def test_allow_during_bypass_does_not_persist(self, shielded_container: str) -> None:
-        """IPs added via allow during bypass are lost on shield.up().
+    def test_allow_during_bypass_persists_via_live_allowed(self, shielded_container: str) -> None:
+        """IPs added via allow during bypass survive shield.up() via live.allowed.
 
-        shield.up() atomically replaces the ruleset, so any runtime
-        allow() calls during bypass do not survive the transition.
-        Only cached IPs from the .resolved file are re-added.
+        allow_ip() persists IPs to live.allowed, and shield.up() reads
+        them back via state.read_allowed_ips(). The IP survives the
+        transition even though the nft ruleset is atomically replaced.
         """
         shield = _shield()
         shield.down(shielded_container)
 
-        # Add IP to allow set during bypass
+        # Add IP to allow set during bypass — persists to live.allowed
         shield.allow(shielded_container, BLOCKED_TARGET_IP)
 
-        # Restore shield — the runtime add is lost
+        # Restore shield — the IP is re-added from live.allowed
         shield.up(shielded_container)
 
-        # Verify the IP is not allowed
-        assert_blocked(shielded_container, BLOCKED_TARGET_HTTP)
+        # Verify the IP is still allowed
+        assert_connectable(shielded_container, BLOCKED_TARGET_IP, BLOCKED_TARGET_DNS_PORT)
 
     def test_deny_during_bypass_has_no_traffic_effect(self, shielded_container: str) -> None:
         """Denying during bypass doesn't block traffic (policy is accept).
@@ -191,15 +193,15 @@ class TestBypassIPRestoration:
     """Verify cached IPs are restored when going back up."""
 
     def test_cached_ips_restored_on_shield_up(self, shield_env: Path, _pull_image: None) -> None:
-        """Pre-resolved IPs from .resolved cache are re-added on shield.up().
+        """Pre-resolved IPs from allowlist files are re-added on shield.up().
 
-        Full lifecycle: setup -> pre_start (populates cache) -> run ->
+        Full lifecycle: pre_start (populates cache) -> run ->
         allow -> verify reachable -> down -> up -> verify still reachable.
         """
-        shield = Shield(ShieldConfig())
-        shield.setup()
-
         name = f"{CTR_PREFIX}-bypass-cache-{os.getpid()}-{os.urandom(4).hex()}"
+        sd = shield_env / "containers" / name
+        shield = Shield(ShieldConfig(state_dir=sd))
+
         subprocess.run(["podman", "rm", "-f", name], capture_output=True)
 
         try:
@@ -211,10 +213,8 @@ class TestBypassIPRestoration:
                 shield.allow(name, ip)
             assert_reachable(name, ALLOWED_TARGET_HTTP)
 
-            # Write these IPs to the resolved cache (simulating DNS resolution)
-            resolved_dir = shield_env / "resolved"
-            resolved_dir.mkdir(parents=True, exist_ok=True)
-            (resolved_dir / f"{name}.resolved").write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
+            # Write these IPs to the profile.allowed (simulating DNS resolution)
+            state.profile_allowed_path(sd).write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
 
             # Go down (all traffic allowed regardless)
             shield.down(name)
@@ -237,13 +237,14 @@ class TestBypassIPRestoration:
 class TestBypassAuditTrail:
     """Verify audit log events for bypass operations."""
 
-    def test_down_up_audit_events(self, shielded_container: str) -> None:
+    def test_down_up_audit_events(self, shielded_container: str, shield_env: Path) -> None:
         """shield.down and shield.up produce audit log entries."""
-        shield = _shield()
+        sd = shield_env / "containers" / shielded_container
+        shield = Shield(ShieldConfig(state_dir=sd))
         shield.down(shielded_container)
         shield.up(shielded_container)
 
-        events = list(shield.tail_log(shielded_container))
+        events = list(shield.tail_log())
         actions = [e["action"] for e in events]
         assert "shield_down" in actions
         assert "shield_up" in actions
@@ -253,12 +254,13 @@ class TestBypassAuditTrail:
         up_idx = actions.index("shield_up")
         assert down_idx < up_idx
 
-    def test_down_all_logs_detail(self, shielded_container: str) -> None:
+    def test_down_all_logs_detail(self, shielded_container: str, shield_env: Path) -> None:
         """shield.down(allow_all=True) logs the allow_all detail."""
-        shield = _shield()
+        sd = shield_env / "containers" / shielded_container
+        shield = Shield(ShieldConfig(state_dir=sd))
         shield.down(shielded_container, allow_all=True)
 
-        events = list(shield.tail_log(shielded_container))
+        events = list(shield.tail_log())
         down_events = [e for e in events if e["action"] == "shield_down"]
         assert any(e.get("detail") == "allow_all=True" for e in down_events)
 
@@ -279,17 +281,17 @@ class TestBypassFullE2E:
     def test_discovery_workflow(self, shield_env: Path, _pull_image: None) -> None:
         """Complete traffic-discovery workflow as the user would execute it.
 
-        1. Setup and start shielded container
+        1. Start shielded container
         2. Allow known-good IPs, verify traffic works
         3. Down for discovery — all traffic flows
         4. Up — original IPs still work (from cache)
         5. Verify blocked target is blocked again
         6. Audit trail has the complete story
         """
-        shield = Shield(ShieldConfig())
-        shield.setup()
-
         name = f"{CTR_PREFIX}-bypass-e2e-{os.getpid()}-{os.urandom(4).hex()}"
+        sd = shield_env / "containers" / name
+        shield = Shield(ShieldConfig(state_dir=sd))
+
         subprocess.run(["podman", "rm", "-f", name], capture_output=True)
 
         try:
@@ -307,10 +309,8 @@ class TestBypassFullE2E:
             assert_reachable(name, ALLOWED_TARGET_HTTP)
             assert_blocked(name, BLOCKED_TARGET_HTTP)
 
-            # Persist to cache for restoration
-            resolved_dir = shield_env / "resolved"
-            resolved_dir.mkdir(parents=True, exist_ok=True)
-            (resolved_dir / f"{name}.resolved").write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
+            # Persist to profile.allowed for restoration
+            state.profile_allowed_path(sd).write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
 
             # Step 3: Down for discovery
             shield.down(name)
@@ -338,7 +338,7 @@ class TestBypassFullE2E:
             assert_blocked(name, BLOCKED_TARGET_HTTP)
 
             # Step 7: Verify audit trail tells the whole story
-            events = list(shield.tail_log(name))
+            events = list(shield.tail_log())
             actions = [e["action"] for e in events]
             assert "setup" in actions
             assert "allowed" in actions
@@ -379,13 +379,14 @@ class TestBypassFullE2E:
         assert "terok_shield" in rules
 
     def test_allow_before_and_after_bypass(self, shielded_container: str) -> None:
-        """IPs allowed before bypass, lost during bypass, can be re-allowed after.
+        """IPs allowed before bypass survive the bypass cycle via live.allowed.
 
-        Demonstrates that the state is clean after a bypass cycle:
-        the user can re-allow IPs just like on a fresh container.
+        allow_ip() persists IPs to live.allowed, and shield_up() reads
+        them back via state.read_allowed_ips(), so they survive the
+        down/up cycle without needing to re-allow.
         """
         shield = _shield()
-        # Allow before bypass
+        # Allow before bypass — persists to live.allowed
         for ip in ALLOWED_TARGET_IPS:
             shield.allow(shielded_container, ip)
         assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)
@@ -394,10 +395,5 @@ class TestBypassFullE2E:
         shield.down(shielded_container)
         shield.up(shielded_container)
 
-        # Without cache, the allowed IPs are gone (ruleset was replaced)
-        assert_blocked(shielded_container, ALLOWED_TARGET_HTTP)
-
-        # But we can re-allow them
-        for ip in ALLOWED_TARGET_IPS:
-            shield.allow(shielded_container, ip)
+        # IPs survive because live.allowed is read back by shield_up()
         assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)

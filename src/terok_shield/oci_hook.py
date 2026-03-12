@@ -23,11 +23,16 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import state
 from .audit import AuditLogger
-from .config import load_shield_config
+from .config import (
+    ANNOTATION_AUDIT_ENABLED_KEY,
+    ANNOTATION_LOOPBACK_PORTS_KEY,
+    ANNOTATION_STATE_DIR_KEY,
+    ANNOTATION_VERSION_KEY,
+)
 from .nft import RulesetBuilder
 from .run import ExecError, SubprocessRunner
-from .validation import SAFE_NAME
 
 if TYPE_CHECKING:
     from .run import CommandRunner
@@ -70,7 +75,7 @@ def _is_private_addr(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> boo
 def _classify_ips(ips: list[str]) -> tuple[list[str], list[str]]:
     """Classify IPs into private-range and broad-range lists for logging.
 
-    Handles both IPv4 (RFC1918/link-local) and IPv6 (ULA/link-local).
+    Handles both IPv4 (RFC 1918/RFC 3927) and IPv6 (RFC 4193/RFC 4291).
 
     Returns:
         Tuple of (private_ips, broad_cidrs). Does not affect which IPs
@@ -108,19 +113,39 @@ def _parse_oci_state(stdin_data: str) -> tuple[str, str, dict[str, str]]:
         ValueError: If the state is missing ``id`` or is not valid JSON.
     """
     try:
-        state = json.loads(stdin_data)
+        oci_state = json.loads(stdin_data)
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid OCI state JSON: {e}") from e
-    if not isinstance(state, dict):
-        raise ValueError(f"OCI state must be a JSON object: {state!r}")
-    cid = state.get("id")
+    if not isinstance(oci_state, dict):
+        raise ValueError(f"OCI state must be a JSON object: {oci_state!r}")
+    cid = oci_state.get("id")
     if not cid:
-        raise ValueError(f"OCI state missing id: {state!r}")
-    pid = state.get("pid", 0)
-    annotations = state.get("annotations", {})
+        raise ValueError(f"OCI state missing id: {oci_state!r}")
+    pid = oci_state.get("pid", 0)
+    annotations = oci_state.get("annotations", {})
     if not isinstance(annotations, dict):
         annotations = {}
+    # Normalize values to strings (OCI spec says string, but be defensive)
+    annotations = {str(k): str(v) for k, v in annotations.items()}
     return str(cid), str(pid) if pid else "", annotations
+
+
+def _parse_loopback_ports(raw: str) -> tuple[int, ...]:
+    """Parse comma-separated loopback ports from annotation value."""
+    if not raw:
+        return ()
+    ports: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            port = int(part)
+        except ValueError:
+            continue
+        if 1 <= port <= 65535:
+            ports.append(port)
+    return tuple(ports)
 
 
 # ── HookExecutor (Command) ──────────────────────────────
@@ -141,7 +166,7 @@ class HookExecutor:
         runner: CommandRunner,
         audit: AuditLogger,
         ruleset: RulesetBuilder,
-        resolved_dir: Path,
+        state_dir: Path,
     ) -> None:
         """Create a hook executor.
 
@@ -149,12 +174,12 @@ class HookExecutor:
             runner: Command runner for nft subprocess calls.
             audit: Audit logger for event logging.
             ruleset: Ruleset builder for generation and verification.
-            resolved_dir: Directory containing per-container ``.resolved`` files.
+            state_dir: Per-container state directory.
         """
         self._runner = runner
         self._audit = audit
         self._ruleset = ruleset
-        self._resolved_dir = resolved_dir
+        self._state_dir = state_dir
 
     def apply(self, container: str, pid: str) -> None:
         """Apply ruleset, load cached IPs, verify.  Fail-closed.
@@ -180,7 +205,7 @@ class HookExecutor:
     def _load_and_add_ips(self, container: str, pid: str) -> int:
         """Read cached IPs, classify, log, and add to the allow set."""
         try:
-            ips = self._read_resolved_ips(container)
+            ips = self._read_allowed_ips()
         except (OSError, UnicodeError) as e:
             self._audit.log_event(container, "error", detail=f"resolved cache read failed: {e}")
             raise RuntimeError(f"Failed to read resolved cache: {e}") from e
@@ -222,14 +247,9 @@ class HookExecutor:
             raise RuntimeError(f"Ruleset verification failed: {detail}")
         self._audit.log_event(container, "setup", detail="verification passed")
 
-    def _read_resolved_ips(self, container: str) -> list[str]:
-        """Read pre-resolved IPs for a container."""
-        if not SAFE_NAME.fullmatch(container):
-            return []
-        path = self._resolved_dir / f"{container}.resolved"
-        if not path.is_file():
-            return []
-        return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+    def _read_allowed_ips(self) -> list[str]:
+        """Read IPs from both profile.allowed and live.allowed, merged and deduplicated."""
+        return state.read_allowed_ips(self._state_dir)
 
     def _nft_exec(
         self,
@@ -267,8 +287,8 @@ class HookExecutor:
 def hook_main(stdin_data: str | None = None, stage: str = "createRuntime") -> int:
     """OCI hook entry point.
 
-    Reads OCI state from stdin, determines the firewall mode from
-    annotations, and dispatches to the appropriate handler.
+    Reads OCI state from stdin, extracts configuration from annotations,
+    and dispatches to the appropriate handler.
 
     Args:
         stdin_data: OCI state JSON (reads from stdin if None).
@@ -281,8 +301,7 @@ def hook_main(stdin_data: str | None = None, stage: str = "createRuntime") -> in
         stdin_data = sys.stdin.read()
 
     try:
-        # _annotations intentionally captured -- preserves mode-dispatch infrastructure
-        container_id, pid, _annotations = _parse_oci_state(stdin_data)
+        container_id, pid, annotations = _parse_oci_state(stdin_data)
     except ValueError as e:
         print(f"terok-shield hook: {e}", file=sys.stderr)
         return 1
@@ -294,15 +313,51 @@ def hook_main(stdin_data: str | None = None, stage: str = "createRuntime") -> in
         # createRuntime (default)
         if not pid:
             raise RuntimeError("Hook mode requires a valid PID in OCI state")
-        cfg = load_shield_config()
+
+        # Read config from annotations
+        state_dir_str = annotations.get(ANNOTATION_STATE_DIR_KEY)
+        if not state_dir_str:
+            raise RuntimeError(
+                f"Missing {ANNOTATION_STATE_DIR_KEY} annotation. "
+                "Container was not started with terok-shield pre_start()."
+            )
+        sd = Path(state_dir_str)
+        if not sd.is_absolute():
+            raise RuntimeError(
+                f"{ANNOTATION_STATE_DIR_KEY} must be an absolute path: {state_dir_str!r}"
+            )
+        sd = sd.resolve()
+
+        version_str = annotations.get(ANNOTATION_VERSION_KEY, "")
+        if not version_str:
+            raise RuntimeError(f"Missing {ANNOTATION_VERSION_KEY} annotation.")
+        try:
+            version = int(version_str)
+        except ValueError as e:
+            raise RuntimeError(
+                f"Invalid {ANNOTATION_VERSION_KEY} annotation: {version_str!r}"
+            ) from e
+        if version != state.BUNDLE_VERSION:
+            raise RuntimeError(
+                f"Bundle version mismatch: annotation={version}, "
+                f"expected={state.BUNDLE_VERSION}. Re-run pre_start()."
+            )
+
+        loopback_ports = _parse_loopback_ports(annotations.get(ANNOTATION_LOOPBACK_PORTS_KEY, ""))
+        raw_audit = annotations.get(ANNOTATION_AUDIT_ENABLED_KEY, "true").strip().lower()
+        audit_enabled = raw_audit not in ("false", "0")
+
         runner = SubprocessRunner()
-        audit = AuditLogger.from_config(cfg)
-        ruleset = RulesetBuilder(loopback_ports=cfg.loopback_ports)
+        audit = AuditLogger(
+            audit_path=state.audit_path(sd),
+            enabled=audit_enabled,
+        )
+        ruleset = RulesetBuilder(loopback_ports=loopback_ports)
         executor = HookExecutor(
             runner=runner,
             audit=audit,
             ruleset=ruleset,
-            resolved_dir=cfg.paths.resolved_dir,
+            state_dir=sd,
         )
         executor.apply(container_id, pid)
     except RuntimeError as e:
