@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from terok_shield.config import ShieldConfig, ShieldState
-from terok_shield.mode_hook import HookMode
+from terok_shield.config import ANNOTATION_KEY, ShieldConfig, ShieldState
+from terok_shield.mode_hook import HookMode, install_hooks
 from terok_shield.nft import bypass_ruleset, hook_ruleset
 from terok_shield.run import ExecError
 
@@ -69,15 +69,24 @@ class TestHookModeSetup(unittest.TestCase):
     """Test HookMode.setup()."""
 
     def test_installs_hooks(self) -> None:
-        """setup() calls install_hooks with config paths."""
-        config = ShieldConfig()
-        mode = _make_hook_mode(config=config)
-        with mock.patch("terok_shield.mode_hook.install_hooks") as mock_install:
-            mode.setup()
-            mock_install.assert_called_once_with(
-                hook_entrypoint=config.paths.hook_entrypoint,
-                hooks_dir=config.paths.hooks_dir,
-            )
+        """setup() calls ensure_dirs and install_hooks with config paths."""
+        with tempfile.TemporaryDirectory() as tmp:
+            from terok_shield.config import ShieldPaths
+
+            paths = ShieldPaths(state_root=Path(tmp) / "state", config_root=Path(tmp) / "cfg")
+            config = ShieldConfig(paths=paths)
+            mode = _make_hook_mode(config=config)
+            with mock.patch("terok_shield.mode_hook.install_hooks") as mock_install:
+                mode.setup()
+                mock_install.assert_called_once_with(
+                    hook_entrypoint=config.paths.hook_entrypoint,
+                    hooks_dir=config.paths.hooks_dir,
+                )
+            # ensure_dirs was called — check dirs only it creates (not install_hooks)
+            self.assertTrue(paths.state_root.is_dir())
+            self.assertTrue(paths.logs_dir.is_dir())
+            self.assertTrue(paths.resolved_dir.is_dir())
+            self.assertTrue(paths.profiles_dir.is_dir())
 
 
 class TestHookModePreStart(unittest.TestCase):
@@ -414,3 +423,33 @@ class TestHookModeDetectNetwork(unittest.TestCase):
         runner.run.return_value = "not json"
         mode = _make_hook_mode(runner=runner)
         self.assertEqual(mode._detect_rootless_network_mode(), "pasta")
+
+
+class TestInstallHooks(unittest.TestCase):
+    """Test install_hooks() writes entrypoint and hook JSON files."""
+
+    def test_creates_entrypoint_and_hook_jsons(self) -> None:
+        """install_hooks creates executable entrypoint and both hook JSONs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            ep = base / "bin" / "terok-shield-hook"
+            hooks = base / "hooks"
+
+            install_hooks(hook_entrypoint=ep, hooks_dir=hooks)
+
+            # Entrypoint exists and is executable
+            self.assertTrue(ep.exists())
+            self.assertTrue(ep.stat().st_mode & 0o100)  # owner-execute bit
+            content = ep.read_text()
+            self.assertTrue(content.startswith("#!/bin/sh\n"))
+            self.assertIn("terok_shield.oci_hook", content)
+
+            # Both hook JSON files exist with correct structure
+            for stage in ("createRuntime", "poststop"):
+                hook_file = hooks / f"terok-shield-{stage}.json"
+                self.assertTrue(hook_file.exists())
+                data = json.loads(hook_file.read_text())
+                self.assertEqual(data["version"], "1.0.0")
+                self.assertEqual(data["hook"]["path"], str(ep))
+                self.assertIn(stage, data["stages"])
+                self.assertIn(ANNOTATION_KEY, data["when"]["annotations"])
