@@ -139,18 +139,30 @@ class TestDnsmasqConfigGeneration:
 class TestPreStartDnsmasqTier:
     """pre_start() detects dnsmasq tier and sets correct podman args."""
 
-    def test_pre_start_adds_dns_flag(self) -> None:
-        """When dnsmasq tier is selected, pre_start() adds --dns 127.0.0.1."""
+    def test_pre_start_mounts_resolv_conf(self) -> None:
+        """When dnsmasq tier is selected, pre_start() volume-mounts resolv.conf.
+
+        The code cannot use ``--dns 127.0.0.1`` because podman passes it to
+        pasta as a DNS-splice target, causing pasta to bind host port 53
+        (privileged, fails rootless).  Instead it writes a custom resolv.conf
+        and mounts it read-only into the container.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            shield = Shield(ShieldConfig(state_dir=Path(tmp)))
+            sd = Path(tmp)
+            shield = Shield(ShieldConfig(state_dir=sd))
             args = shield.pre_start("test-ctr")
 
-        tier = _tier_from_args(args)
-        if tier != "dnsmasq":
-            pytest.skip(f"pre_start selected tier '{tier}', not dnsmasq")
-        assert "--dns" in args
-        dns_idx = args.index("--dns")
-        assert args[dns_idx + 1] == DNSMASQ_BIND
+            tier = _tier_from_args(args)
+            if tier != "dnsmasq":
+                pytest.skip(f"pre_start selected tier '{tier}', not dnsmasq")
+            # --dns must NOT be used (causes pasta to bind host port 53)
+            assert "--dns" not in args
+            # resolv.conf volume mount replaces the old --dns flag
+            vol_args = [args[i + 1] for i, v in enumerate(args) if v == "--volume"]
+            expected_mount = f"{state.resolv_conf_path(sd)}:/etc/resolv.conf:ro,Z"
+            assert expected_mount in vol_args, (
+                f"expected exact resolv.conf mount {expected_mount!r}, got: {vol_args!r}"
+            )
 
     def test_pre_start_writes_profile_domains(self) -> None:
         """pre_start() writes profile domains to state for the OCI hook."""
@@ -192,10 +204,10 @@ class TestDnsmasqInContainer:
     """End-to-end: dnsmasq launches inside a container's netns via OCI hook.
 
     This is the full story:
-    1. pre_start() detects dnsmasq, adds --dns 127.0.0.1
-    2. Container starts, OCI hook fires
+    1. pre_start() detects dnsmasq, mounts a resolv.conf volume (127.0.0.1)
+    2. Container starts with the mounted resolv.conf, OCI hook fires
     3. Hook applies nft ruleset + launches dnsmasq in the netns
-    4. Container's resolv.conf points to 127.0.0.1
+    4. Container's resolv.conf already points to 127.0.0.1 via the mount
     5. DNS queries inside container go through dnsmasq
     6. dnsmasq auto-populates nft allow sets via --nftset
     7. Container stop kills dnsmasq (poststop hook)

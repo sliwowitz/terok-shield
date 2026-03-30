@@ -27,6 +27,7 @@ from terok_shield.nft_constants import (
     BYPASS_LOG_PREFIX,
     IPV6_PRIVATE,
     NFT_TABLE,
+    PASTA_HOST_LOOPBACK_MAP,
     PRIVATE_RANGES,
     RFC1918,
 )
@@ -168,14 +169,14 @@ def test_hook_ruleset_default_tcp_rules_are_dns_only() -> None:
     [
         pytest.param(
             (9418,),
-            ['tcp dport 9418 oifname "lo" accept'],
+            [f"tcp dport 9418 ip daddr {PASTA_HOST_LOOPBACK_MAP} accept"],
             id="single-loopback-port",
         ),
         pytest.param(
             (8080, 9090),
             [
-                'tcp dport 8080 oifname "lo" accept',
-                'tcp dport 9090 oifname "lo" accept',
+                f"tcp dport 8080 ip daddr {PASTA_HOST_LOOPBACK_MAP} accept",
+                f"tcp dport 9090 ip daddr {PASTA_HOST_LOOPBACK_MAP} accept",
             ],
             id="multiple-loopback-ports",
         ),
@@ -185,10 +186,12 @@ def test_hook_ruleset_emits_one_rule_per_loopback_port(
     ports: tuple[int, ...],
     expected_rules: list[str],
 ) -> None:
-    """Each configured loopback port gets its own accept rule."""
+    """Each configured loopback port gets its own accept rule before private-range reject."""
     ruleset = hook_ruleset(loopback_ports=ports)
     for rule in expected_rules:
         assert rule in ruleset
+        # Loopback port rules must fire before the 169.254.0.0/16 private-range reject
+        assert ruleset.index(rule) < ruleset.index("169.254.0.0/16")
 
 
 def test_hook_ruleset_places_allow_sets_before_private_range_rejects() -> None:
@@ -451,8 +454,11 @@ def test_bypass_ruleset_does_not_include_the_enforce_deny_rule() -> None:
 
 
 def test_bypass_ruleset_emits_loopback_port_rules() -> None:
-    """Loopback port exceptions survive in bypass mode."""
-    assert 'tcp dport 9418 oifname "lo" accept' in bypass_ruleset(loopback_ports=(9418,))
+    """Host-loopback-proxy port exceptions survive in bypass mode, before private-range reject."""
+    ruleset = bypass_ruleset(loopback_ports=(9418,))
+    accept_rule = f"tcp dport 9418 ip daddr {PASTA_HOST_LOOPBACK_MAP} accept"
+    assert accept_rule in ruleset
+    assert ruleset.index(accept_rule) < ruleset.index("169.254.0.0/16")
 
 
 def test_bypass_ruleset_accepts_dns_to_the_configured_forwarder() -> None:

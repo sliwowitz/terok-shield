@@ -20,10 +20,18 @@ from terok_shield.config import (
 )
 from terok_shield.mode_hook import HookMode, install_hooks
 from terok_shield.nft import bypass_ruleset, hook_ruleset
+from terok_shield.nft_constants import PASTA_HOST_LOOPBACK_MAP
 from terok_shield.run import ExecError
 
 from ..testfs import BIN_DIR_NAME, HOOK_ENTRYPOINT_NAME, HOOKS_DIR_NAME
-from ..testnet import IPV6_CLOUDFLARE, TEST_DOMAIN, TEST_IP1, TEST_IP2
+from ..testnet import (
+    CONTAINER_HOSTNAME,
+    IPV6_CLOUDFLARE,
+    SLIRP4NETNS_GATEWAY,
+    TEST_DOMAIN,
+    TEST_IP1,
+    TEST_IP2,
+)
 from .helpers import write_lines
 
 # Modern podman info JSON — hooks-dir persists (>= 5.6.0), pasta default
@@ -156,7 +164,12 @@ def test_pre_start_uses_pasta_for_rootless_mode(
 
     network_arg = args[args.index("--network") + 1]
     assert network_arg.startswith("pasta:")
-    assert "-T,8080" in network_arg
+    assert "--map-host-loopback" in network_arg
+    assert PASTA_HOST_LOOPBACK_MAP in network_arg
+    assert "-T," not in network_arg
+
+    add_host_arg = args[args.index("--add-host") + 1]
+    assert add_host_arg == f"{CONTAINER_HOSTNAME}:{PASTA_HOST_LOOPBACK_MAP}"
 
 
 @mock.patch("terok_shield.mode_hook.has_global_hooks", return_value=True)
@@ -638,7 +651,7 @@ def test_pre_start_slirp4netns_network_args(
     assert "--network" in args
     net_arg = args[args.index("--network") + 1]
     assert net_arg == "slirp4netns:allow_host_loopback=true"
-    assert "host.containers.internal:10.0.2.2" in args
+    assert f"{CONTAINER_HOSTNAME}:{SLIRP4NETNS_GATEWAY}" in args
 
 
 def test_pre_start_with_global_hooks_skips_hooks_dir(

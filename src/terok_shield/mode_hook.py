@@ -37,7 +37,12 @@ from .config import (
     detect_dns_tier,
 )
 from .nft import NFT_TABLE, RulesetBuilder, safe_ip
-from .nft_constants import NFT_SET_TIMEOUT_DNSMASQ, PASTA_DNS, SLIRP4NETNS_DNS
+from .nft_constants import (
+    NFT_SET_TIMEOUT_DNSMASQ,
+    PASTA_DNS,
+    PASTA_HOST_LOOPBACK_MAP,
+    SLIRP4NETNS_DNS,
+)
 from .podman_info import (
     PodmanInfo,
     global_hooks_hint,
@@ -338,22 +343,18 @@ class HookMode:
                     "host.containers.internal:10.0.2.2",
                 ]
             else:
-                tcp_flags = ",".join(f"-T,{p}" for p in self._config.loopback_ports)
-                # -t,none / -u,none: disable host→container port forwarding.
-                # With -t,auto or -u,auto pasta detects every port the host is
-                # listening on (including port 53 from systemd-resolved) and tries
-                # to bind them, which requires CAP_NET_BIND_SERVICE and fails
-                # rootless.  Terok containers only make outbound connections;
-                # inbound host→container forwarding is not needed.
-                # The -T flags below handle container-internal loopback redirects;
-                # container→internet and pasta's DNS proxy at 169.254.1.1 work via
-                # pasta's own NAT and are unaffected by -t/-u.
-                pasta_arg = f"pasta:-t,none,-u,none,{tcp_flags},-U,auto" if tcp_flags else "pasta"
+                # Use pasta --map-host-loopback unconditionally so that
+                # host.containers.internal always resolves to an address
+                # pasta actually forwards to the host's 127.0.0.1.
+                # Without --map-host-loopback, traffic to 169.254.1.2
+                # is not translated and the gate server is unreachable.
+                # This also avoids the pasta 2.x "two loopbacks" splice
+                # bug that broke the old -T,{port} approach.
                 args += [
                     "--network",
-                    pasta_arg,
+                    f"pasta:--map-host-loopback,{PASTA_HOST_LOOPBACK_MAP}",
                     "--add-host",
-                    "host.containers.internal:127.0.0.1",
+                    f"host.containers.internal:{PASTA_HOST_LOOPBACK_MAP}",
                 ]
 
         # Redirect container DNS through the per-container dnsmasq instance.
