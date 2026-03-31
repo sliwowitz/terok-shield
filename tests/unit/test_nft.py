@@ -14,6 +14,7 @@ from collections.abc import Callable
 import pytest
 
 from terok_shield.nft import (
+    _is_v4,
     _safe_timeout,
     add_elements,
     add_elements_dual,
@@ -117,6 +118,14 @@ def test_safe_ip_rejects_invalid_input(raw: str) -> None:
     """safe_ip() rejects hostnames, injections, and malformed addresses."""
     with pytest.raises(ValueError):
         safe_ip(raw)
+
+
+# ── _is_v4() -------------------------------------------------------------
+
+
+def test_is_v4_returns_false_for_garbage() -> None:
+    """_is_v4() returns False (not raises) for unparseable input."""
+    assert _is_v4("not-an-ip") is False
 
 
 # ── hook_ruleset() ----------------------------------------------------
@@ -397,7 +406,7 @@ def test_verify_ruleset_rejects_a_bypass_ruleset() -> None:
     """Bypass mode must not satisfy enforce-mode verification."""
     errors = verify_ruleset(bypass_ruleset())
     assert errors
-    assert any("deny log prefix" in error for error in errors)
+    assert any("deny nflog prefix" in error for error in errors)
 
 
 def test_verify_ruleset_checks_private_ranges_by_rule_not_by_position() -> None:
@@ -426,7 +435,7 @@ def test_verify_ruleset_reports_errors_for_empty_input() -> None:
         pytest.param(_ALLOW_V4_SET, id="allow-v4-set"),
         pytest.param(_ALLOW_V6_SET, id="allow-v6-set"),
         pytest.param(BYPASS_LOG_PREFIX, id="bypass-log-prefix"),
-        pytest.param("ct state new log", id="logs-new-connections"),
+        pytest.param("ct state new log group", id="logs-new-connections"),
     ],
 )
 def test_bypass_ruleset_contains_required_fragments(fragment: str) -> None:
@@ -501,7 +510,7 @@ def test_verify_bypass_ruleset_accepts_generated_bypass_rulesets(
             id="missing-drop-policy",
         ),
         pytest.param(
-            "policy accept policy drop", "bypass log prefix missing", id="missing-bypass-prefix"
+            "policy accept policy drop", "bypass nflog prefix missing", id="missing-bypass-prefix"
         ),
         pytest.param(
             "chain input { policy drop;\nTEROK_SHIELD_BYPASS allow_v4 allow_v6 }",

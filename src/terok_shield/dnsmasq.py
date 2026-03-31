@@ -90,6 +90,8 @@ def generate_config(
     upstream_dns: str,
     domains: list[str],
     pid_path: Path,
+    *,
+    log_path: Path | None = None,
 ) -> str:
     """Generate a complete dnsmasq configuration.
 
@@ -97,6 +99,7 @@ def generate_config(
         upstream_dns: Upstream DNS forwarder (pasta or slirp4netns address).
         domains: Domain names for ``--nftset`` auto-population.
         pid_path: Path for the dnsmasq PID file.
+        log_path: If set, enable query logging to this file (for ``shield watch``).
 
     Raises:
         ValueError: If *upstream_dns* is not a valid IP address.
@@ -112,6 +115,8 @@ def generate_config(
         f"server={upstream_dns}",
         f"pid-file={pid_path}",
     ]
+    if log_path is not None:
+        lines += ["log-queries", f"log-facility={log_path}"]
     for domain in domains:
         try:
             lines.append(nftset_entry(domain))
@@ -268,10 +273,13 @@ def reload(state_dir: Path, upstream_dns: str, domains: list[str]) -> None:
             "Restart the container to recover."
         )
 
-    # Regenerate config, then signal dnsmasq to re-read it
+    # Regenerate config, then signal dnsmasq to re-read it.
+    # Preserve log-queries/log-facility if pre_start enabled them.
     pid_path = state.dnsmasq_pid_path(state_dir)
     conf_path = state.dnsmasq_conf_path(state_dir)
-    conf_path.write_text(generate_config(upstream_dns, domains, pid_path))
+    old_conf = conf_path.read_text() if conf_path.is_file() else ""
+    log_path = state.dnsmasq_log_path(state_dir) if "log-queries" in old_conf else None
+    conf_path.write_text(generate_config(upstream_dns, domains, pid_path, log_path=log_path))
     try:
         os.kill(pid_int, signal.SIGHUP)
     except ProcessLookupError as e:
