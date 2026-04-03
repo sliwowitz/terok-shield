@@ -65,7 +65,11 @@ def extract_ip_dest(payload: bytes) -> tuple[str, int, int]:
 
 
 def _extract_ipv6_dest(payload: bytes) -> tuple[str, int, int]:
-    """Extract destination from an IPv6 packet (40-byte header minimum)."""
+    """Extract destination from an IPv6 packet (40-byte header minimum).
+
+    Does not traverse extension headers.  If Next Header indicates an
+    extension header rather than TCP/UDP, port will be reported as 0.
+    """
     if len(payload) < 40:
         return ("", 0, 0)
     dest = socket.inet_ntop(socket.AF_INET6, payload[24:40])

@@ -176,7 +176,7 @@ def _handle_interactive(shield: Shield, container: str) -> None:
     """Start the interactive NFQUEUE verdict handler."""
     from .interactive import run_interactive
 
-    run_interactive(shield.config.state_dir, container)
+    run_interactive(shield.config.state_dir, container, timeout=shield.config.nfqueue_timeout)
 
 
 def _handle_preview(shield: Shield, *, down: bool = False, allow_all: bool = False) -> None:

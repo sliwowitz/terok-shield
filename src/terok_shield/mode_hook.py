@@ -575,18 +575,24 @@ class HookMode:
                     except ExecError:
                         pass  # best-effort
 
-        # Persist to deny.list if IP is in profile.allowed
-        profile_path = state.profile_allowed_path(sd)
-        if profile_path.is_file():
-            profile_ips = {
-                line.strip() for line in profile_path.read_text().splitlines() if line.strip()
-            }
-            if ip in profile_ips:
-                dp = state.deny_path(sd)
-                existing = state.read_denied_ips(sd)
-                if ip not in existing:
-                    with dp.open("a") as f:
-                        f.write(f"{ip}\n")
+        # Persist to deny.list so deny sets survive shield_up / restart.
+        # In interactive mode: always persist (operator rejects must stick).
+        # In strict mode: only persist when the IP came from a profile
+        # (non-profile IPs are already blocked by the default-deny rule).
+        should_persist = self._config.interactive
+        if not should_persist:
+            profile_path = state.profile_allowed_path(sd)
+            if profile_path.is_file():
+                profile_ips = {
+                    line.strip() for line in profile_path.read_text().splitlines() if line.strip()
+                }
+                should_persist = ip in profile_ips
+        if should_persist:
+            dp = state.deny_path(sd)
+            existing = state.read_denied_ips(sd)
+            if ip not in existing:
+                with dp.open("a") as f:
+                    f.write(f"{ip}\n")
 
     def allow_domain(self, domain: str) -> None:
         """Add a domain to the dnsmasq config and signal reload.

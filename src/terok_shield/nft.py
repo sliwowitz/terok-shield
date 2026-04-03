@@ -269,7 +269,7 @@ class RulesetBuilder:
 
     def verify_hook(self, nft_output: str, *, interactive: bool = False) -> list[str]:
         """Check applied hook ruleset invariants.  Returns errors (empty = OK)."""
-        return verify_ruleset(nft_output, interactive=interactive)
+        return verify_ruleset(nft_output, interactive=interactive, nfqueue_num=self._nfqueue_num)
 
     def verify_bypass(self, nft_output: str, *, allow_all: bool = False) -> list[str]:
         """Check applied bypass ruleset invariants.  Returns errors (empty = OK)."""
@@ -601,7 +601,9 @@ def _verify_private_blocks(nft_output: str) -> list[str]:
     return errors
 
 
-def verify_ruleset(nft_output: str, *, interactive: bool = False) -> list[str]:
+def verify_ruleset(
+    nft_output: str, *, interactive: bool = False, nfqueue_num: int = NFQUEUE_NUM
+) -> list[str]:
     """Check applied ruleset invariants.  Returns errors (empty = OK).
 
     Verifies:
@@ -611,11 +613,12 @@ def verify_ruleset(nft_output: str, *, interactive: bool = False) -> list[str]:
     - Deny nflog prefix is present (deny sets always log with DENIED prefix)
     - All private ranges are present (RFC 1918 + RFC 4193/4291)
     - Dual-stack allow and deny sets are declared
-    - Interactive: QUEUED prefix and ``queue num`` present
+    - Interactive: QUEUED prefix and specific ``queue num`` present
+    - Strict: no QUEUED prefix or queue rule present
 
     Args:
-        interactive: When ``True``, additionally checks for NFQUEUE-specific
-            invariants (QUEUED log prefix, queue rule).
+        interactive: When ``True``, checks for NFQUEUE-specific invariants.
+        nfqueue_num: Expected queue number (only checked when *interactive*).
     """
     errors: list[str] = []
     if "policy drop" not in nft_output:
@@ -633,8 +636,14 @@ def verify_ruleset(nft_output: str, *, interactive: bool = False) -> list[str]:
     if interactive:
         if QUEUED_LOG_PREFIX not in nft_output:
             errors.append("queued nflog prefix missing")
-        if "queue num" not in nft_output:
-            errors.append("nfqueue rule missing")
+        expected = f"queue num {nfqueue_num}"
+        if expected not in nft_output:
+            errors.append(f"nfqueue rule missing (expected {expected})")
+    else:
+        if QUEUED_LOG_PREFIX in nft_output:
+            errors.append("queued nflog prefix present in strict mode")
+        if "queue num" in nft_output:
+            errors.append("nfqueue rule present in strict mode")
     errors.extend(_verify_private_blocks(nft_output))
     return errors
 

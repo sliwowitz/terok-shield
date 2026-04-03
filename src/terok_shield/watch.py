@@ -276,8 +276,6 @@ def _build_nflog_bind_msg(group: int) -> bytes:
     return nlmsg
 
 
-
-
 class NflogWatcher:
     """Read NFLOG messages via ``AF_NETLINK`` and yield events for denied packets.
 
@@ -391,6 +389,8 @@ class NflogWatcher:
             action = "allowed_connection"
         elif "BYPASS" in prefix:
             action = "bypass_connection"
+        elif "QUEUED" in prefix:
+            action = "queued_connection"
         else:
             action = "nflog"
 

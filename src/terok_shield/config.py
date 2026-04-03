@@ -115,6 +115,11 @@ class ShieldConfig:
     interactive: bool = False
     nfqueue_timeout: int = 5
 
+    def __post_init__(self) -> None:
+        """Validate fields that Pydantic can't enforce for direct callers."""
+        if not 1 <= self.nfqueue_timeout <= 60:
+            raise ValueError(f"nfqueue_timeout must be 1–60, got {self.nfqueue_timeout}")
+
 
 # -- Config-file schema (Pydantic) ------------------------
 

@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 # Matches dnsmasq log lines:  "... reply <domain> is <ip>"
 _REPLY_RE = re.compile(r"reply\s+(\S+)\s+is\s+(\S+)")
 
+# How often (seconds) to refresh the domain cache from dnsmasq log.
+_DOMAIN_REFRESH_INTERVAL = 10.0
+
 _running = True
 
 
@@ -99,6 +102,7 @@ class InteractiveSession:
         self._timeout = timeout
         self._pending: dict[int, _PendingPacket] = {}
         self._ip_to_domain: dict[str, str] = {}
+        self._last_domain_refresh = 0.0
 
     def run(self) -> None:
         """Enter the main verdict loop.
@@ -115,7 +119,7 @@ class InteractiveSession:
             raise SystemExit(1)
 
         # Build initial domain cache from dnsmasq log
-        self._load_domain_cache()
+        self._refresh_domain_cache()
 
         # Make stdin non-blocking for select()
         stdin_fd = sys.stdin.fileno()
@@ -140,7 +144,7 @@ class InteractiveSession:
             # Read queued packets
             if handler.fileno() in (r if isinstance(r, int) else r.fileno() for r in readable):
                 for pkt in handler.poll():
-                    self._handle_queued(handler, pkt)
+                    self._handle_queued(pkt)
 
             # Read stdin commands
             if stdin_fd in (r if isinstance(r, int) else r.fileno() for r in readable):
@@ -151,7 +155,11 @@ class InteractiveSession:
             # Sweep timed-out packets
             self._sweep_timeouts(handler)
 
-    def _handle_queued(self, handler: NfqueueHandler, pkt: QueuedPacket) -> None:
+            # Periodically refresh domain cache
+            if time.monotonic() - self._last_domain_refresh > _DOMAIN_REFRESH_INTERVAL:
+                self._refresh_domain_cache()
+
+    def _handle_queued(self, pkt: QueuedPacket) -> None:
         """Process a newly queued packet: enrich, emit, track."""
         domain = self._ip_to_domain.get(pkt.dest, "")
         pending = _PendingPacket(packet=pkt, queued_at=time.monotonic(), domain=domain)
@@ -200,8 +208,13 @@ class InteractiveSession:
             return
 
         packet_id = cmd.get("id")
-        action = cmd.get("action", "").lower()
-        if packet_id is None or action not in ("accept", "deny"):
+        action = cmd.get("action")
+        if not isinstance(packet_id, int) or isinstance(packet_id, bool):
+            return
+        if not isinstance(action, str):
+            return
+        action = action.lower()
+        if action not in ("accept", "deny"):
             return
 
         pending = self._pending.pop(packet_id, None)
@@ -226,7 +239,6 @@ class InteractiveSession:
         """Persist the verdict to nft sets and state files."""
         ip = pending.packet.dest
         if accept:
-            # Add to allow set + persist to live.allowed
             from .nft import add_elements_dual
 
             nft_cmd = add_elements_dual([ip])
@@ -234,7 +246,6 @@ class InteractiveSession:
                 self._nft_apply(nft_cmd)
             _append_unique(state.live_allowed_path(self._state_dir), ip)
         else:
-            # Add to deny set + persist to deny.list
             from .nft import add_deny_elements_dual
 
             nft_cmd = add_deny_elements_dual([ip])
@@ -255,9 +266,7 @@ class InteractiveSession:
     def _sweep_timeouts(self, handler: NfqueueHandler) -> None:
         """Drop packets that have exceeded the verdict timeout."""
         now = time.monotonic()
-        expired = [
-            pid for pid, p in self._pending.items() if now - p.queued_at > self._timeout
-        ]
+        expired = [pid for pid, p in self._pending.items() if now - p.queued_at > self._timeout]
         for pid in expired:
             pending = self._pending.pop(pid)
             handler.verdict(pending.packet.packet_id, accept=False)
@@ -271,10 +280,11 @@ class InteractiveSession:
                 event["domain"] = pending.domain
             print(json.dumps(event, separators=(",", ":")), flush=True)
 
-    def _load_domain_cache(self) -> None:
-        """Build IP→domain cache from the dnsmasq query log.
+    def _refresh_domain_cache(self) -> None:
+        """Refresh IP→domain cache from the dnsmasq query log.
 
         Parses ``reply`` lines to map resolved IPs back to domain names.
+        Called periodically so long-running sessions learn new DNS replies.
         """
         log_path = state.dnsmasq_log_path(self._state_dir)
         if not log_path.is_file():
@@ -287,6 +297,7 @@ class InteractiveSession:
                     self._ip_to_domain[ip] = domain
         except OSError:
             pass
+        self._last_domain_refresh = time.monotonic()
 
 
 # ── Helpers ────────────────────────────────────────────
@@ -312,7 +323,7 @@ def _append_unique(path: Path, value: str) -> None:
 # ── Entry point ────────────────────────────────────────
 
 
-def run_interactive(state_dir: Path, container: str) -> None:
+def run_interactive(state_dir: Path, container: str, *, timeout: int = 5) -> None:
     """Start the interactive NFQUEUE verdict handler.
 
     Validates that interactive mode is enabled for this container,
@@ -322,6 +333,7 @@ def run_interactive(state_dir: Path, container: str) -> None:
     Args:
         state_dir: Per-container state directory.
         container: Container name.
+        timeout: Seconds before auto-dropping queued packets.
 
     Raises:
         SystemExit: If interactive mode is not enabled or NFQUEUE
@@ -336,5 +348,6 @@ def run_interactive(state_dir: Path, container: str) -> None:
         runner=runner,
         state_dir=state_dir,
         container=container,
+        timeout=timeout,
     )
     session.run()

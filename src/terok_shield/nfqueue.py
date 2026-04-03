@@ -137,20 +137,20 @@ class NfqueueHandler:
         try:
             sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER)
             sock.bind((0, 0))
-            sock.setblocking(False)
 
-            # Bind to the queue
+            # Handshake in blocking mode so ACKs are reliably received
+            sock.settimeout(2.0)
             sock.send(_build_config_cmd(queue_num, _NFQNL_CFG_CMD_BIND))
             if not _check_ack(sock):
                 sock.close()
                 return None
-
-            # Set copy mode to COPY_PACKET with enough range for IP headers
             sock.send(_build_config_params(queue_num, copy_range=256))
             if not _check_ack(sock):
                 sock.close()
                 return None
 
+            # Switch to non-blocking for the poll() loop
+            sock.setblocking(False)
             return cls(sock, queue_num)
         except (OSError, AttributeError):
             logger.debug("NFQUEUE socket unavailable — interactive mode disabled")
@@ -205,26 +205,37 @@ class NfqueueHandler:
                 attr_offset = NLMSG_HDR.size + NFGEN_HDR.size
                 if offset + attr_offset < offset + nl_len:
                     attrs = parse_nflog_attrs(data[offset + attr_offset : offset + nl_len])
-                    pkt = self._attrs_to_packet(attrs)
+                    pkt = _attrs_to_packet(attrs)
                     if pkt:
                         packets.append(pkt)
+                    else:
+                        # Unparseable payload but we have a packet_id — must
+                        # still issue a verdict or the packet stays stuck.
+                        pid = _extract_packet_id(attrs)
+                        if pid is not None:
+                            self.verdict(pid, accept=False)
             offset += (nl_len + 3) & ~3
         return packets
 
-    @staticmethod
-    def _attrs_to_packet(attrs: dict[int, bytes]) -> QueuedPacket | None:
-        """Convert parsed NFQUEUE attributes into a :class:`QueuedPacket`."""
-        pkt_hdr = attrs.get(_NFQA_PACKET_HDR)
-        if not pkt_hdr or len(pkt_hdr) < _NFQNL_PACKET_HDR.size:
-            return None
-        packet_id, _hw_proto, _hook = _NFQNL_PACKET_HDR.unpack_from(pkt_hdr)
 
-        payload = attrs.get(_NFQA_PAYLOAD, b"")
-        dest, proto, port = extract_ip_dest(payload)
-        if not dest:
-            return None
+def _extract_packet_id(attrs: dict[int, bytes]) -> int | None:
+    """Extract just the packet_id from NFQUEUE attributes, or None."""
+    pkt_hdr = attrs.get(_NFQA_PACKET_HDR)
+    if not pkt_hdr or len(pkt_hdr) < _NFQNL_PACKET_HDR.size:
+        return None
+    return _NFQNL_PACKET_HDR.unpack_from(pkt_hdr)[0]
 
-        return QueuedPacket(packet_id=packet_id, dest=dest, port=port, proto=proto)
+
+def _attrs_to_packet(attrs: dict[int, bytes]) -> QueuedPacket | None:
+    """Convert parsed NFQUEUE attributes into a :class:`QueuedPacket`."""
+    packet_id = _extract_packet_id(attrs)
+    if packet_id is None:
+        return None
+    payload = attrs.get(_NFQA_PAYLOAD, b"")
+    dest, proto, port = extract_ip_dest(payload)
+    if not dest:
+        return None
+    return QueuedPacket(packet_id=packet_id, dest=dest, port=port, proto=proto)
 
 
 # ── Message builders ───────────────────────────────────
@@ -237,9 +248,10 @@ def _build_config_cmd(queue_num: int, cmd: int) -> bytes:
     cmd_payload = _NFQNL_CFG_CMD_STRUCT.pack(cmd, 0, socket.htons(AF_INET))
     attr = NFA_HDR.pack(NFA_HDR.size + len(cmd_payload), _NFQA_CFG_CMD) + cmd_payload
     payload = nfgen + attr
-    return NLMSG_HDR.pack(
-        NLMSG_HDR.size + len(payload), msg_type, NLM_F_REQUEST | NLM_F_ACK, 0, 0
-    ) + payload
+    return (
+        NLMSG_HDR.pack(NLMSG_HDR.size + len(payload), msg_type, NLM_F_REQUEST | NLM_F_ACK, 0, 0)
+        + payload
+    )
 
 
 def _build_config_params(queue_num: int, *, copy_range: int = 256) -> bytes:
@@ -249,9 +261,10 @@ def _build_config_params(queue_num: int, *, copy_range: int = 256) -> bytes:
     params_payload = _NFQNL_CFG_PARAMS.pack(copy_range, _NFQNL_COPY_PACKET)
     attr = NFA_HDR.pack(NFA_HDR.size + len(params_payload), _NFQA_CFG_PARAMS) + params_payload
     payload = nfgen + attr
-    return NLMSG_HDR.pack(
-        NLMSG_HDR.size + len(payload), msg_type, NLM_F_REQUEST | NLM_F_ACK, 0, 0
-    ) + payload
+    return (
+        NLMSG_HDR.pack(NLMSG_HDR.size + len(payload), msg_type, NLM_F_REQUEST | NLM_F_ACK, 0, 0)
+        + payload
+    )
 
 
 def _build_verdict_msg(queue_num: int, packet_id: int, verdict: int) -> bytes:
@@ -261,9 +274,7 @@ def _build_verdict_msg(queue_num: int, packet_id: int, verdict: int) -> bytes:
     verdict_payload = _NFQNL_VERDICT_HDR.pack(verdict, packet_id)
     attr = NFA_HDR.pack(NFA_HDR.size + len(verdict_payload), _NFQA_VERDICT_HDR) + verdict_payload
     payload = nfgen + attr
-    return NLMSG_HDR.pack(
-        NLMSG_HDR.size + len(payload), msg_type, NLM_F_REQUEST, 0, 0
-    ) + payload
+    return NLMSG_HDR.pack(NLMSG_HDR.size + len(payload), msg_type, NLM_F_REQUEST, 0, 0) + payload
 
 
 def _check_ack(sock: socket.socket) -> bool:
@@ -280,5 +291,6 @@ def _check_ack(sock: socket.socket) -> bool:
                 logger.debug("NFQUEUE config rejected (errno %d)", -err)
                 return False
         return True
-    except BlockingIOError:
-        return True  # ACK not yet available; proceed optimistically
+    except (OSError, TimeoutError):
+        logger.debug("NFQUEUE ACK not received")
+        return False
