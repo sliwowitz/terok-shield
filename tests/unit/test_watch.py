@@ -29,6 +29,7 @@ from terok_shield.nft_constants import (
     DENIED_LOG_PREFIX,
     NFLOG_GROUP,
     PRIVATE_LOG_PREFIX,
+    QUEUED_LOG_PREFIX,
 )
 from terok_shield.watch import (
     _DOMAIN_REFRESH_INTERVAL,
@@ -682,6 +683,15 @@ class TestNflogWatcherParsing:
         assert events[0].action == "bypass_connection"
         assert events[0].port == 53
         assert events[0].proto == 17
+
+    def test_queued_packet(self) -> None:
+        """NFLOG message with QUEUED prefix yields queued_connection event."""
+        watcher = self._make_watcher()
+        data = _make_nflog_packet(f"{QUEUED_LOG_PREFIX}: ", "198.51.100.5", 6, 443)
+        events = watcher._parse_messages(data)
+        assert len(events) == 1
+        assert events[0].action == "queued_connection"
+        assert events[0].dest == "198.51.100.5"
 
     def test_unknown_prefix_yields_nflog_action(self) -> None:
         """NFLOG message with unrecognized prefix yields generic nflog action."""

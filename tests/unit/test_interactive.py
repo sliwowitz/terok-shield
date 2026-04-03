@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from unittest import mock
@@ -397,3 +398,199 @@ class TestRunInteractive:
         ):
             with pytest.raises(SystemExit, match="1"):
                 run_interactive(tmp_path, "ctr")
+
+
+# ── InteractiveSession._loop / select helpers ────────
+
+
+class TestLoopHelpers:
+    """Cover the small select-loop helper methods."""
+
+    def test_select_readable(self, tmp_path: Path) -> None:
+        """_select_readable returns fd set from select() results."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        handler.fileno.return_value = 5
+        with mock.patch("terok_shield.interactive.select") as sel:
+            sel.select.return_value = ([handler, 3], [], [])
+            result = session._select_readable(handler, 3)
+        assert result == {5, 3}
+
+    def test_poll_nfqueue_triggers_handle(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """_poll_nfqueue calls _handle_queued when handler fd is ready."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        handler.fileno.return_value = 5
+        handler.poll.return_value = [_make_pkt(packet_id=88)]
+        session._poll_nfqueue(handler, {5})
+        assert 88 in session._pending
+
+    def test_poll_nfqueue_noop_when_not_ready(self, tmp_path: Path) -> None:
+        """_poll_nfqueue does nothing when handler fd not in ready set."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        handler.fileno.return_value = 5
+        session._poll_nfqueue(handler, {3})
+        handler.poll.assert_not_called()
+
+    def test_poll_stdin_returns_buf_when_not_ready(self, tmp_path: Path) -> None:
+        """_poll_stdin returns buffer unchanged when stdin not in ready set."""
+        session = _make_session(tmp_path)
+        with mock.patch("sys.stdin") as stdin:
+            stdin.fileno.return_value = 0
+            result = session._poll_stdin(mock.MagicMock(), "partial", {5})
+        assert result == "partial"
+
+    def test_maybe_refresh_domains_triggers_refresh(self, tmp_path: Path) -> None:
+        """_maybe_refresh_domains calls refresh when interval elapsed."""
+        session = _make_session(tmp_path)
+        session._last_domain_refresh = 0.0  # far in the past
+        with mock.patch.object(session, "_refresh_domain_cache") as refresh:
+            session._maybe_refresh_domains()
+        refresh.assert_called_once()
+
+    def test_maybe_refresh_domains_skips_when_fresh(self, tmp_path: Path) -> None:
+        """_maybe_refresh_domains does nothing when recently refreshed."""
+        session = _make_session(tmp_path)
+        session._last_domain_refresh = time.monotonic()
+        with mock.patch.object(session, "_refresh_domain_cache") as refresh:
+            session._maybe_refresh_domains()
+        refresh.assert_not_called()
+
+
+# ── InteractiveSession._read_stdin ────────────────────
+
+
+class TestReadStdin:
+    """Cover the _read_stdin I/O method."""
+
+    def _patch_stdin_fd(self) -> mock._patch:
+        """Return a context manager that stubs sys.stdin.fileno → 0."""
+        return mock.patch("sys.stdin", **{"fileno.return_value": 0})
+
+    def test_returns_none_on_eof(self, tmp_path: Path) -> None:
+        """Returns None when os.read returns empty bytes (EOF)."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        with self._patch_stdin_fd(), mock.patch("os.read", return_value=b""):
+            result = session._read_stdin(handler, "")
+        assert result is None
+
+    def test_returns_buf_on_oserror(self, tmp_path: Path) -> None:
+        """Returns existing buffer on OSError."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        with self._patch_stdin_fd(), mock.patch("os.read", side_effect=OSError):
+            result = session._read_stdin(handler, "leftover")
+        assert result == "leftover"
+
+    def test_processes_complete_line(self, tmp_path: Path) -> None:
+        """Complete JSON line is processed, remainder returned as buffer."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        line = json.dumps({"type": "verdict", "id": 77, "action": "accept"})
+        pkt = _make_pkt(packet_id=77)
+        session._pending[77] = _PendingPacket(packet=pkt, queued_at=time.monotonic())
+
+        with (
+            self._patch_stdin_fd(),
+            mock.patch("os.read", return_value=f"{line}\nremainder".encode()),
+        ):
+            result = session._read_stdin(handler, "")
+        assert result == "remainder"
+        handler.verdict.assert_called_once()
+
+    def test_buffers_incomplete_line(self, tmp_path: Path) -> None:
+        """Incomplete line is buffered for next read."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        with self._patch_stdin_fd(), mock.patch("os.read", return_value=b"partial"):
+            result = session._read_stdin(handler, "")
+        assert result == "partial"
+        handler.verdict.assert_not_called()
+
+
+# ── InteractiveSession._loop ─────────────────────────
+
+
+class TestLoop:
+    """Cover the main _loop method."""
+
+    def test_loop_exits_on_stdin_eof(self, tmp_path: Path) -> None:
+        """_loop exits when _poll_stdin returns None (EOF)."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        handler.fileno.return_value = 5
+
+        with mock.patch("terok_shield.interactive.select") as sel:
+            sel.select.return_value = ([0], [], [])
+            with mock.patch("os.read", return_value=b""):
+                with mock.patch("sys.stdin") as stdin:
+                    stdin.fileno.return_value = 0
+                    import terok_shield.interactive as mod
+
+                    mod._running = True
+                    session._loop(handler, 0)
+        # If we get here, _loop exited (didn't hang)
+
+    def test_loop_exits_on_running_false(self, tmp_path: Path) -> None:
+        """_loop exits when _running flag is cleared."""
+        session = _make_session(tmp_path)
+        handler = mock.MagicMock()
+        handler.fileno.return_value = 5
+
+        import terok_shield.interactive as mod
+
+        mod._running = False
+        session._loop(handler, 0)
+
+
+# ── InteractiveSession.run (success path) ────────────
+
+
+class TestRunMethod:
+    """Cover the run() orchestration method."""
+
+    def test_run_creates_handler_and_loops(self, tmp_path: Path) -> None:
+        """run() creates handler, sets up signals, calls _loop, then drains."""
+        session = _make_session(tmp_path)
+        mock_handler = mock.MagicMock()
+        mock_handler.fileno.return_value = 5
+
+        import terok_shield.interactive as mod
+
+        mod._running = True
+
+        with (
+            mock.patch.object(type(session), "_loop", side_effect=lambda h, fd: None),
+            mock.patch("terok_shield.interactive.NfqueueHandler.create", return_value=mock_handler),
+            mock.patch("terok_shield.interactive._set_nonblocking"),
+            mock.patch("sys.stdin", **{"fileno.return_value": 0}),
+        ):
+            session.run()
+
+        mock_handler.close.assert_called_once()
+
+
+# ── _set_nonblocking ─────────────────────────────────
+
+
+class TestSetNonblocking:
+    """Cover the _set_nonblocking helper."""
+
+    def test_sets_o_nonblock_flag(self) -> None:
+        """_set_nonblocking sets O_NONBLOCK on the fd via a real pipe."""
+        import fcntl
+
+        from terok_shield.interactive import _set_nonblocking
+
+        r, w = os.pipe()
+        try:
+            _set_nonblocking(r)
+            flags = fcntl.fcntl(r, fcntl.F_GETFL)
+            assert flags & os.O_NONBLOCK
+        finally:
+            os.close(r)
+            os.close(w)
