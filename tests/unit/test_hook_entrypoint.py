@@ -40,7 +40,7 @@ _ROUTE_NO_DEFAULT = (
 )
 
 
-def _oci_json(pid: int = 42, state_dir: str = "/tmp/sd", version: int = 3) -> str:
+def _oci_json(pid: int = 42, state_dir: str = "/tmp/sd", version: int = 4) -> str:
     """Return a minimal OCI state JSON for hook_entrypoint.main()."""
     return json.dumps(
         {
@@ -648,7 +648,7 @@ def test_main_returns_1_when_pid_missing_for_createruntime(tmp_path: Path) -> No
             "pid": 0,
             "annotations": {
                 "terok.shield.state_dir": str(tmp_path),
-                "terok.shield.version": "3",
+                "terok.shield.version": "4",
             },
         }
     )
@@ -734,7 +734,7 @@ def test_main_returns_1_for_relative_state_dir() -> None:
             "pid": 42,
             "annotations": {
                 "terok.shield.state_dir": "relative/path",
-                "terok.shield.version": "3",
+                "terok.shield.version": "4",
             },
         }
     )

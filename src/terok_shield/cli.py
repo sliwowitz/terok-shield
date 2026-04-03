@@ -130,6 +130,8 @@ def _build_config(
         loopback_ports=tuple(file_cfg.loopback_ports),
         audit_enabled=file_cfg.audit.enabled,
         profiles_dir=profiles_dir,
+        interactive=file_cfg.interactive,
+        nfqueue_timeout=file_cfg.nfqueue_timeout,
     )
 
 

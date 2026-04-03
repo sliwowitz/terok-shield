@@ -26,6 +26,7 @@ from . import dnsmasq, state
 from .config import (
     ANNOTATION_AUDIT_ENABLED_KEY,
     ANNOTATION_DNS_TIER_KEY,
+    ANNOTATION_INTERACTIVE_KEY,
     ANNOTATION_KEY,
     ANNOTATION_LOOPBACK_PORTS_KEY,
     ANNOTATION_NAME_KEY,
@@ -37,7 +38,13 @@ from .config import (
     ShieldState,
     detect_dns_tier,
 )
-from .nft import NFT_TABLE, RulesetBuilder, safe_ip
+from .nft import (
+    NFT_TABLE,
+    RulesetBuilder,
+    add_deny_elements_dual,
+    delete_deny_elements_dual,
+    safe_ip,
+)
 from .nft_constants import (
     NFT_SET_TIMEOUT_DNSMASQ,
     PASTA_DNS,
@@ -308,15 +315,25 @@ class HookMode:
 
         # Pre-generate complete nft ruleset (gateway sets start empty; hook populates them)
         set_timeout = NFT_SET_TIMEOUT_DNSMASQ if tier == DnsTier.DNSMASQ else ""
+        interactive = self._config.interactive
         ruleset_builder = RulesetBuilder(
             dns=upstream_dns,
             loopback_ports=self._config.loopback_ports,
             set_timeout=set_timeout,
         )
         ips = state.read_effective_ips(sd)
-        state.ruleset_path(sd).write_text(
-            ruleset_builder.build_hook() + ruleset_builder.add_elements_dual(ips)
-        )
+        denied_ips = list(state.read_denied_ips(sd))
+        ruleset = ruleset_builder.build_hook(interactive=interactive)
+        ruleset += ruleset_builder.add_elements_dual(ips)
+        if denied_ips:
+            ruleset += add_deny_elements_dual(denied_ips)
+        state.ruleset_path(sd).write_text(ruleset)
+
+        # Persist interactive mode flag for shield_up() and the verdict handler
+        if interactive:
+            state.interactive_path(sd).write_text("1\n")
+        else:
+            state.interactive_path(sd).unlink(missing_ok=True)
 
         # Pre-generate dnsmasq config if using dnsmasq tier; otherwise scrub
         # stale artifacts so hook_entrypoint.py does not launch dnsmasq when
@@ -410,6 +427,8 @@ class HookMode:
             f"{ANNOTATION_UPSTREAM_DNS_KEY}={upstream_dns}",
             "--annotation",
             f"{ANNOTATION_DNS_TIER_KEY}={tier.value}",
+            "--annotation",
+            f"{ANNOTATION_INTERACTIVE_KEY}={str(interactive).lower()}",
         ]
 
         # Hooks dir: per-container on modern podman, global on old podman
@@ -466,7 +485,7 @@ class HookMode:
         """Live-allow an IP for a running container via nsenter."""
         ip = safe_ip(ip)
 
-        # Un-deny: remove from deny.list if present
+        # Un-deny: remove from deny.list and nft deny set if present
         sd = self._config.state_dir.resolve()
         dp = state.deny_path(sd)
         if dp.is_file():
@@ -474,6 +493,16 @@ class HookMode:
             if ip in denied:
                 denied.discard(ip)
                 dp.write_text("".join(f"{d}\n" for d in sorted(denied)))
+                # Remove from nft deny set (best-effort)
+                nft_cmd = delete_deny_elements_dual([ip])
+                if nft_cmd:
+                    for line in nft_cmd.strip().splitlines():
+                        parts = line.strip().split()
+                        if parts:
+                            try:
+                                self._runner.nft_via_nsenter(container, *parts)
+                            except ExecError:
+                                pass
 
         # When the dnsmasq set has a default timeout (30 m), permanent IPs must use
         # 'timeout 0s' so they are never evicted by the set's per-element expiry clock.
@@ -534,6 +563,17 @@ class HookMode:
             lines = live_path.read_text().splitlines()
             lines = [line for line in lines if line.strip() != ip]
             live_path.write_text("\n".join(lines) + "\n" if lines else "")
+
+        # Add to nft deny set (prevents dnsmasq from re-allowing)
+        nft_cmd = add_deny_elements_dual([ip])
+        if nft_cmd:
+            for line in nft_cmd.strip().splitlines():
+                parts = line.strip().split()
+                if parts:
+                    try:
+                        self._runner.nft_via_nsenter(container, *parts)
+                    except ExecError:
+                        pass  # best-effort
 
         # Persist to deny.list if IP is in profile.allowed
         profile_path = state.profile_allowed_path(sd)
@@ -688,8 +728,11 @@ class HookMode:
 
     def shield_up(self, container: str) -> None:
         """Restore normal deny-all mode for a running container."""
+        sd = self._config.state_dir.resolve()
+        interactive = state.interactive_path(sd).is_file()
+
         ruleset = self._container_ruleset(container)
-        rs = ruleset.build_hook()
+        rs = ruleset.build_hook(interactive=interactive)
         current = self.shield_state(container)
         if current == ShieldState.INACTIVE:
             stdin = rs
@@ -698,13 +741,18 @@ class HookMode:
         self._runner.nft_via_nsenter(container, stdin=stdin)
 
         # Re-add effective IPs (allowed minus denied)
-        sd = self._config.state_dir.resolve()
         unique_ips = state.read_effective_ips(sd)
-
         if unique_ips:
             elements_cmd = ruleset.add_elements_dual(unique_ips)
             if elements_cmd:
                 self._runner.nft_via_nsenter(container, stdin=elements_cmd)
+
+        # Repopulate deny sets from deny.list
+        denied_ips = list(state.read_denied_ips(sd))
+        if denied_ips:
+            deny_cmd = add_deny_elements_dual(denied_ips)
+            if deny_cmd:
+                self._runner.nft_via_nsenter(container, stdin=deny_cmd)
 
         # Repopulate gateway sets from persisted discovery (hook wrote them at container start)
         for gw_path, set_name in (
@@ -725,7 +773,7 @@ class HookMode:
                     )
 
         output = self._runner.nft_via_nsenter(container, "list", "ruleset")
-        errors = ruleset.verify_hook(output)
+        errors = ruleset.verify_hook(output, interactive=interactive)
         if errors:
             raise RuntimeError(f"Ruleset verification failed: {'; '.join(errors)}")
 
@@ -741,7 +789,10 @@ class HookMode:
         if not self._ruleset.verify_bypass(output, allow_all=True):
             return ShieldState.DOWN_ALL
 
+        # Check both strict and interactive hook rulesets
         if not self._ruleset.verify_hook(output):
+            return ShieldState.UP
+        if not self._ruleset.verify_hook(output, interactive=True):
             return ShieldState.UP
 
         return ShieldState.ERROR
@@ -750,4 +801,4 @@ class HookMode:
         """Generate the ruleset that would be applied to a container."""
         if down:
             return self._ruleset.build_bypass(allow_all=allow_all)
-        return self._ruleset.build_hook()
+        return self._ruleset.build_hook(interactive=self._config.interactive)

@@ -46,6 +46,7 @@ EXPECTED_ALL = [
     "SubprocessRunner",
     "USER_HOOKS_DIR",
     "ensure_containers_conf_hooks_dir",
+    "run_interactive",
     "setup_global_hooks",
     "system_hooks_dir",
 ]
@@ -90,6 +91,8 @@ class TestAPISurface:
             "loopback_ports",
             "audit_enabled",
             "profiles_dir",
+            "interactive",
+            "nfqueue_timeout",
         ]
 
         cfg = make_config()
@@ -98,6 +101,8 @@ class TestAPISurface:
         assert cfg.loopback_ports == ()
         assert cfg.audit_enabled is True
         assert cfg.profiles_dir is None
+        assert cfg.interactive is False
+        assert cfg.nfqueue_timeout == 5
 
     def test_shield_config_frozen(self, make_config):
         """ShieldConfig is frozen — assignment raises FrozenInstanceError."""

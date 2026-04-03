@@ -172,6 +172,13 @@ def _handle_watch(shield: Shield, container: str) -> None:
     run_watch(shield.config.state_dir, container)
 
 
+def _handle_interactive(shield: Shield, container: str) -> None:
+    """Start the interactive NFQUEUE verdict handler."""
+    from .interactive import run_interactive
+
+    run_interactive(shield.config.state_dir, container)
+
+
 def _handle_preview(shield: Shield, *, down: bool = False, allow_all: bool = False) -> None:
     """Show ruleset that would be applied."""
     if allow_all and not down:
@@ -267,6 +274,12 @@ COMMANDS: tuple[CommandDef, ...] = (
         name="watch",
         help="Stream shield events — DNS blocks, audit log, NFLOG packets (requires dnsmasq tier)",
         handler=_handle_watch,
+        needs_container=True,
+    ),
+    CommandDef(
+        name="interactive",
+        help="Start NFQUEUE verdict handler — queue unknown packets for operator accept/deny",
+        handler=_handle_interactive,
         needs_container=True,
     ),
     # NOTE: CLI special-cases logs with --container optional for aggregated mode.

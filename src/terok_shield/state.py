@@ -25,12 +25,13 @@ Bundle layout::
     ├── dnsmasq.pid                    # dnsmasq PID (in container netns)
     ├── dnsmasq.log                    # dnsmasq query log (for shield watch)
     ├── resolv.conf                    # bind-mounted over /etc/resolv.conf (dnsmasq tier)
+    ├── interactive                    # interactive mode flag (NFQUEUE enabled)
     └── audit.jsonl                    # per-container audit log
 """
 
 from pathlib import Path
 
-BUNDLE_VERSION = 3
+BUNDLE_VERSION = 4
 """Integer version of the state bundle layout.
 
 Bumped whenever the file layout changes in a backwards-incompatible way.
@@ -126,6 +127,16 @@ def live_domains_path(state_dir: Path) -> Path:
 def denied_domains_path(state_dir: Path) -> Path:
     """Return the path to the denied domains file (from deny_domain)."""
     return state_dir / "denied.domains"
+
+
+def interactive_path(state_dir: Path) -> Path:
+    """Return the path to the interactive mode flag file.
+
+    Written by ``pre_start()`` when interactive mode is enabled.
+    Read by ``shield_up()`` and the interactive verdict handler to
+    determine whether NFQUEUE rules should be used.
+    """
+    return state_dir / "interactive"
 
 
 def resolv_conf_path(state_dir: Path) -> Path:

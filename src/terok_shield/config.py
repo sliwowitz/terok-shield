@@ -24,6 +24,7 @@ ANNOTATION_VERSION_KEY = "terok.shield.version"
 ANNOTATION_AUDIT_ENABLED_KEY = "terok.shield.audit_enabled"
 ANNOTATION_UPSTREAM_DNS_KEY = "terok.shield.upstream_dns"
 ANNOTATION_DNS_TIER_KEY = "terok.shield.dns_tier"
+ANNOTATION_INTERACTIVE_KEY = "terok.shield.interactive"
 
 
 class DnsTier(enum.Enum):
@@ -111,6 +112,8 @@ class ShieldConfig:
     loopback_ports: tuple[int, ...] = ()
     audit_enabled: bool = True
     profiles_dir: Path | None = None
+    interactive: bool = False
+    nfqueue_timeout: int = 5
 
 
 # -- Config-file schema (Pydantic) ------------------------
@@ -144,6 +147,16 @@ class ShieldFileConfig(BaseModel):
     )
     audit: AuditFileConfig = Field(
         default_factory=AuditFileConfig, description="Audit logging settings"
+    )
+    interactive: bool = Field(
+        default=False,
+        description="Enable NFQUEUE interactive mode (queue unknown packets for operator verdict)",
+    )
+    nfqueue_timeout: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        description="Seconds to wait for operator verdict before dropping queued packets",
     )
     model_config = ConfigDict(extra="forbid")
 
