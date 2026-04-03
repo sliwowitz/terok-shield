@@ -348,13 +348,17 @@ def _append_unique(path: Path, value: str) -> None:
 
 # ── Entry point ────────────────────────────────────────
 
+_NSENTER_ENV = "_TEROK_SHIELD_NSENTER"
+
 
 def run_interactive(state_dir: Path, container: str, *, timeout: int = 5) -> None:
     """Start the interactive NFQUEUE verdict handler.
 
-    Validates that interactive mode is enabled for this container,
-    then enters the verdict loop.  Blocks until SIGINT/SIGTERM or
-    stdin EOF.
+    The NFQUEUE socket lives in the container's network namespace, so the
+    handler must run inside it.  On first call (no ``_TEROK_SHIELD_NSENTER``
+    env var) this function re-executes itself under ``podman unshare nsenter``
+    with stdin/stdout passed through for the JSON-lines protocol.  The
+    re-executed process sees the env var and enters the verdict loop directly.
 
     Args:
         state_dir: Per-container state directory.
@@ -370,6 +374,14 @@ def run_interactive(state_dir: Path, container: str, *, timeout: int = 5) -> Non
         print("Error: interactive mode is not enabled for this container.", file=sys.stderr)
         raise SystemExit(1)
 
+    if os.environ.get(_NSENTER_ENV) == "1":
+        _run_verdict_loop(state_dir, container, timeout=timeout)
+    else:
+        _nsenter_reexec(state_dir, container, timeout=timeout)
+
+
+def _run_verdict_loop(state_dir: Path, container: str, *, timeout: int) -> None:
+    """Run the verdict loop directly (already inside the container netns)."""
     runner = SubprocessRunner()
     session = InteractiveSession(
         runner=runner,
@@ -378,3 +390,49 @@ def run_interactive(state_dir: Path, container: str, *, timeout: int = 5) -> Non
         timeout=timeout,
     )
     session.run()
+
+
+def _nsenter_reexec(state_dir: Path, container: str, *, timeout: int) -> None:
+    """Re-exec the handler inside the container's network namespace.
+
+    Uses ``podman unshare nsenter -t PID -n`` to enter the rootless
+    network namespace, then runs this module as ``python -m`` with
+    stdin/stdout passed through for the JSON-lines protocol.
+    """
+    import subprocess
+
+    runner = SubprocessRunner()
+    pid = runner.podman_inspect(container, "{{.State.Pid}}")
+    if not pid or pid == "0":
+        print(f"Error: container {container!r} is not running.", file=sys.stderr)
+        raise SystemExit(1)
+
+    cmd = [
+        "podman",
+        "unshare",
+        "nsenter",
+        "-t",
+        pid,
+        "-n",
+        "--",
+        sys.executable,
+        "-m",
+        "terok_shield.interactive",
+        str(state_dir),
+        container,
+        str(timeout),
+    ]
+    env = {**os.environ, _NSENTER_ENV: "1"}
+    result = subprocess.run(cmd, env=env)  # noqa: S603 — argv list, no shell
+    raise SystemExit(result.returncode)
+
+
+if __name__ == "__main__":
+    # Re-exec entry point: python -m terok_shield.interactive <state_dir> <container> <timeout>
+    if len(sys.argv) != 4:
+        print(
+            f"Usage: {sys.executable} -m terok_shield.interactive <state_dir> <container> <timeout>",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    _run_verdict_loop(Path(sys.argv[1]), sys.argv[2], timeout=int(sys.argv[3]))

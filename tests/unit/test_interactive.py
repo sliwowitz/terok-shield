@@ -412,17 +412,66 @@ class TestRunInteractive:
         with pytest.raises(SystemExit, match="1"):
             run_interactive(tmp_path, "ctr")
 
-    def test_starts_if_interactive_enabled(self, tmp_path: Path) -> None:
-        """Creates session when interactive flag is present (NFQUEUE bind fails → exit 1)."""
+    def test_delegates_to_nsenter_reexec(self, tmp_path: Path) -> None:
+        """Without env var, run_interactive delegates to _nsenter_reexec."""
+        state.ensure_state_dirs(tmp_path)
+        state.interactive_path(tmp_path).write_text("1\n")
+
+        with mock.patch("terok_shield.interactive._nsenter_reexec") as reexec:
+            run_interactive(tmp_path, "ctr")
+        reexec.assert_called_once()
+        assert reexec.call_args[0][1] == "ctr"
+
+    def test_runs_directly_when_nsenter_env_set(self, tmp_path: Path) -> None:
+        """With _TEROK_SHIELD_NSENTER=1, runs verdict loop directly."""
         state.ensure_state_dirs(tmp_path)
         state.interactive_path(tmp_path).write_text("1\n")
 
         with (
-            mock.patch("terok_shield.interactive.SubprocessRunner"),
-            mock.patch("terok_shield.interactive.NfqueueHandler.create", return_value=None),
+            mock.patch.dict(os.environ, {"_TEROK_SHIELD_NSENTER": "1"}),
+            mock.patch("terok_shield.interactive._run_verdict_loop") as loop,
         ):
-            with pytest.raises(SystemExit, match="1"):
-                run_interactive(tmp_path, "ctr")
+            run_interactive(tmp_path, "ctr", timeout=10)
+        loop.assert_called_once()
+        assert loop.call_args.kwargs["timeout"] == 10
+
+
+class TestNsenterReexec:
+    """_nsenter_reexec builds the correct subprocess command."""
+
+    def test_reexecs_via_podman_unshare(self, tmp_path: Path) -> None:
+        """Subprocess command uses podman unshare nsenter."""
+        mock_runner = mock.MagicMock()
+        mock_runner.podman_inspect.return_value = "12345"
+
+        with (
+            mock.patch("terok_shield.interactive.SubprocessRunner", return_value=mock_runner),
+            mock.patch("subprocess.run", return_value=mock.MagicMock(returncode=0)) as mock_run,
+            pytest.raises(SystemExit, match="0"),
+        ):
+            from terok_shield.interactive import _nsenter_reexec
+
+            _nsenter_reexec(tmp_path, "my-ctr", timeout=5)
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:3] == ["podman", "unshare", "nsenter"]
+        assert "-n" in cmd
+        assert "12345" in cmd
+        assert "terok_shield.interactive" in cmd
+        assert mock_run.call_args[1]["env"]["_TEROK_SHIELD_NSENTER"] == "1"
+
+    def test_exits_if_container_not_running(self, tmp_path: Path) -> None:
+        """Exits with code 1 if container PID is 0."""
+        mock_runner = mock.MagicMock()
+        mock_runner.podman_inspect.return_value = "0"
+
+        with (
+            mock.patch("terok_shield.interactive.SubprocessRunner", return_value=mock_runner),
+            pytest.raises(SystemExit, match="1"),
+        ):
+            from terok_shield.interactive import _nsenter_reexec
+
+            _nsenter_reexec(tmp_path, "dead-ctr", timeout=5)
 
 
 # ── InteractiveSession._loop / select helpers ────────
