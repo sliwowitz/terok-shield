@@ -299,6 +299,17 @@ def test_prepare_dispatches_and_prints_flags(
     assert _CONTAINER in output
 
 
+def test_prepare_default_passes_interactive_none(
+    cli_dispatch: CliDispatchHarness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """prepare without --interactive passes interactive=None to _build_config."""
+    cli_dispatch.shield.pre_start.return_value = ["--annotation", "a=b"]
+    main(["prepare", _CONTAINER])
+    cli_dispatch.build_config.assert_called_once_with(
+        _CONTAINER, state_dir_override=None, interactive=None
+    )
+
+
 def test_prepare_interactive_passes_to_build_config(
     cli_dispatch: CliDispatchHarness, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -308,6 +319,14 @@ def test_prepare_interactive_passes_to_build_config(
     cli_dispatch.build_config.assert_called_once_with(
         _CONTAINER, state_dir_override=None, interactive=True
     )
+
+
+def test_interactive_command_dispatches_to_handler(cli_dispatch: CliDispatchHarness) -> None:
+    """interactive command routes through registry to _handle_interactive."""
+    with mock.patch("terok_shield.interactive.run_interactive") as mock_run:
+        main(["interactive", _CONTAINER])
+    mock_run.assert_called_once()
+    assert mock_run.call_args[0][1] == _CONTAINER
 
 
 def test_prepare_json_output(
