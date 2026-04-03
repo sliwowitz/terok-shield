@@ -213,6 +213,11 @@ COMMANDS: tuple[CommandDef, ...] = (
         standalone_only=True,
         args=(
             ArgDef(name="--profiles", nargs="+", help="Override default profiles"),
+            ArgDef(
+                name="--interactive",
+                action="store_true",
+                help="Enable NFQUEUE interactive verdict mode",
+            ),
             ArgDef(name="--json", action="store_true", dest="output_json", help="JSON output"),
         ),
     ),
@@ -221,7 +226,14 @@ COMMANDS: tuple[CommandDef, ...] = (
         help="Launch a shielded container via podman",
         needs_container=True,
         standalone_only=True,
-        args=(ArgDef(name="--profiles", nargs="+", help="Override default profiles"),),
+        args=(
+            ArgDef(name="--profiles", nargs="+", help="Override default profiles"),
+            ArgDef(
+                name="--interactive",
+                action="store_true",
+                help="Enable NFQUEUE interactive verdict mode",
+            ),
+        ),
     ),
     CommandDef(
         name="resolve",

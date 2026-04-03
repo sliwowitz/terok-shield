@@ -182,12 +182,30 @@ def test_prepare_parser_supports_profiles(parser: argparse.ArgumentParser) -> No
     assert parsed.profiles == ["base", "extra"]
 
 
+def test_prepare_parser_supports_interactive(parser: argparse.ArgumentParser) -> None:
+    """prepare accepts --interactive flag."""
+    parsed = parser.parse_args(["prepare", "my-ctr", "--interactive"])
+    assert parsed.interactive is True
+
+
+def test_prepare_interactive_default_false(parser: argparse.ArgumentParser) -> None:
+    """prepare defaults interactive to False."""
+    parsed = parser.parse_args(["prepare", "my-ctr"])
+    assert parsed.interactive is False
+
+
 def test_run_parser_supports_profiles(parser: argparse.ArgumentParser) -> None:
     """run accepts a positional container plus profile overrides."""
     parsed = parser.parse_args(["run", "my-ctr", "--profiles", "base"])
     assert parsed.command == "run"
     assert parsed.container == "my-ctr"
     assert parsed.profiles == ["base"]
+
+
+def test_run_parser_supports_interactive(parser: argparse.ArgumentParser) -> None:
+    """run accepts --interactive flag."""
+    parsed = parser.parse_args(["run", "my-ctr", "--interactive"])
+    assert parsed.interactive is True
 
 
 def test_logs_parser_supports_optional_container_and_count(parser: argparse.ArgumentParser) -> None:
@@ -279,6 +297,17 @@ def test_prepare_dispatches_and_prints_flags(
     assert "--annotation" in output
     assert "--name" in output
     assert _CONTAINER in output
+
+
+def test_prepare_interactive_passes_to_build_config(
+    cli_dispatch: CliDispatchHarness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """prepare --interactive passes interactive=True to _build_config."""
+    cli_dispatch.shield.pre_start.return_value = ["--annotation", "a=b"]
+    main(["prepare", _CONTAINER, "--interactive"])
+    cli_dispatch.build_config.assert_called_once_with(
+        _CONTAINER, state_dir_override=None, interactive=True
+    )
 
 
 def test_prepare_json_output(
