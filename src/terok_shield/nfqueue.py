@@ -199,23 +199,33 @@ class NfqueueHandler:
             nl_len, nl_type, _flags, _seq, _pid = NLMSG_HDR.unpack_from(data, offset)
             if nl_len < NLMSG_HDR.size or offset + nl_len > len(data):
                 break
-            subsys = (nl_type >> 8) & 0xFF
-            msg = nl_type & 0xFF
-            if subsys == _NFNL_SUBSYS_QUEUE and msg == _NFQNL_MSG_PACKET:
-                attr_offset = NLMSG_HDR.size + NFGEN_HDR.size
-                if offset + attr_offset < offset + nl_len:
-                    attrs = parse_nflog_attrs(data[offset + attr_offset : offset + nl_len])
-                    pkt = _attrs_to_packet(attrs)
-                    if pkt:
-                        packets.append(pkt)
-                    else:
-                        # Unparseable payload but we have a packet_id — must
-                        # still issue a verdict or the packet stays stuck.
-                        pid = _extract_packet_id(attrs)
-                        if pid is not None:
-                            self.verdict(pid, accept=False)
+            pkt = self._handle_one_message(data, offset, nl_len, nl_type)
+            if pkt:
+                packets.append(pkt)
             offset += (nl_len + 3) & ~3
         return packets
+
+    def _handle_one_message(
+        self, data: bytes, offset: int, nl_len: int, nl_type: int
+    ) -> QueuedPacket | None:
+        """Parse a single netlink message, auto-dropping unparseable packets."""
+        subsys = (nl_type >> 8) & 0xFF
+        msg = nl_type & 0xFF
+        if subsys != _NFNL_SUBSYS_QUEUE or msg != _NFQNL_MSG_PACKET:
+            return None
+        attr_offset = NLMSG_HDR.size + NFGEN_HDR.size
+        if offset + attr_offset >= offset + nl_len:
+            return None
+        attrs = parse_nflog_attrs(data[offset + attr_offset : offset + nl_len])
+        pkt = _attrs_to_packet(attrs)
+        if pkt:
+            return pkt
+        # Unparseable payload but we have a packet_id — must still issue
+        # a verdict or the packet stays stuck in the kernel queue.
+        pid = _extract_packet_id(attrs)
+        if pid is not None:
+            self.verdict(pid, accept=False)
+        return None
 
 
 def _extract_packet_id(attrs: dict[int, bytes]) -> int | None:
@@ -291,6 +301,6 @@ def _check_ack(sock: socket.socket) -> bool:
                 logger.debug("NFQUEUE config rejected (errno %d)", -err)
                 return False
         return True
-    except (OSError, TimeoutError):
+    except OSError:
         logger.debug("NFQUEUE ACK not received")
         return False

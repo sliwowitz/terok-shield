@@ -633,6 +633,16 @@ def verify_ruleset(
     for name in ("allow_v4", "allow_v6", "deny_v4", "deny_v6"):
         if name not in nft_output:
             errors.append(f"{name} set missing")
+    errors.extend(
+        _verify_interactive_mode(nft_output, interactive=interactive, nfqueue_num=nfqueue_num)
+    )
+    errors.extend(_verify_private_blocks(nft_output))
+    return errors
+
+
+def _verify_interactive_mode(nft_output: str, *, interactive: bool, nfqueue_num: int) -> list[str]:
+    """Verify interactive/strict mode invariants in the ruleset."""
+    errors: list[str] = []
     if interactive:
         if QUEUED_LOG_PREFIX not in nft_output:
             errors.append("queued nflog prefix missing")
@@ -644,7 +654,6 @@ def verify_ruleset(
             errors.append("queued nflog prefix present in strict mode")
         if "queue num" in nft_output:
             errors.append("nfqueue rule present in strict mode")
-    errors.extend(_verify_private_blocks(nft_output))
     return errors
 
 

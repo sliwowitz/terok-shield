@@ -481,6 +481,16 @@ class HookMode:
         """Return the resolved path to live.allowed (prevents path traversal)."""
         return state.live_allowed_path(self._config.state_dir).resolve()
 
+    def _nft_apply_best_effort(self, container: str, nft_cmd: str) -> None:
+        """Run multi-line nft commands via nsenter, swallowing errors."""
+        for line in nft_cmd.strip().splitlines():
+            parts = line.strip().split()
+            if parts:
+                try:
+                    self._runner.nft_via_nsenter(container, *parts)
+                except ExecError:
+                    pass
+
     def allow_ip(self, container: str, ip: str) -> None:
         """Live-allow an IP for a running container via nsenter."""
         ip = safe_ip(ip)
@@ -493,16 +503,9 @@ class HookMode:
             if ip in denied:
                 denied.discard(ip)
                 dp.write_text("".join(f"{d}\n" for d in sorted(denied)))
-                # Remove from nft deny set (best-effort)
                 nft_cmd = delete_deny_elements_dual([ip])
                 if nft_cmd:
-                    for line in nft_cmd.strip().splitlines():
-                        parts = line.strip().split()
-                        if parts:
-                            try:
-                                self._runner.nft_via_nsenter(container, *parts)
-                            except ExecError:
-                                pass
+                    self._nft_apply_best_effort(container, nft_cmd)
 
         # When the dnsmasq set has a default timeout (30 m), permanent IPs must use
         # 'timeout 0s' so they are never evicted by the set's per-element expiry clock.
@@ -567,13 +570,7 @@ class HookMode:
         # Add to nft deny set (prevents dnsmasq from re-allowing)
         nft_cmd = add_deny_elements_dual([ip])
         if nft_cmd:
-            for line in nft_cmd.strip().splitlines():
-                parts = line.strip().split()
-                if parts:
-                    try:
-                        self._runner.nft_via_nsenter(container, *parts)
-                    except ExecError:
-                        pass  # best-effort
+            self._nft_apply_best_effort(container, nft_cmd)
 
         # Persist to deny.list so deny sets survive shield_up / restart.
         # In interactive mode: always persist (operator rejects must stick).
@@ -582,15 +579,12 @@ class HookMode:
         should_persist = state.interactive_path(sd).is_file()
         if not should_persist:
             profile_path = state.profile_allowed_path(sd)
-            if profile_path.is_file():
-                profile_ips = {
-                    line.strip() for line in profile_path.read_text().splitlines() if line.strip()
-                }
-                should_persist = ip in profile_ips
+            should_persist = profile_path.is_file() and ip in {
+                ln.strip() for ln in profile_path.read_text().splitlines() if ln.strip()
+            }
         if should_persist:
             dp = state.deny_path(sd)
-            existing = state.read_denied_ips(sd)
-            if ip not in existing:
+            if ip not in state.read_denied_ips(sd):
                 with dp.open("a") as f:
                     f.write(f"{ip}\n")
 
