@@ -158,11 +158,24 @@ def _nfqueue_rule(nfqueue_num: int) -> str:
     """Generate the NFQUEUE terminal rule for interactive mode.
 
     Queues unmatched packets to userspace for operator verdict instead
-    of rejecting them immediately.
+    of rejecting them immediately.  Requires ``nfnetlink_queue`` kernel module.
     """
     return (
         f'        log group {NFLOG_GROUP} prefix "{QUEUED_LOG_PREFIX}: " counter\n'
         f"        queue num {nfqueue_num}"
+    )
+
+
+def _interactive_reject_rule() -> str:
+    """Generate the NFLOG+reject terminal rule for interactive mode without NFQUEUE.
+
+    Rejects unmatched packets immediately (like strict mode) but logs them
+    with the QUEUED prefix so the interactive handler can detect them via
+    NFLOG and present them for operator verdict.
+    """
+    return (
+        f'        log group {NFLOG_GROUP} prefix "{QUEUED_LOG_PREFIX}: " '
+        f"counter reject with icmpx admin-prohibited"
     )
 
 
@@ -243,18 +256,20 @@ class RulesetBuilder:
         self._set_timeout = set_timeout
         self._nfqueue_num = nfqueue_num
 
-    def build_hook(self, *, interactive: bool = False) -> str:
+    def build_hook(self, *, interactive: bool = False, nfqueue: bool = True) -> str:
         """Generate the hook-mode nftables ruleset.
 
         Args:
-            interactive: When ``True``, unknown packets are queued via
-                NFQUEUE instead of being rejected immediately.
+            interactive: When ``True``, enables interactive verdict mode.
+            nfqueue: When ``True`` (and *interactive*), uses NFQUEUE.
+                When ``False``, uses NFLOG+reject (no kernel module needed).
         """
         return hook_ruleset(
             dns=self._dns,
             loopback_ports=self._loopback_ports,
             set_timeout=self._set_timeout,
             interactive=interactive,
+            nfqueue=nfqueue,
             nfqueue_num=self._nfqueue_num,
         )
 
@@ -308,6 +323,7 @@ def hook_ruleset(
     set_timeout: str = "",
     *,
     interactive: bool = False,
+    nfqueue: bool = True,
     nfqueue_num: int = NFQUEUE_NUM,
 ) -> str:
     """Generate a per-container nftables ruleset for hook mode.
@@ -323,22 +339,24 @@ def hook_ruleset(
     Chain order (output):
         loopback → established → DNS → gateway ports → loopback ports
         → allow sets → deny sets → private-range reject → terminal
-        (strict: reject | interactive: NFQUEUE)
+        (strict: reject | interactive+nfqueue: NFQUEUE | interactive: NFLOG+reject)
 
     Args:
         dns: DNS server address (pasta default forwarder).
         loopback_ports: TCP ports to allow on the loopback interface.
         set_timeout: nft set element timeout (e.g. ``30m``).
-        interactive: When ``True``, unknown packets are queued to userspace
-            via NFQUEUE instead of being rejected immediately.
-        nfqueue_num: NFQUEUE group number (only used when *interactive*).
+        interactive: When ``True``, enables interactive verdict mode.
+        nfqueue: When ``True`` (and *interactive*), uses NFQUEUE to hold
+            packets.  When ``False``, uses NFLOG+reject (no kernel module
+            dependency).  Ignored when *interactive* is ``False``.
+        nfqueue_num: NFQUEUE group number (only used when *interactive* + *nfqueue*).
     """
     dns = safe_ip(dns)
     if set_timeout:
         _safe_timeout(set_timeout)
     for p in loopback_ports:
         _safe_port(p)
-    if interactive:
+    if interactive and nfqueue:
         _safe_nfqueue_num(nfqueue_num)
     port_rules = _loopback_port_rules(loopback_ports)
     gw_rules = _gateway_port_rules(loopback_ports)
@@ -351,7 +369,10 @@ def hook_ruleset(
     dns_af = "ip" if _is_v4(dns) else "ip6"
     set_v4 = _set_declaration("allow_v4", "ipv4_addr", set_timeout)
     set_v6 = _set_declaration("allow_v6", "ipv6_addr", set_timeout)
-    terminal = _nfqueue_rule(nfqueue_num) if interactive else _audit_deny_rule()
+    if interactive:
+        terminal = _nfqueue_rule(nfqueue_num) if nfqueue else _interactive_reject_rule()
+    else:
+        terminal = _audit_deny_rule()
     return textwrap.dedent(f"""\
         table {NFT_TABLE} {{
             {set_v4}
@@ -641,14 +662,20 @@ def verify_ruleset(
 
 
 def _verify_interactive_mode(nft_output: str, *, interactive: bool, nfqueue_num: int) -> list[str]:
-    """Verify interactive/strict mode invariants in the ruleset."""
+    """Verify interactive/strict mode invariants in the ruleset.
+
+    Interactive mode accepts either NFQUEUE (``queue num``) or NFLOG+reject
+    as valid terminal rules — the tier is auto-detected at pre_start time.
+    """
     errors: list[str] = []
     if interactive:
         if QUEUED_LOG_PREFIX not in nft_output:
             errors.append("queued nflog prefix missing")
-        expected = f"queue num {nfqueue_num}"
-        if expected not in nft_output:
-            errors.append(f"nfqueue rule missing (expected {expected})")
+        # Accept either nfqueue or nflog+reject tier
+        has_queue = f"queue num {nfqueue_num}" in nft_output
+        has_reject = "admin-prohibited" in nft_output and QUEUED_LOG_PREFIX in nft_output
+        if not has_queue and not has_reject:
+            errors.append("interactive terminal rule missing (expected queue or QUEUED+reject)")
     else:
         if QUEUED_LOG_PREFIX in nft_output:
             errors.append("queued nflog prefix present in strict mode")

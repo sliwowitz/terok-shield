@@ -404,7 +404,7 @@ class TestApplyVerdict:
 
 
 class TestRunInteractive:
-    """run_interactive validates state before starting."""
+    """run_interactive dispatches based on interactive tier."""
 
     def test_exits_if_not_interactive(self, tmp_path: Path) -> None:
         """Exits with code 1 if interactive flag file is missing."""
@@ -412,28 +412,46 @@ class TestRunInteractive:
         with pytest.raises(SystemExit, match="1"):
             run_interactive(tmp_path, "ctr")
 
-    def test_delegates_to_nsenter_reexec(self, tmp_path: Path) -> None:
-        """Without env var, run_interactive delegates to _nsenter_reexec."""
+    def test_nfqueue_tier_delegates_to_nsenter(self, tmp_path: Path) -> None:
+        """nfqueue tier without env var delegates to _nsenter_reexec."""
         state.ensure_state_dirs(tmp_path)
-        state.interactive_path(tmp_path).write_text("1\n")
+        state.interactive_path(tmp_path).write_text("nfqueue\n")
 
         with mock.patch("terok_shield.interactive._nsenter_reexec") as reexec:
             run_interactive(tmp_path, "ctr")
         reexec.assert_called_once()
         assert reexec.call_args[0][1] == "ctr"
 
-    def test_runs_directly_when_nsenter_env_set(self, tmp_path: Path) -> None:
-        """With _TEROK_SHIELD_NSENTER=1, runs verdict loop directly."""
+    def test_nfqueue_tier_runs_directly_when_env_set(self, tmp_path: Path) -> None:
+        """nfqueue tier with _TEROK_SHIELD_NSENTER=1 runs loop directly."""
         state.ensure_state_dirs(tmp_path)
-        state.interactive_path(tmp_path).write_text("1\n")
+        state.interactive_path(tmp_path).write_text("nfqueue\n")
 
         with (
             mock.patch.dict(os.environ, {"_TEROK_SHIELD_NSENTER": "1"}),
-            mock.patch("terok_shield.interactive._run_verdict_loop") as loop,
+            mock.patch("terok_shield.interactive._run_nfqueue_loop") as loop,
         ):
             run_interactive(tmp_path, "ctr", timeout=10)
         loop.assert_called_once()
         assert loop.call_args.kwargs["timeout"] == 10
+
+    def test_nflog_tier_runs_on_host(self, tmp_path: Path) -> None:
+        """nflog tier runs NflogInteractiveSession directly (no nsenter)."""
+        state.ensure_state_dirs(tmp_path)
+        state.interactive_path(tmp_path).write_text("nflog\n")
+
+        with mock.patch("terok_shield.interactive._run_nflog_loop") as loop:
+            run_interactive(tmp_path, "ctr")
+        loop.assert_called_once()
+
+    def test_legacy_value_falls_back_to_nflog(self, tmp_path: Path) -> None:
+        """Legacy "1" in interactive file maps to nflog tier."""
+        state.ensure_state_dirs(tmp_path)
+        state.interactive_path(tmp_path).write_text("1\n")
+
+        with mock.patch("terok_shield.interactive._run_nflog_loop") as loop:
+            run_interactive(tmp_path, "ctr")
+        loop.assert_called_once()
 
 
 class TestNsenterReexec:

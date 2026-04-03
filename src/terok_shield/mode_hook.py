@@ -63,6 +63,33 @@ from .util import is_ip as _is_ip, is_ipv4
 
 logger = logging.getLogger(__name__)
 
+# ── Interactive tier detection ────────────────────────
+
+
+INTERACTIVE_TIER_NFQUEUE = "nfqueue"
+INTERACTIVE_TIER_NFLOG = "nflog"
+
+
+def _nfqueue_kernel_support() -> bool:
+    """Check if the kernel supports NFQUEUE (module loaded or built-in).
+
+    Reads ``/proc/modules`` and ``modules.builtin`` — pure read-only,
+    no root needed.  Returns ``False`` when support cannot be confirmed.
+    """
+    try:
+        if "nfnetlink_queue" in Path("/proc/modules").read_text():
+            return True
+    except OSError:
+        pass
+    try:
+        release = os.uname().release
+        builtins = Path("/lib/modules", release, "modules.builtin").read_text()
+        return "nfnetlink_queue" in builtins
+    except OSError:
+        pass
+    return False
+
+
 if TYPE_CHECKING:
     from .audit import AuditLogger
     from .dns import DnsResolver
@@ -323,15 +350,26 @@ class HookMode:
         )
         ips = state.read_effective_ips(sd)
         denied_ips = list(state.read_denied_ips(sd))
-        ruleset = ruleset_builder.build_hook(interactive=interactive)
+        # Detect interactive tier: prefer NFQUEUE (packet queuing) but fall
+        # back to NFLOG+reject when the kernel module is unavailable.
+        use_nfqueue = interactive and _nfqueue_kernel_support()
+        if interactive and not use_nfqueue:
+            logger.warning(
+                "nfnetlink_queue kernel module not available — "
+                "interactive mode will use NFLOG (reject + log) instead of NFQUEUE"
+            )
+
+        ruleset = ruleset_builder.build_hook(interactive=interactive, nfqueue=use_nfqueue)
         ruleset += ruleset_builder.add_elements_dual(ips)
         if denied_ips:
             ruleset += add_deny_elements_dual(denied_ips)
         state.ruleset_path(sd).write_text(ruleset)
 
-        # Persist interactive mode flag for shield_up() and the verdict handler
+        # Persist interactive tier for shield_up() and the verdict handler.
+        # "nfqueue" or "nflog" — handler reads this to choose its socket type.
         if interactive:
-            state.interactive_path(sd).write_text("1\n")
+            tier_value = INTERACTIVE_TIER_NFQUEUE if use_nfqueue else INTERACTIVE_TIER_NFLOG
+            state.interactive_path(sd).write_text(f"{tier_value}\n")
         else:
             state.interactive_path(sd).unlink(missing_ok=True)
 
@@ -729,10 +767,12 @@ class HookMode:
     def shield_up(self, container: str) -> None:
         """Restore normal deny-all mode for a running container."""
         sd = self._config.state_dir.resolve()
-        interactive = state.interactive_path(sd).is_file()
+        interactive_tier = state.read_interactive_tier(sd)
+        interactive = interactive_tier is not None
 
         ruleset = self._container_ruleset(container)
-        rs = ruleset.build_hook(interactive=interactive)
+        use_nfqueue = interactive_tier == INTERACTIVE_TIER_NFQUEUE
+        rs = ruleset.build_hook(interactive=interactive, nfqueue=use_nfqueue)
         current = self.shield_state(container)
         if current == ShieldState.INACTIVE:
             stdin = rs
@@ -801,4 +841,6 @@ class HookMode:
         """Generate the ruleset that would be applied to a container."""
         if down:
             return self._ruleset.build_bypass(allow_all=allow_all)
-        return self._ruleset.build_hook(interactive=self._config.interactive)
+        interactive = self._config.interactive
+        use_nfqueue = interactive and _nfqueue_kernel_support()
+        return self._ruleset.build_hook(interactive=interactive, nfqueue=use_nfqueue)

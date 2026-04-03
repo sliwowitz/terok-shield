@@ -93,15 +93,17 @@ depends_on = [
     "terok_shield.netlink",
 ]
 
-# Interactive verdict loop — orchestration for NFQUEUE mode
+# Interactive verdict loop — dual-tier (NFQUEUE or NFLOG)
 [[modules]]
 path = "terok_shield.interactive"
 depends_on = [
+    "terok_shield.mode_hook",
     "terok_shield.nft",
     "terok_shield.nft_constants",
     "terok_shield.nfqueue",
     "terok_shield.run",
     "terok_shield.state",
+    "terok_shield.watch",
 ]
 
 # dnsmasq lifecycle — config generation, launch, cleanup

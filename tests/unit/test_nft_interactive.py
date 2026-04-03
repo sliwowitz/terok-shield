@@ -118,21 +118,20 @@ class TestVerifyInteractive:
         errors = verify_ruleset(rs, interactive=False)
         assert any("queue" in e.lower() or "strict" in e.lower() for e in errors)
 
-    def test_wrong_queue_num_fails(self) -> None:
-        """Interactive verification rejects mismatched queue number."""
-        rs = hook_ruleset(interactive=True, nfqueue_num=42)
-        errors = verify_ruleset(rs, interactive=True, nfqueue_num=99)
-        assert any("99" in e for e in errors)
+    def test_nflog_tier_passes_interactive_check(self) -> None:
+        """NFLOG+reject tier passes interactive verification."""
+        rs = hook_ruleset(interactive=True, nfqueue=False)
+        errors = verify_ruleset(rs, interactive=True)
+        assert errors == []
 
-    def test_builder_verify_custom_queue(self) -> None:
-        """RulesetBuilder.verify_hook passes its own nfqueue_num."""
-        builder = RulesetBuilder(nfqueue_num=77)
-        rs = builder.build_hook(interactive=True)
+    def test_builder_nflog_tier(self) -> None:
+        """RulesetBuilder with nfqueue=False generates NFLOG+reject ruleset."""
+        builder = RulesetBuilder()
+        rs = builder.build_hook(interactive=True, nfqueue=False)
+        assert "queue num" not in rs
+        assert "TEROK_SHIELD_QUEUED" in rs
+        assert "admin-prohibited" in rs
         assert builder.verify_hook(rs, interactive=True) == []
-        # A different builder with nfqueue_num=200 should reject it
-        other = RulesetBuilder(nfqueue_num=200)
-        errors = other.verify_hook(rs, interactive=True)
-        assert any("200" in e for e in errors)
 
     def test_bypass_has_deny_sets(self) -> None:
         """Bypass ruleset passes verification including deny sets."""

@@ -130,13 +130,28 @@ def denied_domains_path(state_dir: Path) -> Path:
 
 
 def interactive_path(state_dir: Path) -> Path:
-    """Return the path to the interactive mode flag file.
+    """Return the path to the interactive mode tier file.
 
-    Written by ``pre_start()`` when interactive mode is enabled.
-    Read by ``shield_up()`` and the interactive verdict handler to
-    determine whether NFQUEUE rules should be used.
+    Written by ``pre_start()`` with the interactive tier value
+    (``nfqueue`` or ``nflog``).  Read by ``shield_up()`` and the
+    interactive verdict handler to choose the socket type.
     """
     return state_dir / "interactive"
+
+
+def read_interactive_tier(state_dir: Path) -> str | None:
+    """Read the interactive tier from the state dir, or ``None`` if not set.
+
+    Returns ``"nfqueue"`` or ``"nflog"``.  Legacy value ``"1"`` (from
+    earlier versions) maps to ``"nflog"`` as the safe default.
+    """
+    p = interactive_path(state_dir)
+    if not p.is_file():
+        return None
+    value = p.read_text().strip()
+    if value in ("nfqueue", "nflog"):
+        return value
+    return "nflog"  # legacy "1" or unknown → safe fallback
 
 
 def resolv_conf_path(state_dir: Path) -> Path:
