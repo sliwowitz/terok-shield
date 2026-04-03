@@ -335,6 +335,21 @@ class TestRefreshDomainCache:
         session._refresh_domain_cache()  # should not raise
         assert session._ip_to_domain == {}
 
+    def test_oserror_preserves_previous_cache(self, tmp_path: Path) -> None:
+        """OSError during read keeps the previous cache intact."""
+        state.ensure_state_dirs(tmp_path)
+        log = state.dnsmasq_log_path(tmp_path)
+        log.write_text(f"reply kept.com is {TEST_IP1}\n")
+
+        session = _make_session(tmp_path)
+        session._refresh_domain_cache()
+        assert session._ip_to_domain[TEST_IP1] == "kept.com"
+
+        # Simulate OSError on next read (e.g. permission denied mid-rotation)
+        with mock.patch.object(type(log), "read_text", side_effect=OSError("perm")):
+            session._refresh_domain_cache()
+        assert session._ip_to_domain[TEST_IP1] == "kept.com"
+
 
 # ── InteractiveSession._apply_verdict ──────────────────
 

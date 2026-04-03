@@ -244,6 +244,14 @@ class TestInteractiveConfig:
         assert cfg.interactive is True
         assert cfg.nfqueue_timeout == 30
 
+    def test_file_config_accepts_boundary_low(self) -> None:
+        """nfqueue_timeout=1 (lower bound) is accepted."""
+        assert ShieldFileConfig(nfqueue_timeout=1).nfqueue_timeout == 1
+
+    def test_file_config_accepts_boundary_high(self) -> None:
+        """nfqueue_timeout=60 (upper bound) is accepted."""
+        assert ShieldFileConfig(nfqueue_timeout=60).nfqueue_timeout == 60
+
     def test_file_config_rejects_timeout_zero(self) -> None:
         """nfqueue_timeout=0 is rejected by Pydantic (ge=1)."""
         with pytest.raises(ValidationError):
@@ -274,3 +282,13 @@ class TestInteractiveConfig:
         cfg = ShieldConfig(state_dir=tmp_path, interactive=True, nfqueue_timeout=10)
         assert cfg.interactive is True
         assert cfg.nfqueue_timeout == 10
+
+    def test_shield_config_accepts_boundary_low(self, tmp_path: Path) -> None:
+        """ShieldConfig accepts nfqueue_timeout=1 (lower bound)."""
+        cfg = ShieldConfig(state_dir=tmp_path, interactive=True, nfqueue_timeout=1)
+        assert cfg.nfqueue_timeout == 1
+
+    def test_shield_config_accepts_boundary_high(self, tmp_path: Path) -> None:
+        """ShieldConfig accepts nfqueue_timeout=60 (upper bound)."""
+        cfg = ShieldConfig(state_dir=tmp_path, interactive=True, nfqueue_timeout=60)
+        assert cfg.nfqueue_timeout == 60

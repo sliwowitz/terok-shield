@@ -320,8 +320,9 @@ class InteractiveSession:
                     domain, ip = m.group(1).lower().rstrip("."), m.group(2)
                     new_map[ip] = domain
         except OSError:
-            pass
-        self._ip_to_domain = new_map
+            pass  # keep previous cache intact
+        else:
+            self._ip_to_domain = new_map
         self._last_domain_refresh = time.monotonic()
 
 
