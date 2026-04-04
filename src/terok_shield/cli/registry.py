@@ -12,15 +12,12 @@ Handler functions accept ``(shield, container?, **kwargs)`` and print to
 stdout, making them reusable across different CLI frontends.
 """
 
-from __future__ import annotations
-
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from .. import EnvironmentCheck, Shield
+from .. import EnvironmentCheck, Shield
 
 
 @dataclass(frozen=True)

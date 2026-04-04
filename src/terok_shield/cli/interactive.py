@@ -21,8 +21,6 @@ persisted to ``live.allowed``; denied IPs are added to the deny sets and
 persisted to ``deny.list``.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os

@@ -105,17 +105,32 @@ depends_on = [
     "terok_shield.core.state",
 ]
 
+# Hook file generation and installation — no same-layer deps
+[[modules]]
+path = "terok_shield.core.hook_install"
+layer = "core"
+depends_on = []
+
 # Hook mode — OCI hooks, per-container netns
 [[modules]]
 path = "terok_shield.core.mode_hook"
 layer = "core"
 depends_on = [
     "terok_shield.core.dnsmasq",
+    "terok_shield.core.hook_install",
     "terok_shield.core.nft",
     "terok_shield.core.nft_constants",
     "terok_shield.core.run",
     "terok_shield.core.state",
 ]
+
+# ── Resources ─────────────────────────────────────────────
+# resources/hook_entrypoint.py is NOT a tach module.  It is read as a
+# plain file by hook_install._generate_entrypoint() and installed
+# verbatim as an OCI hook script.  It has zero terok_shield imports
+# (stdlib-only, enforced by test_hook_entrypoint_isolation.py).
+# Tests import it as a Python module for white-box testing, but tests/
+# are excluded from tach.
 
 # ── Support ────────────────────────────────────────────────
 # Non-security-critical library modules.

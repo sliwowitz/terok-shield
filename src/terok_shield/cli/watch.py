@@ -9,8 +9,6 @@ event loop.  The library-level watcher classes live in
 :mod:`terok_shield.lib.watchers`.
 """
 
-from __future__ import annotations
-
 import select
 import signal
 import sys

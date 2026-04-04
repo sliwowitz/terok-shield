@@ -6,19 +6,15 @@
 Uses OCI hooks to apply per-container nftables rules inside each
 container's network namespace.  No root required -- only podman and nft.
 The stdlib-only ``hook_entrypoint.py`` applies the pre-generated ruleset at
-container creation; this module handles setup, DNS pre-resolution, and live
-allow/deny.
+container creation; this module handles DNS pre-resolution, live
+allow/deny, and shield lifecycle (up/down/state).
 
-Provides ``HookMode`` (Strategy pattern, implements ``ShieldModeBackend``)
-and ``install_hooks()`` for OCI hook file installation.
+Provides ``HookMode`` (Strategy pattern, implements ``ShieldModeBackend``).
+Hook file installation lives in :mod:`hook_install`.
 """
 
-from __future__ import annotations
-
-import json
 import logging
 import os
-import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -46,6 +42,7 @@ from ..common.podman_info import (
 )
 from ..common.util import is_ip as _is_ip, is_ipv4
 from . import dnsmasq, state
+from .hook_install import install_hooks
 from .nft import (
     NFT_TABLE,
     RulesetBuilder,
@@ -122,115 +119,6 @@ def _is_dnsmasq_tier(state_dir: Path) -> bool:
     return tier_path.read_text().strip() == DnsTier.DNSMASQ.value
 
 
-def _generate_entrypoint() -> str:
-    """Return the self-contained OCI hook entrypoint script.
-
-    The script uses ``#!/usr/bin/env python3`` so it resolves Python at
-    execution time — no virtualenv path is baked in at setup time.
-    Works for all install methods: pip, pipx, Poetry, system package.
-    """
-    return (Path(__file__).parent.parent / "resources" / "hook_entrypoint.py").read_text()
-
-
-def _generate_hook_json(entrypoint: str, stage: str) -> str:
-    """Generate an OCI hook JSON descriptor for a given stage.
-
-    Args:
-        entrypoint: Absolute path to the hook entrypoint script.
-        stage: OCI hook stage (``createRuntime`` or ``poststop``).
-    """
-    hook = {
-        "version": "1.0.0",
-        "hook": {"path": entrypoint, "args": ["terok-shield-hook", stage]},
-        "when": {"annotations": {ANNOTATION_KEY: ".*"}},
-        "stages": [stage],
-    }
-    return json.dumps(hook, indent=2) + "\n"
-
-
-def setup_global_hooks(target_dir: Path, *, use_sudo: bool = False) -> None:
-    """Install OCI hooks in a global directory for restart persistence.
-
-    Writes the entrypoint script and hook JSON files directly into
-    *target_dir*.  When *use_sudo* is True, writes to a temp directory
-    first and copies via ``sudo cp``.
-
-    Args:
-        target_dir: Global hooks directory to install into.
-        use_sudo: Use ``sudo`` for writing to the target directory.
-    """
-    import subprocess
-    import tempfile
-
-    entrypoint_name = "terok-shield-hook"
-
-    if use_sudo:
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            # Generate JSONs referencing the FINAL entrypoint path
-            final_entrypoint = target_dir / entrypoint_name
-            _write_hook_files(tmp_path / entrypoint_name, tmp_path, final_entrypoint)
-            subprocess.run(
-                ["sudo", "mkdir", "-p", str(target_dir)],
-                check=True,  # noqa: S603, S607
-            )
-            files = [str(tmp_path / entrypoint_name)]
-            for stage in ("createRuntime", "poststop"):
-                files.append(str(tmp_path / f"terok-shield-{stage}.json"))
-            subprocess.run(
-                ["sudo", "cp", *files, str(target_dir) + "/"],
-                check=True,  # noqa: S603, S607
-            )
-            subprocess.run(
-                ["sudo", "chmod", "+x", str(final_entrypoint)],  # noqa: S603, S607
-                check=True,
-            )
-    else:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        _write_hook_files(target_dir / entrypoint_name, target_dir)
-
-
-def _write_hook_files(
-    hook_entrypoint: Path,
-    hooks_dir: Path,
-    json_entrypoint_path: Path | None = None,
-) -> None:
-    """Write entrypoint script and hook JSON files.
-
-    Args:
-        hook_entrypoint: Where to write the entrypoint script.
-        hooks_dir: Where to write the hook JSON files.
-        json_entrypoint_path: Path to embed in hook JSONs (defaults to
-            *hook_entrypoint*).  Used when writing to a temp dir but
-            the JSONs need to reference the final install location.
-    """
-    hook_entrypoint.write_text(_generate_entrypoint())
-    hook_entrypoint.chmod(hook_entrypoint.stat().st_mode | stat.S_IEXEC)
-    ref_path = str(json_entrypoint_path or hook_entrypoint)
-    for stage_name in ("createRuntime", "poststop"):
-        hook_json = _generate_hook_json(ref_path, stage_name)
-        (hooks_dir / f"terok-shield-{stage_name}.json").write_text(hook_json)
-
-
-def install_hooks(*, hook_entrypoint: Path, hooks_dir: Path) -> None:
-    """Install OCI hook entrypoint and hook JSON files.
-
-    Installs hooks for the ``createRuntime`` and ``poststop`` stages.
-
-    Args:
-        hook_entrypoint: Path for the entrypoint script.
-        hooks_dir: Directory for hook JSON files.
-    """
-    hook_entrypoint.parent.mkdir(parents=True, exist_ok=True)
-    hook_entrypoint.write_text(_generate_entrypoint())
-    hook_entrypoint.chmod(hook_entrypoint.stat().st_mode | stat.S_IEXEC)
-
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-    for stage_name in ("createRuntime", "poststop"):
-        hook_json = _generate_hook_json(str(hook_entrypoint), stage_name)
-        (hooks_dir / f"terok-shield-{stage_name}.json").write_text(hook_json)
-
-
 # ── HookMode (Strategy) ─────────────────────────────────
 
 
@@ -248,10 +136,10 @@ class HookMode:
         self,
         *,
         config: ShieldConfig,
-        runner: CommandRunner,
-        audit: AuditLogger,
-        dns: DnsResolver,
-        profiles: ProfileLoader,
+        runner: "CommandRunner",
+        audit: "AuditLogger",
+        dns: "DnsResolver",
+        profiles: "ProfileLoader",
         ruleset: RulesetBuilder,
     ) -> None:
         """Create a hook mode backend with all collaborators.

@@ -9,8 +9,6 @@ podman capabilities, version, and hooks directory configuration.
 This module is stateless — callers cache the result.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import tomllib

@@ -14,8 +14,6 @@ Multiplexes three event sources into a single JSON-lines stream:
    degradation when netlink is unavailable.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -392,7 +390,7 @@ class NflogWatcher:
         self._container = container
 
     @classmethod
-    def create(cls, container: str, group: int = NFLOG_GROUP) -> NflogWatcher | None:
+    def create(cls, container: str, group: int = NFLOG_GROUP) -> "NflogWatcher | None":
         """Create and bind an NFLOG watcher, or return ``None`` on failure.
 
         Failure is expected in environments without ``AF_NETLINK`` support,
