@@ -441,6 +441,21 @@ def test_stop_already_exited_process(tmp_path: Path) -> None:
     proc.terminate.assert_not_called()
 
 
+def test_stop_inner_is_idempotent(tmp_path: Path) -> None:
+    """_stop_inner() can be called twice without error."""
+    bridge = _bridge(tmp_path)
+    proc = _mock_process()
+    bridge._process = proc
+    bridge._read_task = None
+
+    asyncio.run(bridge._stop_inner())
+    # Process already exited after first call
+    proc.returncode = 0
+    asyncio.run(bridge._stop_inner())
+
+    proc.terminate.assert_called_once()
+
+
 def test_start_unexports_on_spawn_failure(tmp_path: Path) -> None:
     """start() rolls back the D-Bus export when subprocess creation fails."""
     bridge = _bridge(tmp_path)

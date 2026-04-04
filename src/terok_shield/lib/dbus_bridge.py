@@ -180,13 +180,26 @@ class ShieldBridge:
         )
 
     async def stop(self) -> None:
-        """Terminate the subprocess and clean up resources."""
+        """Terminate the subprocess and clean up resources.
+
+        Shields cleanup from external cancellation: if ``stop()``
+        itself is cancelled while awaiting child tasks, cleanup runs
+        to completion before the ``CancelledError`` is re-raised.
+        """
+        try:
+            await asyncio.shield(self._stop_inner())
+        except asyncio.CancelledError:
+            await self._stop_inner()
+            raise
+
+    async def _stop_inner(self) -> None:
+        """Run the actual teardown sequence (unshielded)."""
         if self._read_task and not self._read_task.done():
             self._read_task.cancel()
             try:
                 await self._read_task
             except asyncio.CancelledError:
-                pass
+                pass  # expected: we just cancelled it
         if self._process and self._process.returncode is None:
             self._process.terminate()
             try:
