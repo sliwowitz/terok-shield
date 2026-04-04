@@ -528,6 +528,47 @@ class TestRunInteractive:
         mock_session_cls.return_value.run.assert_called_once()
 
 
+# ── __main__ block ───────────────────────────────────────
+
+
+class TestMainBlock:
+    """Tests for the ``if __name__ == '__main__'`` entry point."""
+
+    def test_wrong_argc_exits_2(self) -> None:
+        """Exits with code 2 when argument count is wrong."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", "terok_shield.interactive"],  # noqa: S603
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "Usage:" in result.stderr
+
+    def test_correct_args_calls_run_interactive(self, tmp_path: Path) -> None:
+        """Correct argc dispatches to run_interactive with parsed args."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [  # noqa: S603
+                sys.executable,
+                "-m",
+                "terok_shield.interactive",
+                str(tmp_path),
+                "test-ctr",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        # run_interactive will fail (no interactive tier), but the __main__
+        # block dispatched correctly — exit code 1, not 2.
+        assert result.returncode == 1
+        assert "nflog" in result.stderr
+
+
 # ── _nsenter_reexec ──────────────────────────────────────
 
 
