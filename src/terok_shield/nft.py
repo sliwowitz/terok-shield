@@ -610,8 +610,15 @@ def verify_ruleset(nft_output: str, *, interactive: bool = False) -> list[str]:
         if QUEUED_LOG_PREFIX not in nft_output:
             errors.append("queued nflog prefix missing")
     else:
-        if DENIED_LOG_PREFIX not in nft_output:
-            errors.append("deny nflog prefix missing")
+        # Verify the terminal deny-all rule specifically — not just the prefix
+        # string, which also appears in deny-set rules (ip daddr @deny_v4 ...).
+        # The terminal rule is a standalone log+reject without a daddr selector.
+        _terminal_deny_re = re.compile(
+            rf'^\s*log\s+group\s+\d+\s+prefix\s+"{re.escape(DENIED_LOG_PREFIX)}',
+            re.MULTILINE,
+        )
+        if not _terminal_deny_re.search(nft_output):
+            errors.append("terminal deny-all rule missing")
     errors.extend(_verify_private_blocks(nft_output))
     return errors
 

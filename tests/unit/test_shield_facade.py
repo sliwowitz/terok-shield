@@ -490,3 +490,71 @@ class TestCheckEnvironment:
         assert env.ok
         assert env.health == "ok"
         assert env.hooks == "global-user"
+
+    @mock.patch("terok_shield.find_hooks_dirs")
+    @mock.patch("terok_shield.has_global_hooks", return_value=True)
+    @mock.patch("terok_shield.system_hooks_dir", return_value=Path("/fake/hooks"))
+    def test_stale_hook_version_detected(
+        self,
+        _sys_dir: mock.Mock,
+        _has_hooks: mock.Mock,
+        _find_dirs: mock.Mock,
+        make_shield: ShieldHarnessFactory,
+        tmp_path: Path,
+    ) -> None:
+        """Mismatched hook version → stale-hooks health status."""
+        hooks_dir = tmp_path / "hooks.d"
+        hooks_dir.mkdir()
+        (hooks_dir / "terok-shield-hook").write_text("_BUNDLE_VERSION = 1\n")
+        _find_dirs.return_value = [hooks_dir]
+
+        harness = make_shield()
+        harness.runner.run.side_effect = _run_side_effect("5.8.0")
+        env = harness.shield.check_environment()
+        assert env.health == "stale-hooks"
+        assert any("version" in i.lower() for i in env.issues)
+
+
+# ── _read_installed_hook_version tests ────────────────────
+
+
+class TestReadInstalledHookVersion:
+    """Tests for the _read_installed_hook_version helper."""
+
+    def test_reads_version_from_hook(self, tmp_path: Path) -> None:
+        """Extracts _BUNDLE_VERSION from the entrypoint script."""
+        from terok_shield import _read_installed_hook_version
+
+        hooks_dir = tmp_path / "hooks.d"
+        hooks_dir.mkdir()
+        (hooks_dir / "terok-shield-hook").write_text("_BUNDLE_VERSION = 42\n")
+        assert _read_installed_hook_version([hooks_dir]) == 42
+
+    def test_returns_none_when_no_hook(self, tmp_path: Path) -> None:
+        """Returns None when no hook entrypoint is found."""
+        from terok_shield import _read_installed_hook_version
+
+        assert _read_installed_hook_version([tmp_path]) is None
+
+    def test_returns_none_on_oserror(self, tmp_path: Path) -> None:
+        """Returns None when the hook file cannot be read."""
+        from terok_shield import _read_installed_hook_version
+
+        hooks_dir = tmp_path / "hooks.d"
+        hooks_dir.mkdir()
+        hook = hooks_dir / "terok-shield-hook"
+        hook.write_text("_BUNDLE_VERSION = 5\n")
+        hook.chmod(0o000)
+        try:
+            assert _read_installed_hook_version([hooks_dir]) is None
+        finally:
+            hook.chmod(0o644)
+
+    def test_returns_none_on_no_match(self, tmp_path: Path) -> None:
+        """Returns None when the hook file has no _BUNDLE_VERSION line."""
+        from terok_shield import _read_installed_hook_version
+
+        hooks_dir = tmp_path / "hooks.d"
+        hooks_dir.mkdir()
+        (hooks_dir / "terok-shield-hook").write_text("#!/usr/bin/env python3\nprint('hello')\n")
+        assert _read_installed_hook_version([hooks_dir]) is None

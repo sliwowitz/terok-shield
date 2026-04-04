@@ -274,6 +274,10 @@ class InteractiveSession:
 
         ok = self._apply_verdict(pending, accept=(action == "accept"))
 
+        # Consume the entry on success; keep it for retry on failure.
+        if ok:
+            self._pending_by_ip.pop(pending.dest, None)
+
         out = {
             "type": "verdict_applied",
             "id": verdict_id,
@@ -399,9 +403,9 @@ def run_interactive(state_dir: Path, container: str) -> None:
     """
     state_dir = state_dir.resolve()
     tier = read_interactive_tier(state_dir)
-    if tier is None:
+    if tier != "nflog":
         print(
-            "Error: interactive tier not configured for this container.",
+            f"Error: interactive tier not configured (got {tier!r}, expected 'nflog').",
             file=sys.stderr,
         )
         raise SystemExit(1)

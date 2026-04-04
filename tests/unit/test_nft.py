@@ -584,7 +584,7 @@ def test_verify_ruleset_rejects_a_bypass_ruleset() -> None:
     """Bypass mode must not satisfy enforce-mode verification."""
     errors = verify_ruleset(bypass_ruleset())
     assert errors
-    assert any("deny nflog prefix" in error for error in errors)
+    assert any("terminal deny-all rule" in error for error in errors)
 
 
 def test_verify_ruleset_checks_private_ranges_by_rule_not_by_position() -> None:

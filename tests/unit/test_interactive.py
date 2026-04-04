@@ -414,9 +414,15 @@ class TestRunInteractive:
             run_interactive(tmp_path, _CONTAINER)
         assert ctx.value.code == 1
 
+    def test_exits_if_unsupported_tier(self, tmp_path: Path) -> None:
+        """run_interactive exits with code 1 for an unsupported tier marker."""
+        state.interactive_path(tmp_path).write_text("unsupported\n")
+        with pytest.raises(SystemExit) as ctx:
+            run_interactive(tmp_path, _CONTAINER)
+        assert ctx.value.code == 1
+
     def test_dispatches_to_session(self, tmp_path: Path) -> None:
-        """run_interactive creates a session and calls run() when tier is configured."""
-        # Write the interactive tier marker
+        """run_interactive creates a session and calls run() when tier is nflog."""
         state.interactive_path(tmp_path).write_text("nflog\n")
         with (
             mock.patch("terok_shield.interactive.SubprocessRunner") as mock_runner_cls,
@@ -426,3 +432,157 @@ class TestRunInteractive:
         mock_runner_cls.assert_called_once()
         mock_session_cls.assert_called_once()
         mock_session_cls.return_value.run.assert_called_once()
+
+
+# ── InteractiveSession.run / _loop coverage ──────────────
+
+
+class TestInteractiveSessionRun:
+    """Tests for InteractiveSession.run() and _loop() event loop."""
+
+    def test_run_exits_if_watcher_unavailable(self, tmp_path: Path) -> None:
+        """run() exits with code 1 if NflogWatcher.create returns None."""
+        session = _make_session(tmp_path)
+        with (
+            mock.patch("terok_shield.interactive.NflogWatcher.create", return_value=None),
+            pytest.raises(SystemExit) as ctx,
+        ):
+            session.run()
+        assert ctx.value.code == 1
+
+    def test_run_creates_watcher_and_loops(self, tmp_path: Path) -> None:
+        """run() creates a watcher, enters the loop, and closes on signal."""
+        import terok_shield.interactive as mod
+
+        session = _make_session(tmp_path)
+        mock_watcher = mock.MagicMock()
+        mock_watcher.fileno.return_value = 99
+
+        # Stop the loop after one iteration
+        original_running = mod._running
+
+        def stop_after_one(*_args: object, **_kw: object) -> tuple[list, list, list]:
+            mod._running = False
+            return ([], [], [])
+
+        mock_stdin = mock.MagicMock()
+        mock_stdin.fileno.return_value = 0
+        with (
+            mock.patch("terok_shield.interactive.NflogWatcher.create", return_value=mock_watcher),
+            mock.patch("terok_shield.interactive._set_nonblocking"),
+            mock.patch("terok_shield.interactive.select.select", side_effect=stop_after_one),
+            mock.patch("terok_shield.interactive.sys.stdin", mock_stdin),
+        ):
+            session.run()
+        mock_watcher.close.assert_called_once()
+        mod._running = original_running
+
+    def test_loop_breaks_on_select_error(self, tmp_path: Path) -> None:
+        """_loop() exits cleanly when select raises OSError."""
+        session = _make_session(tmp_path)
+        mock_watcher = mock.MagicMock()
+        mock_watcher.fileno.return_value = 99
+        with mock.patch("terok_shield.interactive.select.select", side_effect=OSError("broken")):
+            session._loop(mock_watcher, 0)
+
+    def test_loop_processes_nflog_events(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """_loop() processes queued_connection events from the watcher."""
+        import terok_shield.interactive as mod
+
+        session = _make_session(tmp_path)
+        mock_watcher = mock.MagicMock()
+        mock_watcher.fileno.return_value = 99
+        event = _make_event(TEST_IP1)
+        mock_watcher.poll.return_value = [event]
+
+        call_count = 0
+
+        def select_twice(*_a: object, **_k: object) -> tuple[list, list, list]:
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                mod._running = False
+                return ([], [], [])
+            return ([mock_watcher], [], [])
+
+        original = mod._running
+        mod._running = True
+        with mock.patch("terok_shield.interactive.select.select", side_effect=select_twice):
+            session._loop(mock_watcher, 99)
+        mod._running = original
+        out = capsys.readouterr().out.strip()
+        assert "pending" in out
+
+    def test_loop_reads_stdin_eof(self, tmp_path: Path) -> None:
+        """_loop() exits when stdin returns EOF."""
+        import terok_shield.interactive as mod
+
+        session = _make_session(tmp_path)
+        mock_watcher = mock.MagicMock()
+        mock_watcher.fileno.return_value = 99
+
+        def select_stdin(*_a: object, **_k: object) -> tuple[list, list, list]:
+            return ([42], [], [])  # stdin_fd=42
+
+        original = mod._running
+        mod._running = True
+        with (
+            mock.patch("terok_shield.interactive.select.select", side_effect=select_stdin),
+            mock.patch("terok_shield.interactive.os.read", return_value=b""),
+            mock.patch("terok_shield.interactive.sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.fileno.return_value = 42
+            session._loop(mock_watcher, 42)
+        mod._running = original
+
+
+# ── _set_nonblocking coverage ─────────────────────────────
+
+
+class TestSetNonblocking:
+    """Tests for the _set_nonblocking helper."""
+
+    def test_sets_nonblocking_flag(self) -> None:
+        """_set_nonblocking calls fcntl to set O_NONBLOCK."""
+        import fcntl as real_fcntl
+
+        from terok_shield.interactive import _set_nonblocking
+
+        mock_fcntl = mock.MagicMock()
+        mock_fcntl.F_GETFL = real_fcntl.F_GETFL
+        mock_fcntl.F_SETFL = real_fcntl.F_SETFL
+        mock_fcntl.fcntl.return_value = 0
+        with mock.patch.dict("sys.modules", {"fcntl": mock_fcntl}):
+            _set_nonblocking(5)
+        assert mock_fcntl.fcntl.call_count == 2
+
+
+# ── Verdict removes pending entry ─────────────────────────
+
+
+class TestVerdictRemovesPending:
+    """Verify that successful verdicts consume the pending entry."""
+
+    def test_successful_verdict_removes_pending(self, tmp_path: Path) -> None:
+        """A successful accept verdict removes the IP from _pending_by_ip."""
+        session = _make_session(tmp_path)
+        pkt = _PendingPacket(
+            dest=TEST_IP1, port=443, proto=6, queued_at=time.monotonic(), packet_id=1
+        )
+        session._pending_by_ip[TEST_IP1] = pkt
+        with mock.patch.object(session, "_apply_verdict", return_value=True):
+            session._process_command(json.dumps({"type": "verdict", "id": 1, "action": "accept"}))
+        assert TEST_IP1 not in session._pending_by_ip
+
+    def test_failed_verdict_keeps_pending(self, tmp_path: Path) -> None:
+        """A failed verdict keeps the entry for retry."""
+        session = _make_session(tmp_path)
+        pkt = _PendingPacket(
+            dest=TEST_IP1, port=443, proto=6, queued_at=time.monotonic(), packet_id=1
+        )
+        session._pending_by_ip[TEST_IP1] = pkt
+        with mock.patch.object(session, "_apply_verdict", return_value=False):
+            session._process_command(json.dumps({"type": "verdict", "id": 1, "action": "accept"}))
+        assert TEST_IP1 in session._pending_by_ip
