@@ -235,7 +235,7 @@ _NFULNL_CFG_CMD_UNBIND = 0
 
 # nflog attribute types (TLV in the packet payload)
 _NFULA_PACKET_HDR = 1
-_NFULA_PREFIX = 3
+_NFULA_PREFIX = 10  # NFULA_PREFIX (nfnetlink_log.h)
 _NFULA_PAYLOAD = 9
 
 # IP protocol numbers
@@ -366,28 +366,31 @@ class NflogWatcher:
             container: Container name (for event metadata).
             group: NFLOG group number to subscribe to.
         """
+        sock: socket.socket | None = None
         try:
             sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_NETFILTER)
             sock.bind((0, 0))
-            sock.setblocking(False)
+
+            # Handshake in blocking mode so the bind ACK is reliably received.
+            sock.settimeout(2.0)
             sock.send(_build_nflog_bind_msg(group))
-            # Parse the kernel's NLMSG_ERROR ACK to detect bind failures.
-            # NLMSG_ERROR layout: nlmsghdr (16 bytes) + error (int32).
-            try:
-                ack = sock.recv(4096)
-                if len(ack) >= _NLMSG_HDR.size + 4:
-                    err = struct.unpack_from("=i", ack, _NLMSG_HDR.size)[0]
-                    if err < 0:
-                        sock.close()
-                        logger.debug("NFLOG bind rejected (errno %d) — skipping", -err)
-                        return None
-            except BlockingIOError:
-                pass  # ACK not yet available; proceed optimistically
+            ack = sock.recv(4096)
+            if len(ack) >= _NLMSG_HDR.size + 4:
+                err = struct.unpack_from("=i", ack, _NLMSG_HDR.size)[0]
+                if err < 0:
+                    sock.close()
+                    logger.debug("NFLOG bind rejected (errno %d) — skipping", -err)
+                    return None
+
+            # Switch to non-blocking for the poll() loop
+            sock.setblocking(False)
             return cls(sock, container)
         except (OSError, AttributeError):
-            # OSError: netlink unavailable; AttributeError: AF_NETLINK
+            # OSError: netlink/timeout unavailable; AttributeError: AF_NETLINK
             # missing on non-Linux platforms.
             logger.debug("NFLOG socket unavailable — skipping packet events")
+            if sock is not None:
+                sock.close()
             return None
 
     def fileno(self) -> int:
@@ -448,6 +451,8 @@ class NflogWatcher:
             action = "allowed_connection"
         elif "BYPASS" in prefix:
             action = "bypass_connection"
+        elif "QUEUED" in prefix:
+            action = "queued_connection"
         else:
             action = "nflog"
 

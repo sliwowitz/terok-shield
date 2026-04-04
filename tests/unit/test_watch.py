@@ -22,6 +22,7 @@ from terok_shield.nft_constants import (
     DENIED_LOG_PREFIX,
     NFLOG_GROUP,
     PRIVATE_LOG_PREFIX,
+    QUEUED_LOG_PREFIX,
 )
 from terok_shield.watch import (
     _DOMAIN_REFRESH_INTERVAL,
@@ -681,6 +682,14 @@ class TestNflogWatcherParsing:
         assert events[0].port == 53
         assert events[0].proto == 17
 
+    def test_queued_packet_produces_queued_connection(self) -> None:
+        """NFLOG message with QUEUED prefix yields queued_connection event."""
+        watcher = self._make_watcher()
+        data = _make_nflog_packet(f"{QUEUED_LOG_PREFIX}: ", "192.0.2.1", 6, 443)
+        events = watcher._parse_messages(data)
+        assert len(events) == 1
+        assert events[0].action == "queued_connection"
+
     def test_unknown_prefix_yields_nflog_action(self) -> None:
         """NFLOG message with unrecognized prefix yields generic nflog action."""
         watcher = self._make_watcher()
@@ -770,14 +779,18 @@ class TestNflogWatcherCreate:
         assert result is None
 
     def test_returns_watcher_on_success(self) -> None:
-        """create() returns a NflogWatcher when socket succeeds."""
+        """create() returns a NflogWatcher when bind ACK succeeds."""
         mock_sock = MagicMock(spec=socket.socket)
-        mock_sock.recv.side_effect = BlockingIOError  # ACK read
+        # Build a success ACK (error code 0)
+        ack_payload = struct.pack("=i", 0)
+        ack = _NLMSG_HDR.pack(_NLMSG_HDR.size + len(ack_payload), 2, 0, 0, 0) + ack_payload
+        mock_sock.recv.return_value = ack
         with patch("terok_shield.watch.socket.socket", return_value=mock_sock):
             result = NflogWatcher.create(_CONTAINER)
         assert result is not None
         assert isinstance(result, NflogWatcher)
         mock_sock.bind.assert_called_once_with((0, 0))
+        mock_sock.settimeout.assert_called_once_with(2.0)
         mock_sock.setblocking.assert_called_once_with(False)
         mock_sock.send.assert_called_once()
         assert len(mock_sock.send.call_args[0][0]) >= _NLMSG_HDR.size
@@ -788,6 +801,15 @@ class TestNflogWatcherCreate:
         with patch("terok_shield.watch.socket.socket", side_effect=AttributeError):
             result = NflogWatcher.create(_CONTAINER)
         assert result is None
+
+    def test_returns_none_and_closes_socket_on_timeout(self) -> None:
+        """create() returns None and closes the socket when recv times out."""
+        mock_sock = MagicMock(spec=socket.socket)
+        mock_sock.recv.side_effect = OSError("timed out")
+        with patch("terok_shield.watch.socket.socket", return_value=mock_sock):
+            result = NflogWatcher.create(_CONTAINER)
+        assert result is None
+        mock_sock.close.assert_called_once()
 
     def test_returns_none_on_bind_nack(self) -> None:
         """create() returns None when the kernel ACK contains a negative error code."""
