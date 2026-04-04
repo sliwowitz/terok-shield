@@ -227,3 +227,27 @@ class TestShieldFileConfigAuditValidation:
         """audit.enabled must be a boolean."""
         with pytest.raises(ValidationError):
             ShieldFileConfig(audit={"enabled": "yes-please"})  # type: ignore[arg-type]
+
+
+class TestShieldFileConfigNfqueueTimeout:
+    """nfqueue_timeout validation and defaults."""
+
+    def test_default_value(self) -> None:
+        """nfqueue_timeout defaults to 5 seconds."""
+        cfg = ShieldFileConfig()
+        assert cfg.nfqueue_timeout == 5
+
+    def test_valid_range(self) -> None:
+        """Values within 1–300 are accepted."""
+        assert ShieldFileConfig(nfqueue_timeout=1).nfqueue_timeout == 1
+        assert ShieldFileConfig(nfqueue_timeout=300).nfqueue_timeout == 300
+
+    def test_zero_rejected(self) -> None:
+        """Timeout of 0 is rejected (minimum is 1)."""
+        with pytest.raises(ValidationError):
+            ShieldFileConfig(nfqueue_timeout=0)
+
+    def test_too_high_rejected(self) -> None:
+        """Timeout above 300 is rejected."""
+        with pytest.raises(ValidationError):
+            ShieldFileConfig(nfqueue_timeout=301)

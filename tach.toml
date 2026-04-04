@@ -30,6 +30,19 @@ depends_on = [
     "terok_shield.nft_constants",
 ]
 
+# Shared netlink struct definitions — no dependencies
+[[modules]]
+path = "terok_shield.netlink"
+depends_on = []
+
+# NFQUEUE handler — depends on netlink + nft_constants
+[[modules]]
+path = "terok_shield.nfqueue"
+depends_on = [
+    "terok_shield.netlink",
+    "terok_shield.nft_constants",
+]
+
 # Per-container state bundle layout — zero dependencies
 [[modules]]
 path = "terok_shield.state"
@@ -95,6 +108,7 @@ path = "terok_shield.watch"
 depends_on = [
     "terok_shield.config",
     "terok_shield.dnsmasq",
+    "terok_shield.netlink",
     "terok_shield.nft_constants",
     "terok_shield.state",
 ]
@@ -113,11 +127,12 @@ depends_on = [
     "terok_shield.util",
 ]
 
-# Interactive verdict loop — NFLOG-based operator approval
+# Interactive verdict loop — NFLOG + NFQUEUE operator approval
 [[modules]]
 path = "terok_shield.interactive"
 depends_on = [
     "terok_shield.nft",
+    "terok_shield.nfqueue",
     "terok_shield.run",
     "terok_shield.state",
     "terok_shield.watch",

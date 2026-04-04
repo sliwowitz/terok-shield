@@ -21,6 +21,7 @@ from .nft_constants import (
     BYPASS_LOG_PREFIX,
     DENIED_LOG_PREFIX,
     NFLOG_GROUP,
+    NFQUEUE_NUM,
     NFT_TABLE,
     PASTA_DNS,
     PASTA_HOST_LOOPBACK_MAP,
@@ -145,7 +146,7 @@ def _deny_set_rules() -> str:
 
 
 def _interactive_reject_rule() -> str:
-    """Generate the NFLOG+reject terminal rule for interactive mode.
+    """Generate the NFLOG+reject terminal rule for interactive NFLOG mode.
 
     Rejects unmatched packets immediately but logs them with the QUEUED prefix
     so the interactive handler can detect them via NFLOG.
@@ -154,6 +155,15 @@ def _interactive_reject_rule() -> str:
         f'        log group {NFLOG_GROUP} prefix "{QUEUED_LOG_PREFIX}: " '
         f"counter reject with icmpx admin-prohibited"
     )
+
+
+def _nfqueue_rule() -> str:
+    """Generate the NFQUEUE terminal rule for interactive NFQUEUE mode.
+
+    Queues unmatched packets to the kernel NFQUEUE where the interactive
+    handler holds them until a verdict (accept/drop) is issued.
+    """
+    return f"        counter queue num {NFQUEUE_NUM}"
 
 
 def _loopback_port_rules(ports: tuple[int, ...]) -> str:
@@ -229,13 +239,14 @@ class RulesetBuilder:
         self._loopback_ports = loopback_ports
         self._set_timeout = set_timeout
 
-    def build_hook(self, *, interactive: bool = False) -> str:
+    def build_hook(self, *, interactive: bool = False, nfqueue: bool = False) -> str:
         """Generate the hook-mode (deny-all) nftables ruleset."""
         return hook_ruleset(
             dns=self._dns,
             loopback_ports=self._loopback_ports,
             set_timeout=self._set_timeout,
             interactive=interactive,
+            nfqueue=nfqueue,
         )
 
     def build_bypass(self, *, allow_all: bool = False) -> str:
@@ -247,9 +258,11 @@ class RulesetBuilder:
             set_timeout=self._set_timeout,
         )
 
-    def verify_hook(self, nft_output: str, *, interactive: bool = False) -> list[str]:
+    def verify_hook(
+        self, nft_output: str, *, interactive: bool = False, nfqueue: bool = False
+    ) -> list[str]:
         """Check applied hook ruleset invariants.  Returns errors (empty = OK)."""
-        return verify_ruleset(nft_output, interactive=interactive)
+        return verify_ruleset(nft_output, interactive=interactive, nfqueue=nfqueue)
 
     def verify_bypass(self, nft_output: str, *, allow_all: bool = False) -> list[str]:
         """Check applied bypass ruleset invariants.  Returns errors (empty = OK)."""
@@ -288,6 +301,7 @@ def hook_ruleset(
     set_timeout: str = "",
     *,
     interactive: bool = False,
+    nfqueue: bool = False,
 ) -> str:
     """Generate a per-container nftables ruleset for hook mode.
 
@@ -308,7 +322,10 @@ def hook_ruleset(
         loopback_ports: TCP ports to allow on the loopback interface.
         set_timeout: nft set element timeout (e.g. ``30m``).
         interactive: When True, replaces the terminal deny-all rule with an
-            NFLOG+reject rule using the QUEUED prefix for interactive handling.
+            interactive terminal rule (NFLOG+reject or NFQUEUE).
+        nfqueue: When True (and *interactive* is True), uses an NFQUEUE
+            terminal rule instead of NFLOG+reject.  Requires kernel
+            ``nfnetlink_queue`` support.
     """
     dns = safe_ip(dns)
     if set_timeout:
@@ -328,7 +345,10 @@ def hook_ruleset(
     set_v6 = _set_declaration("allow_v6", "ipv6_addr", set_timeout)
     set_deny_v4 = _set_declaration("deny_v4", "ipv4_addr")
     set_deny_v6 = _set_declaration("deny_v6", "ipv6_addr")
-    terminal_rule = _interactive_reject_rule() if interactive else _audit_deny_rule()
+    if interactive:
+        terminal_rule = _nfqueue_rule() if nfqueue else _interactive_reject_rule()
+    else:
+        terminal_rule = _audit_deny_rule()
     return textwrap.dedent(f"""\
         table {NFT_TABLE} {{
             {set_v4}
@@ -577,18 +597,21 @@ def _verify_private_blocks(nft_output: str) -> list[str]:
     return errors
 
 
-def verify_ruleset(nft_output: str, *, interactive: bool = False) -> list[str]:
+def verify_ruleset(
+    nft_output: str, *, interactive: bool = False, nfqueue: bool = False
+) -> list[str]:
     """Check applied ruleset invariants.  Returns errors (empty = OK).
 
     Verifies:
     - Default policy is drop
     - Both output and input chains exist
-    - Reject type is present
+    - Reject type is present (unless nfqueue — packets are queued, not rejected)
     - Dual-stack allow sets are declared
     - Dual-stack deny sets are declared
     - All private ranges are present (RFC 1918 + RFC 4193/4291)
-    - Interactive mode: queued nflog prefix present
-    - Non-interactive mode: deny nflog prefix present
+    - Interactive NFLOG: queued nflog prefix present
+    - Interactive NFQUEUE: ``queue num`` present
+    - Non-interactive: deny nflog prefix present
     """
     errors: list[str] = []
     if "policy drop" not in nft_output:
@@ -596,7 +619,9 @@ def verify_ruleset(nft_output: str, *, interactive: bool = False) -> list[str]:
     for chain in ("output", "input"):
         if f"chain {chain}" not in nft_output:
             errors.append(f"{chain} chain missing")
-    if "admin-prohibited" not in nft_output:
+    # NFQUEUE mode queues packets instead of rejecting — admin-prohibited is
+    # still present from private-range rules, but not the terminal rule.
+    if not (interactive and nfqueue) and "admin-prohibited" not in nft_output:
         errors.append("reject type missing")
     if "allow_v4" not in nft_output:
         errors.append("allow_v4 set missing")
@@ -607,7 +632,10 @@ def verify_ruleset(nft_output: str, *, interactive: bool = False) -> list[str]:
     if "deny_v6" not in nft_output:
         errors.append("deny_v6 set missing")
     if interactive:
-        if QUEUED_LOG_PREFIX not in nft_output:
+        if nfqueue:
+            if f"queue num {NFQUEUE_NUM}" not in nft_output:
+                errors.append("nfqueue terminal rule missing")
+        elif QUEUED_LOG_PREFIX not in nft_output:
             errors.append("queued nflog prefix missing")
     else:
         # Verify the terminal deny-all rule specifically — not just the prefix

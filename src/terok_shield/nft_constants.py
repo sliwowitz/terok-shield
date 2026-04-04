@@ -59,3 +59,6 @@ PRIVATE_LOG_PREFIX = "TEROK_SHIELD_PRIVATE"
 ALLOWED_LOG_PREFIX = "TEROK_SHIELD_ALLOWED"
 BYPASS_LOG_PREFIX = "TEROK_SHIELD_BYPASS"
 QUEUED_LOG_PREFIX = "TEROK_SHIELD_QUEUED"
+
+# ── NFQUEUE ────────────────────────────────────────────
+NFQUEUE_NUM = 200  # nfqueue group number for interactive packet queuing

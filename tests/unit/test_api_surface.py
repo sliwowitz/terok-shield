@@ -91,6 +91,7 @@ class TestAPISurface:
             "audit_enabled",
             "profiles_dir",
             "interactive",
+            "nfqueue_timeout",
         ]
 
         cfg = make_config()

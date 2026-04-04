@@ -105,6 +105,31 @@ def _split_domains_ips(entries: list[str]) -> tuple[list[str], list[str]]:
     return domains, raw_ips
 
 
+def _nfqueue_kernel_support() -> bool:
+    """Check if the kernel has NFQUEUE support (module loaded or built-in).
+
+    Reads ``/proc/modules`` for ``nfnetlink_queue`` and falls back to
+    ``modules.builtin`` for statically compiled kernels.  Pure read-only,
+    no root required.
+    """
+    try:
+        modules = Path("/proc/modules").read_text()
+        if "nfnetlink_queue" in modules:
+            return True
+    except OSError:
+        pass
+
+    # Check built-in modules for statically compiled kernels
+    import platform
+
+    release = platform.release()
+    builtin = Path(f"/lib/modules/{release}/modules.builtin")
+    try:
+        return "nfnetlink_queue" in builtin.read_text()
+    except OSError:
+        return False
+
+
 def _is_dnsmasq_tier(state_dir: Path) -> bool:
     """Return True when the container's DNS tier is dnsmasq (or unknown).
 
@@ -313,9 +338,20 @@ class HookMode:
         state.upstream_dns_path(sd).write_text(f"{upstream_dns}\n")
         state.dns_tier_path(sd).write_text(f"{tier.value}\n")
 
+        # Detect interactive tier: nfqueue if kernel supports it, else nflog
+        interactive = self._config.interactive
+        use_nfqueue = False
+        if interactive:
+            use_nfqueue = _nfqueue_kernel_support()
+            tier_name = "nfqueue" if use_nfqueue else "nflog"
+            state.interactive_path(sd).write_text(f"{tier_name}\n")
+            if not use_nfqueue:
+                logger.info("nfnetlink_queue unavailable — using NFLOG interactive tier")
+        else:
+            state.interactive_path(sd).unlink(missing_ok=True)
+
         # Pre-generate complete nft ruleset (gateway sets start empty; hook populates them)
         set_timeout = NFT_SET_TIMEOUT_DNSMASQ if tier == DnsTier.DNSMASQ else ""
-        interactive = self._config.interactive
         ruleset_builder = RulesetBuilder(
             dns=upstream_dns,
             loopback_ports=self._config.loopback_ports,
@@ -323,17 +359,11 @@ class HookMode:
         )
         ips = state.read_effective_ips(sd)
         denied_ips = list(state.read_denied_ips(sd))
-        ruleset = ruleset_builder.build_hook(interactive=interactive)
+        ruleset = ruleset_builder.build_hook(interactive=interactive, nfqueue=use_nfqueue)
         ruleset += ruleset_builder.add_elements_dual(ips)
         if denied_ips:
             ruleset += add_deny_elements_dual(denied_ips)
         state.ruleset_path(sd).write_text(ruleset)
-
-        # Persist interactive mode flag for shield_up() and the verdict handler
-        if interactive:
-            state.interactive_path(sd).write_text("nflog\n")
-        else:
-            state.interactive_path(sd).unlink(missing_ok=True)
 
         # Pre-generate dnsmasq config if using dnsmasq tier; otherwise scrub
         # stale artifacts so hook_entrypoint.py does not launch dnsmasq when
@@ -728,10 +758,12 @@ class HookMode:
     def shield_up(self, container: str) -> None:
         """Restore normal deny-all mode for a running container."""
         sd = self._config.state_dir.resolve()
-        interactive = state.interactive_path(sd).is_file()
+        tier = state.read_interactive_tier(sd)
+        interactive = tier is not None
+        use_nfqueue = tier == "nfqueue"
 
         ruleset = self._container_ruleset(container)
-        rs = ruleset.build_hook(interactive=interactive)
+        rs = ruleset.build_hook(interactive=interactive, nfqueue=use_nfqueue)
         current = self.shield_state(container)
         if current == ShieldState.INACTIVE:
             stdin = rs
@@ -772,7 +804,7 @@ class HookMode:
                     )
 
         output = self._runner.nft_via_nsenter(container, "list", "ruleset")
-        errors = ruleset.verify_hook(output, interactive=interactive)
+        errors = ruleset.verify_hook(output, interactive=interactive, nfqueue=use_nfqueue)
         if errors:
             raise RuntimeError(f"Ruleset verification failed: {'; '.join(errors)}")
 
@@ -788,10 +820,12 @@ class HookMode:
         if not self._ruleset.verify_bypass(output, allow_all=True):
             return ShieldState.DOWN_ALL
 
-        # Check both strict and interactive hook rulesets
+        # Check strict, interactive-nflog, and interactive-nfqueue hook rulesets
         if not self._ruleset.verify_hook(output):
             return ShieldState.UP
         if not self._ruleset.verify_hook(output, interactive=True):
+            return ShieldState.UP
+        if not self._ruleset.verify_hook(output, interactive=True, nfqueue=True):
             return ShieldState.UP
 
         return ShieldState.ERROR

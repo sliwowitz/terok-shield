@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import state
+from .nfqueue import NfqueueHandler, QueuedPacket
 from .nft import add_deny_elements_dual, add_elements_dual
 from .run import CommandRunner, SubprocessRunner
 from .state import read_interactive_tier
@@ -372,6 +373,317 @@ class InteractiveSession:
         self._ip_to_domain = mapping
 
 
+# ── NFQUEUE Session ───────────────────────────────────
+
+
+class NfqueueInteractiveSession:
+    """Drive the interactive NFQUEUE verdict loop.
+
+    Creates an :class:`NfqueueHandler`, listens for queued packets,
+    emits pending events as JSON lines on stdout, reads verdict commands
+    from stdin, and issues accept/drop verdicts to the kernel.  Packets
+    are held in the kernel queue until a verdict is issued or the
+    configured timeout expires (auto-drop).
+    """
+
+    def __init__(
+        self,
+        *,
+        runner: CommandRunner,
+        state_dir: Path,
+        container: str,
+        timeout: int = 5,
+    ) -> None:
+        """Initialise the NFQUEUE session.
+
+        Args:
+            runner: Command runner for nft operations.
+            state_dir: Per-container state directory.
+            container: Container name (for nft nsenter).
+            timeout: Seconds before auto-dropping unverdicted packets.
+        """
+        self._runner = runner
+        self._state_dir = state_dir
+        self._container = container
+        self._timeout = timeout
+
+        self._seen_ips: set[str] = set()
+        self._pending_by_ip: dict[str, _PendingPacket] = {}
+        self._ip_to_domain: dict[str, str] = {}
+        self._last_domain_refresh: float = 0.0
+        self._next_id: int = 1
+
+    def run(self) -> None:
+        """Enter the interactive NFQUEUE event loop.
+
+        Creates the NFQUEUE handler, sets stdin to non-blocking, installs
+        signal handlers, and delegates to :meth:`_loop`.
+        """
+        handler = NfqueueHandler.create()
+        if handler is None:
+            print(
+                "Error: could not create NFQUEUE handler (nfnetlink_queue unavailable).",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        stdin_fd = sys.stdin.fileno()
+        _set_nonblocking(stdin_fd)
+
+        global _running  # noqa: PLW0603
+        _running = True
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
+
+        try:
+            self._loop(handler, stdin_fd)
+        finally:
+            handler.close()
+
+    def _loop(self, handler: NfqueueHandler, stdin_fd: int) -> None:
+        """Select-based event loop multiplexing NFQUEUE and stdin.
+
+        Args:
+            handler: The NFQUEUE netlink handler.
+            stdin_fd: File descriptor for stdin (set to non-blocking).
+        """
+        buf = ""
+        while _running:
+            if time.monotonic() - self._last_domain_refresh > _DOMAIN_REFRESH_INTERVAL:
+                self._refresh_domain_cache()
+
+            self._expire_stale_packets(handler)
+
+            try:
+                readable, _, _ = select.select([handler, stdin_fd], [], [], 1.0)
+            except (OSError, ValueError):
+                break
+
+            fds = _readable_fds(readable)
+            if handler.fileno() in fds:
+                self._drain_handler(handler)
+            if stdin_fd in fds:
+                result = self._read_stdin(handler, buf)
+                if result is None:
+                    break
+                buf = result
+
+    def _drain_handler(self, handler: NfqueueHandler) -> None:
+        """Process all pending NFQUEUE packets from the handler.
+
+        Args:
+            handler: The NFQUEUE handler to drain.
+        """
+        for pkt in handler.poll():
+            self._handle_queued_packet(handler, pkt)
+
+    def _handle_queued_packet(self, handler: NfqueueHandler, pkt: QueuedPacket) -> None:
+        """Process a queued NFQUEUE packet.
+
+        Deduplicates by destination IP.  First packet to a given IP emits a
+        pending event; subsequent packets to the same IP are auto-accepted
+        (if previously accepted) or auto-dropped (if previously denied or
+        still pending).
+
+        Args:
+            handler: The NFQUEUE handler for issuing auto-verdicts.
+            pkt: The queued packet from the kernel.
+        """
+        ip = pkt.dest
+        if ip in self._seen_ips and ip not in self._pending_by_ip:
+            # Already verdicted — auto-accept (IP was allowed)
+            handler.verdict(pkt.packet_id, accept=True)
+            return
+        if ip in self._pending_by_ip:
+            # Still pending verdict — drop duplicate
+            handler.verdict(pkt.packet_id, accept=False)
+            return
+
+        self._seen_ips.add(ip)
+        domain = self._ip_to_domain.get(ip, "")
+        event_id = self._next_id
+        self._next_id += 1
+
+        pending = _PendingPacket(
+            dest=ip,
+            port=pkt.port,
+            proto=pkt.proto,
+            queued_at=time.monotonic(),
+            domain=domain,
+            packet_id=pkt.packet_id,
+        )
+        self._pending_by_ip[ip] = pending
+
+        out = {
+            "type": "pending",
+            "id": event_id,
+            "dest": ip,
+            "port": pkt.port,
+            "proto": pkt.proto,
+            "domain": domain,
+        }
+        print(json.dumps(out, separators=(",", ":")), flush=True)
+
+    def _expire_stale_packets(self, handler: NfqueueHandler) -> None:
+        """Drop packets that have been pending longer than the timeout.
+
+        Args:
+            handler: The NFQUEUE handler for issuing drop verdicts.
+        """
+        now = time.monotonic()
+        expired = [ip for ip, p in self._pending_by_ip.items() if now - p.queued_at > self._timeout]
+        for ip in expired:
+            pending = self._pending_by_ip.pop(ip)
+            handler.verdict(pending.packet_id, accept=False)
+            logger.debug("Auto-dropped packet to %s (timeout)", ip)
+
+    def _read_stdin(self, handler: NfqueueHandler, buf: str) -> str | None:
+        """Read available bytes from stdin and process complete lines.
+
+        Returns the updated buffer, or ``None`` on EOF.
+
+        Args:
+            handler: NFQUEUE handler for issuing verdicts.
+            buf: Accumulated partial line from previous reads.
+        """
+        try:
+            data = os.read(sys.stdin.fileno(), 4096)
+        except OSError:
+            return buf
+        if not data:
+            return None
+
+        buf += data.decode("utf-8", errors="replace")
+        while "\n" in buf:
+            line, buf = buf.split("\n", 1)
+            line = line.strip()
+            if line:
+                self._process_command(handler, line)
+        return buf
+
+    def _process_command(self, handler: NfqueueHandler, line: str) -> None:
+        """Parse and execute a single JSON command from stdin.
+
+        Args:
+            handler: NFQUEUE handler for issuing verdicts.
+            line: A single JSON line from the controlling process.
+        """
+        try:
+            cmd = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("Invalid JSON on stdin: %s", line)
+            return
+
+        if not isinstance(cmd, dict):
+            return
+        if cmd.get("type") != "verdict":
+            return
+
+        verdict_id = cmd.get("id")
+        if isinstance(verdict_id, bool) or not isinstance(verdict_id, int):
+            return
+
+        action = cmd.get("action")
+        if action not in ("accept", "deny"):
+            return
+
+        pending = next((p for p in self._pending_by_ip.values() if p.packet_id == verdict_id), None)
+        if pending is None:
+            # Try by sequential id (packet_id may have been reassigned)
+            pending = next(
+                (p for i, p in enumerate(self._pending_by_ip.values(), 1) if i == verdict_id),
+                None,
+            )
+        if pending is None:
+            logger.warning("No pending packet with id %d", verdict_id)
+            return
+
+        accept = action == "accept"
+        handler.verdict(pending.packet_id, accept=accept)
+        ok = self._apply_verdict(pending, accept=accept)
+
+        if ok:
+            self._pending_by_ip.pop(pending.dest, None)
+
+        out = {
+            "type": "verdict_applied",
+            "id": verdict_id,
+            "dest": pending.dest,
+            "action": action,
+            "ok": ok,
+        }
+        print(json.dumps(out, separators=(",", ":")), flush=True)
+
+    def _apply_verdict(self, pending: _PendingPacket, *, accept: bool) -> bool:
+        """Apply verdict to nft ruleset and persist to state files.
+
+        Args:
+            pending: The pending packet to verdict.
+            accept: True for accept, False for deny.
+
+        Returns:
+            True if the verdict was successfully applied.
+        """
+        ip = pending.dest
+        if accept:
+            permanent = self._is_dnsmasq_tier()
+            nft_cmd = add_elements_dual([ip], permanent=permanent)
+        else:
+            nft_cmd = add_deny_elements_dual([ip])
+
+        if nft_cmd and not self._nft_apply(nft_cmd):
+            return False
+
+        if accept:
+            _append_unique(state.live_allowed_path(self._state_dir), ip)
+        else:
+            _append_unique(state.deny_path(self._state_dir), ip)
+        return True
+
+    def _nft_apply(self, nft_cmd: str) -> bool:
+        """Apply nft commands via nsenter into the container's network namespace.
+
+        Args:
+            nft_cmd: One or more nft commands (newline-separated).
+
+        Returns:
+            True if all commands succeeded.
+        """
+        for line in nft_cmd.strip().splitlines():
+            parts = line.strip().split()
+            if not parts:
+                continue
+            try:
+                self._runner.nft_via_nsenter(self._container, *parts)
+            except Exception:
+                logger.exception("nft command failed: %s", line)
+                return False
+        return True
+
+    def _is_dnsmasq_tier(self) -> bool:
+        """Return True when the container uses the dnsmasq DNS tier."""
+        tier_path = state.dns_tier_path(self._state_dir)
+        try:
+            return tier_path.is_file() and tier_path.read_text().strip() == "dnsmasq"
+        except OSError:
+            return False
+
+    def _refresh_domain_cache(self) -> None:
+        """Reload the IP-to-domain mapping from the dnsmasq query log."""
+        self._last_domain_refresh = time.monotonic()
+        log_path = state.dnsmasq_log_path(self._state_dir)
+        try:
+            text = log_path.read_text()
+        except OSError:
+            return
+
+        mapping: dict[str, str] = {}
+        for m in _REPLY_RE.finditer(text):
+            domain, ip = m.group(1), m.group(2)
+            mapping[ip] = domain.lower().rstrip(".")
+        self._ip_to_domain = mapping
+
+
 # ── Helpers ────────────────────────────────────────────
 
 
@@ -455,27 +767,26 @@ def _nsenter_reexec(state_dir: Path, container: str) -> None:
 
 
 def run_interactive(state_dir: Path, container: str) -> None:
-    """Start the interactive NFLOG handler for a container.
+    """Start the interactive handler for a container.
 
-    The NFLOG netlink socket must be inside the container's network
-    namespace to receive packets logged by nft rules.  On first
-    invocation, re-execs via ``podman unshare nsenter`` into the
-    container's netns.  The re-exec sets ``_TEROK_SHIELD_NFLOG_NSENTER``
-    so the second invocation runs the handler directly.
+    Reads the persisted interactive tier (``nflog`` or ``nfqueue``) and
+    dispatches to the appropriate session class.  Both tiers require
+    the handler to run inside the container's network namespace — on
+    first invocation, re-execs via ``podman unshare nsenter``.
 
     Args:
         state_dir: Per-container state directory (may be relative).
         container: Container name.
 
     Raises:
-        SystemExit: If the interactive tier is not configured or NFLOG
-            watcher creation fails.
+        SystemExit: If the interactive tier is not configured or handler
+            creation fails.
     """
     state_dir = state_dir.resolve()
     tier = read_interactive_tier(state_dir)
-    if tier != "nflog":
+    if tier not in ("nflog", "nfqueue"):
         print(
-            f"Error: interactive tier not configured (got {tier!r}, expected 'nflog').",
+            f"Error: interactive tier not configured (got {tier!r}, expected 'nflog' or 'nfqueue').",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -485,7 +796,12 @@ def run_interactive(state_dir: Path, container: str) -> None:
         return
 
     runner = SubprocessRunner()
-    session = InteractiveSession(runner=runner, state_dir=state_dir, container=container)
+    if tier == "nfqueue":
+        session: InteractiveSession | NfqueueInteractiveSession = NfqueueInteractiveSession(
+            runner=runner, state_dir=state_dir, container=container
+        )
+    else:
+        session = InteractiveSession(runner=runner, state_dir=state_dir, container=container)
     session.run()
 
 

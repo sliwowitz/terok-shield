@@ -16,6 +16,13 @@ import pytest
 
 import terok_shield.watch as _watch_mod
 from terok_shield.config import DnsTier
+from terok_shield.netlink import (
+    NFA_HDR as _NFA_HDR,
+    NFGEN_HDR as _NFGEN_HDR,
+    NLMSG_HDR as _NLMSG_HDR,
+    extract_ip_dest as _extract_ip_dest,
+    parse_nflog_attrs as _parse_nflog_attrs,
+)
 from terok_shield.nft_constants import (
     ALLOWED_LOG_PREFIX,
     BYPASS_LOG_PREFIX,
@@ -26,13 +33,10 @@ from terok_shield.nft_constants import (
 )
 from terok_shield.watch import (
     _DOMAIN_REFRESH_INTERVAL,
-    _NFA_HDR,
-    _NFGEN_HDR,
     _NFNL_SUBSYS_ULOG,
     _NFULA_PAYLOAD,
     _NFULA_PREFIX,
     _NFULNL_MSG_PACKET,
-    _NLMSG_HDR,
     _QUERY_RE,
     AuditLogWatcher,
     DnsLogWatcher,
@@ -40,9 +44,7 @@ from terok_shield.watch import (
     WatchEvent,
     _build_nflog_bind_msg,
     _ensure_log_file,
-    _extract_ip_dest,
     _handle_signal,
-    _parse_nflog_attrs,
     run_watch,
 )
 from tests.testnet import BLOCKED_DOMAIN, BLOCKED_SUBDOMAIN, TEST_DOMAIN, TEST_DOMAIN2

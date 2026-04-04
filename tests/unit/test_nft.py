@@ -286,6 +286,47 @@ def test_verify_ruleset_interactive_mode_cross_validates() -> None:
     assert any("queued nflog prefix" in e for e in errors)
 
 
+# ── NFQUEUE mode ──────────────────────────────────────────
+
+
+def test_hook_ruleset_nfqueue_contains_queue_num() -> None:
+    """NFQUEUE interactive mode uses 'queue num' terminal rule."""
+    ruleset = hook_ruleset(interactive=True, nfqueue=True)
+    assert "queue num 200" in ruleset
+
+
+def test_hook_ruleset_nfqueue_no_queued_log_prefix() -> None:
+    """NFQUEUE mode does not use the NFLOG reject terminal rule."""
+    ruleset = hook_ruleset(interactive=True, nfqueue=True)
+    assert _QUEUED_LOG_PREFIX not in ruleset
+
+
+def test_hook_ruleset_nfqueue_still_has_private_ranges() -> None:
+    """NFQUEUE mode still has private-range reject rules."""
+    ruleset = hook_ruleset(interactive=True, nfqueue=True)
+    assert _ADMIN_PROHIBITED in ruleset  # from private-range rules
+
+
+def test_verify_ruleset_accepts_nfqueue() -> None:
+    """verify_ruleset(nfqueue=True) accepts the NFQUEUE hook ruleset."""
+    assert (
+        verify_ruleset(hook_ruleset(interactive=True, nfqueue=True), interactive=True, nfqueue=True)
+        == []
+    )
+
+
+def test_verify_ruleset_nfqueue_rejects_nflog() -> None:
+    """verify_ruleset(nfqueue=True) rejects the NFLOG interactive ruleset."""
+    errors = verify_ruleset(hook_ruleset(interactive=True), interactive=True, nfqueue=True)
+    assert any("nfqueue terminal rule" in e for e in errors)
+
+
+def test_verify_ruleset_nflog_rejects_nfqueue() -> None:
+    """verify_ruleset(interactive=True) rejects the NFQUEUE ruleset (missing QUEUED prefix)."""
+    errors = verify_ruleset(hook_ruleset(interactive=True, nfqueue=True), interactive=True)
+    assert any("queued nflog prefix" in e for e in errors)
+
+
 def test_verify_ruleset_checks_deny_sets() -> None:
     """verify_ruleset() requires deny_v4 and deny_v6 sets in both modes."""
     minimal = (

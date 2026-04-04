@@ -20,12 +20,14 @@ from terok_shield.state import (
     hook_entrypoint,
     hook_json_path,
     hooks_dir,
+    interactive_path,
     live_allowed_path,
     live_domains_path,
     profile_allowed_path,
     profile_domains_path,
     read_denied_ips,
     read_effective_ips,
+    read_interactive_tier,
 )
 
 from ..testfs import FAKE_STATE_DIR
@@ -205,3 +207,26 @@ def test_hook_entrypoint_path_strings_match_state_functions() -> None:
             f"state.{fn.__name__}() returns that filename. "
             "Update hook_entrypoint.py to match."
         )
+
+
+# ── read_interactive_tier ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param("nflog\n", "nflog", id="nflog"),
+        pytest.param("nfqueue\n", "nfqueue", id="nfqueue"),
+        pytest.param("1\n", "nflog", id="legacy-1-to-nflog"),
+        pytest.param("\n", None, id="empty"),
+    ],
+)
+def test_read_interactive_tier(tmp_path: Path, content: str, expected: str | None) -> None:
+    """read_interactive_tier returns the correct tier string with backward compat."""
+    interactive_path(tmp_path).write_text(content)
+    assert read_interactive_tier(tmp_path) == expected
+
+
+def test_read_interactive_tier_missing_file(tmp_path: Path) -> None:
+    """read_interactive_tier returns None when the interactive file is absent."""
+    assert read_interactive_tier(tmp_path) is None

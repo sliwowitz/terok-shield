@@ -527,6 +527,26 @@ class TestRunInteractive:
         mock_session_cls.assert_called_once()
         mock_session_cls.return_value.run.assert_called_once()
 
+    def test_dispatches_nfqueue_inside_netns(self, tmp_path: Path) -> None:
+        """run_interactive dispatches to NfqueueInteractiveSession for nfqueue tier."""
+        state.interactive_path(tmp_path).write_text("nfqueue\n")
+        with (
+            mock.patch.dict("os.environ", {_NSENTER_ENV: "1"}),
+            mock.patch("terok_shield.interactive.SubprocessRunner") as mock_runner_cls,
+            mock.patch("terok_shield.interactive.NfqueueInteractiveSession") as mock_session_cls,
+        ):
+            run_interactive(tmp_path, _CONTAINER)
+        mock_runner_cls.assert_called_once()
+        mock_session_cls.assert_called_once()
+        mock_session_cls.return_value.run.assert_called_once()
+
+    def test_nsenter_reexec_for_nfqueue(self, tmp_path: Path) -> None:
+        """run_interactive calls nsenter reexec for nfqueue tier too."""
+        state.interactive_path(tmp_path).write_text("nfqueue\n")
+        with mock.patch("terok_shield.interactive._nsenter_reexec") as mock_reexec:
+            run_interactive(tmp_path, _CONTAINER)
+        mock_reexec.assert_called_once_with(tmp_path, _CONTAINER)
+
 
 # ── __main__ block ───────────────────────────────────────
 
@@ -566,7 +586,7 @@ class TestMainBlock:
         # run_interactive will fail (no interactive tier), but the __main__
         # block dispatched correctly — exit code 1, not 2.
         assert result.returncode == 1
-        assert "nflog" in result.stderr
+        assert "interactive tier" in result.stderr.lower() or "nflog" in result.stderr
 
 
 # ── _nsenter_reexec ──────────────────────────────────────

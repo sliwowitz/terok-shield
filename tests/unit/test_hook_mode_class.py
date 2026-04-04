@@ -1262,7 +1262,30 @@ def test_shield_up_interactive_uses_interactive_ruleset(
 
     harness.mode.shield_up("test-ctr")
 
-    harness.ruleset.build_hook.assert_called_with(interactive=True)
+    harness.ruleset.build_hook.assert_called_with(interactive=True, nfqueue=False)
+
+
+def test_shield_up_nfqueue_tier_passes_nfqueue_flag(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """shield_up() passes nfqueue=True when the interactive tier is nfqueue."""
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.mode._container_ruleset = lambda _c: harness.ruleset
+    harness.runner.nft_via_nsenter.return_value = ""
+    harness.ruleset.build_hook.return_value = "hook ruleset"
+    harness.ruleset.verify_hook.return_value = []
+    harness.ruleset.add_elements_dual.return_value = ""
+    harness.ruleset.verify_bypass.return_value = ["not bypass"]
+
+    state.interactive_path(config.state_dir).write_text("nfqueue\n")
+    harness.mode.shield_up("test-ctr")
+
+    harness.ruleset.build_hook.assert_called_with(interactive=True, nfqueue=True)
+    harness.ruleset.verify_hook.assert_called_with(
+        harness.runner.nft_via_nsenter.return_value, interactive=True, nfqueue=True
+    )
 
 
 def test_shield_up_repopulates_deny_sets(
