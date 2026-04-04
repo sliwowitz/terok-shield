@@ -523,6 +523,22 @@ def test_stop_reraises_cancelled_error(tmp_path: Path) -> None:
     bridge._bus.unexport.assert_called_once()
 
 
+def test_stop_kills_then_cancelled_during_wait(tmp_path: Path) -> None:
+    """stop() re-raises CancelledError that arrives during wait after kill."""
+    bridge = _bridge(tmp_path)
+    proc = _mock_process()
+    # First wait: TimeoutError (triggers kill), second wait: CancelledError
+    proc.wait = mock.AsyncMock(side_effect=[TimeoutError(), asyncio.CancelledError()])
+    bridge._process = proc
+    bridge._read_task = None
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(bridge.stop())
+    proc.terminate.assert_called_once()
+    proc.kill.assert_called_once()
+    bridge._bus.unexport.assert_called_once()
+
+
 def test_stop_is_idempotent(tmp_path: Path) -> None:
     """stop() can be called twice without error."""
     bridge = _bridge(tmp_path)
