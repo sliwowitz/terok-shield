@@ -802,6 +802,15 @@ class TestNflogWatcherCreate:
             result = NflogWatcher.create(_CONTAINER)
         assert result is None
 
+    def test_returns_none_and_closes_socket_on_timeout(self) -> None:
+        """create() returns None and closes the socket when recv times out."""
+        mock_sock = MagicMock(spec=socket.socket)
+        mock_sock.recv.side_effect = OSError("timed out")
+        with patch("terok_shield.watch.socket.socket", return_value=mock_sock):
+            result = NflogWatcher.create(_CONTAINER)
+        assert result is None
+        mock_sock.close.assert_called_once()
+
     def test_returns_none_on_bind_nack(self) -> None:
         """create() returns None when the kernel ACK contains a negative error code."""
         mock_sock = MagicMock(spec=socket.socket)
