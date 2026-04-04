@@ -113,6 +113,12 @@ class ShieldConfig:
     audit_enabled: bool = True
     profiles_dir: Path | None = None
     interactive: bool = False
+    nfqueue_timeout: int = 5
+
+    def __post_init__(self) -> None:
+        """Validate field constraints after init."""
+        if not 1 <= self.nfqueue_timeout <= 60:
+            raise ValueError(f"nfqueue_timeout must be 1–60, got {self.nfqueue_timeout}")
 
 
 # -- Config-file schema (Pydantic) ------------------------
@@ -145,6 +151,12 @@ class ShieldFileConfig(BaseModel):
         description="TCP ports forwarded to host loopback (via pasta ``-T``)",
     )
     interactive: bool = Field(default=False, description="Enable interactive NFLOG approval mode")
+    nfqueue_timeout: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        description="Seconds before an NFQUEUE-queued packet is auto-dropped (1–60)",
+    )
     audit: AuditFileConfig = Field(
         default_factory=AuditFileConfig, description="Audit logging settings"
     )

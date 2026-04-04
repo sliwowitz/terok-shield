@@ -127,14 +127,19 @@ def interactive_path(state_dir: Path) -> Path:
 def read_interactive_tier(state_dir: Path) -> str | None:
     """Read the interactive tier from the state bundle.
 
-    Returns ``"nflog"`` (or whatever tier string is stored) if the file
-    exists and contains a non-empty value, otherwise ``None``.
+    Returns ``"nfqueue"``, ``"nflog"``, or ``None`` (not configured).
+    Legacy value ``"1"`` is treated as ``"nflog"`` for backward compatibility.
     """
     path = interactive_path(state_dir)
     if not path.is_file():
         return None
     value = path.read_text().strip()
-    return value or None
+    if not value:
+        return None
+    # Legacy marker from early interactive support
+    if value == "1":
+        return "nflog"
+    return value
 
 
 def live_domains_path(state_dir: Path) -> Path:

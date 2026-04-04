@@ -286,6 +286,46 @@ def test_verify_ruleset_interactive_mode_cross_validates() -> None:
     assert any("queued nflog prefix" in e for e in errors)
 
 
+# ── NFQUEUE interactive mode ────────────────────��─────────
+
+
+def test_hook_ruleset_nfqueue_uses_queue_num() -> None:
+    """NFQUEUE interactive mode uses 'queue num' in the terminal rule."""
+    ruleset = hook_ruleset(interactive=True, nfqueue=True)
+    assert "queue num" in ruleset
+    assert _QUEUED_LOG_PREFIX in ruleset
+
+
+def test_hook_ruleset_nfqueue_does_not_reject() -> None:
+    """NFQUEUE mode does not have a terminal reject rule (packets are queued)."""
+    ruleset = hook_ruleset(interactive=True, nfqueue=True)
+    lines = ruleset.splitlines()
+    # The terminal rule should be 'queue num', not 'reject'
+    terminal_lines = [ln.strip() for ln in lines if ln.strip().startswith("queue num")]
+    assert len(terminal_lines) == 1
+
+
+def test_verify_ruleset_accepts_nfqueue_ruleset() -> None:
+    """verify_ruleset accepts the NFQUEUE interactive ruleset."""
+    rs = hook_ruleset(interactive=True, nfqueue=True)
+    assert verify_ruleset(rs, interactive=True) == []
+
+
+def test_hook_ruleset_nfqueue_false_uses_reject() -> None:
+    """interactive=True, nfqueue=False uses the NFLOG+reject terminal rule."""
+    ruleset = hook_ruleset(interactive=True, nfqueue=False)
+    assert "queue num" not in ruleset
+    assert _QUEUED_LOG_PREFIX in ruleset
+    assert "reject" in ruleset
+
+
+def test_hook_ruleset_nfqueue_ignored_when_not_interactive() -> None:
+    """nfqueue=True has no effect when interactive=False."""
+    ruleset = hook_ruleset(interactive=False, nfqueue=True)
+    assert "queue num" not in ruleset
+    assert _DENY_LOG_PREFIX in ruleset
+
+
 def test_verify_ruleset_checks_deny_sets() -> None:
     """verify_ruleset() requires deny_v4 and deny_v6 sets in both modes."""
     minimal = (

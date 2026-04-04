@@ -14,7 +14,9 @@ import pytest
 
 from terok_shield import state
 from terok_shield.interactive import (
+    _NSENTER_ENV,
     InteractiveSession,
+    NfqueueInteractiveSession,
     _append_unique,
     _handle_signal,
     _PendingPacket,
@@ -414,9 +416,8 @@ class TestRunInteractive:
             run_interactive(tmp_path, _CONTAINER)
         assert ctx.value.code == 1
 
-    def test_dispatches_to_session(self, tmp_path: Path) -> None:
-        """run_interactive creates a session and calls run() when tier is configured."""
-        # Write the interactive tier marker
+    def test_dispatches_nflog_session(self, tmp_path: Path) -> None:
+        """run_interactive creates an NFLOG session when tier is nflog."""
         state.interactive_path(tmp_path).write_text("nflog\n")
         with (
             mock.patch("terok_shield.interactive.SubprocessRunner") as mock_runner_cls,
@@ -426,3 +427,73 @@ class TestRunInteractive:
         mock_runner_cls.assert_called_once()
         mock_session_cls.assert_called_once()
         mock_session_cls.return_value.run.assert_called_once()
+
+    def test_dispatches_nfqueue_nsenter(self, tmp_path: Path) -> None:
+        """run_interactive calls nsenter reexec when tier is nfqueue and not in nsenter."""
+        state.interactive_path(tmp_path).write_text("nfqueue\n")
+        with mock.patch("terok_shield.interactive._nsenter_reexec") as mock_reexec:
+            run_interactive(tmp_path, _CONTAINER, timeout=10)
+        mock_reexec.assert_called_once_with(tmp_path, _CONTAINER, timeout=10)
+
+    def test_dispatches_nfqueue_loop_in_nsenter(self, tmp_path: Path) -> None:
+        """run_interactive runs the nfqueue loop when already inside nsenter."""
+        state.interactive_path(tmp_path).write_text("nfqueue\n")
+        with (
+            mock.patch.dict("os.environ", {_NSENTER_ENV: "1"}),
+            mock.patch("terok_shield.interactive._run_nfqueue_loop") as mock_loop,
+        ):
+            run_interactive(tmp_path, _CONTAINER, timeout=7)
+        mock_loop.assert_called_once_with(tmp_path, _CONTAINER, timeout=7)
+
+    def test_legacy_tier_1_treated_as_nflog(self, tmp_path: Path) -> None:
+        """Legacy interactive marker '1' is treated as nflog tier."""
+        state.interactive_path(tmp_path).write_text("1\n")
+        with (
+            mock.patch("terok_shield.interactive.SubprocessRunner"),
+            mock.patch("terok_shield.interactive.InteractiveSession") as mock_session_cls,
+        ):
+            run_interactive(tmp_path, _CONTAINER)
+        mock_session_cls.return_value.run.assert_called_once()
+
+
+# ── NfqueueInteractiveSession ────────────────────────────
+
+
+class TestNfqueueInteractiveSession:
+    """Tests for the NfqueueInteractiveSession."""
+
+    def test_construction(self, tmp_path: Path) -> None:
+        """NfqueueInteractiveSession stores all parameters."""
+        runner = mock.MagicMock()
+        session = NfqueueInteractiveSession(
+            runner=runner, state_dir=tmp_path, container=_CONTAINER, timeout=10
+        )
+        assert session._container == _CONTAINER
+        assert session._timeout == 10
+
+    def test_run_exits_if_handler_unavailable(self, tmp_path: Path) -> None:
+        """run() exits with code 1 if NfqueueHandler.create() returns None."""
+        runner = mock.MagicMock()
+        session = NfqueueInteractiveSession(runner=runner, state_dir=tmp_path, container=_CONTAINER)
+        with (
+            mock.patch("terok_shield.nfqueue.NfqueueHandler.create", return_value=None),
+            pytest.raises(SystemExit) as ctx,
+        ):
+            session.run()
+        assert ctx.value.code == 1
+
+    def test_drain_timed_out(self, tmp_path: Path) -> None:
+        """Timed-out packets are auto-dropped and emit verdict_applied."""
+        runner = mock.MagicMock()
+        session = NfqueueInteractiveSession(
+            runner=runner, state_dir=tmp_path, container=_CONTAINER, timeout=0
+        )
+        # Inject a stale pending packet
+        pending = _PendingPacket(dest=TEST_IP1, port=443, proto=6, queued_at=0.0, packet_id=42)
+        session._pending_by_ip[TEST_IP1] = pending
+
+        handler = mock.MagicMock()
+        session._drain_timed_out(handler)
+
+        handler.verdict.assert_called_once_with(42, accept=False)
+        assert TEST_IP1 not in session._pending_by_ip

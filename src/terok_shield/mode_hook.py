@@ -105,6 +105,32 @@ def _split_domains_ips(entries: list[str]) -> tuple[list[str], list[str]]:
     return domains, raw_ips
 
 
+def _nfqueue_kernel_support() -> bool:
+    """Check if the kernel has NFQUEUE support (module loaded or built-in).
+
+    Reads ``/proc/modules`` for the ``nfnetlink_queue`` module.  If not found
+    there, checks ``modules.builtin`` under the running kernel's module tree.
+    Pure read-only — no root or module loading required.
+    """
+    import platform
+
+    # Check loaded modules first (fast path)
+    try:
+        for line in Path("/proc/modules").read_text().splitlines():
+            if line.split()[0] == "nfnetlink_queue":
+                return True
+    except OSError:
+        pass
+
+    # Check built-in modules (kernel compiled with CONFIG_NFT_QUEUE=y)
+    release = platform.release()
+    builtin = Path(f"/lib/modules/{release}/modules.builtin")
+    try:
+        return "nfnetlink_queue" in builtin.read_text()
+    except OSError:
+        return False
+
+
 def _is_dnsmasq_tier(state_dir: Path) -> bool:
     """Return True when the container's DNS tier is dnsmasq (or unknown).
 
@@ -316,6 +342,7 @@ class HookMode:
         # Pre-generate complete nft ruleset (gateway sets start empty; hook populates them)
         set_timeout = NFT_SET_TIMEOUT_DNSMASQ if tier == DnsTier.DNSMASQ else ""
         interactive = self._config.interactive
+        use_nfqueue = interactive and _nfqueue_kernel_support()
         ruleset_builder = RulesetBuilder(
             dns=upstream_dns,
             loopback_ports=self._config.loopback_ports,
@@ -323,15 +350,23 @@ class HookMode:
         )
         ips = state.read_effective_ips(sd)
         denied_ips = list(state.read_denied_ips(sd))
-        ruleset = ruleset_builder.build_hook(interactive=interactive)
+        ruleset = ruleset_builder.build_hook(interactive=interactive, nfqueue=use_nfqueue)
         ruleset += ruleset_builder.add_elements_dual(ips)
         if denied_ips:
             ruleset += add_deny_elements_dual(denied_ips)
         state.ruleset_path(sd).write_text(ruleset)
 
-        # Persist interactive mode flag for shield_up() and the verdict handler
+        # Persist interactive tier for shield_up() and the verdict handler
         if interactive:
-            state.interactive_path(sd).write_text("nflog\n")
+            tier_name = "nfqueue" if use_nfqueue else "nflog"
+            state.interactive_path(sd).write_text(f"{tier_name}\n")
+            if not use_nfqueue:
+                import sys
+
+                print(
+                    "shield: nfnetlink_queue not available — using NFLOG interactive tier",
+                    file=sys.stderr,
+                )
         else:
             state.interactive_path(sd).unlink(missing_ok=True)
 
@@ -728,10 +763,12 @@ class HookMode:
     def shield_up(self, container: str) -> None:
         """Restore normal deny-all mode for a running container."""
         sd = self._config.state_dir.resolve()
-        interactive = state.interactive_path(sd).is_file()
+        interactive_tier = state.read_interactive_tier(sd)
+        interactive = interactive_tier is not None
+        use_nfqueue = interactive_tier == "nfqueue"
 
         ruleset = self._container_ruleset(container)
-        rs = ruleset.build_hook(interactive=interactive)
+        rs = ruleset.build_hook(interactive=interactive, nfqueue=use_nfqueue)
         current = self.shield_state(container)
         if current == ShieldState.INACTIVE:
             stdin = rs
@@ -800,4 +837,5 @@ class HookMode:
         """Generate the ruleset that would be applied to a container."""
         if down:
             return self._ruleset.build_bypass(allow_all=allow_all)
-        return self._ruleset.build_hook(interactive=self._config.interactive)
+        use_nfqueue = self._config.interactive and _nfqueue_kernel_support()
+        return self._ruleset.build_hook(interactive=self._config.interactive, nfqueue=use_nfqueue)

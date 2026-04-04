@@ -16,6 +16,7 @@ import pytest
 
 import terok_shield.watch as _watch_mod
 from terok_shield.config import DnsTier
+from terok_shield.netlink import NFA_HDR, NFGEN_HDR, NLMSG_HDR, extract_ip_dest, parse_nflog_attrs
 from terok_shield.nft_constants import (
     ALLOWED_LOG_PREFIX,
     BYPASS_LOG_PREFIX,
@@ -25,13 +26,10 @@ from terok_shield.nft_constants import (
 )
 from terok_shield.watch import (
     _DOMAIN_REFRESH_INTERVAL,
-    _NFA_HDR,
-    _NFGEN_HDR,
     _NFNL_SUBSYS_ULOG,
     _NFULA_PAYLOAD,
     _NFULA_PREFIX,
     _NFULNL_MSG_PACKET,
-    _NLMSG_HDR,
     _QUERY_RE,
     AuditLogWatcher,
     DnsLogWatcher,
@@ -39,9 +37,7 @@ from terok_shield.watch import (
     WatchEvent,
     _build_nflog_bind_msg,
     _ensure_log_file,
-    _extract_ip_dest,
     _handle_signal,
-    _parse_nflog_attrs,
     run_watch,
 )
 from tests.testnet import BLOCKED_DOMAIN, BLOCKED_SUBDOMAIN, TEST_DOMAIN, TEST_DOMAIN2
@@ -495,28 +491,28 @@ def _make_nflog_packet(
 
     # NFULA_PREFIX attribute
     prefix_bytes = prefix.encode("ascii") + b"\x00"
-    prefix_attr_len = _NFA_HDR.size + len(prefix_bytes)
-    attrs += _NFA_HDR.pack(prefix_attr_len, _NFULA_PREFIX)
+    prefix_attr_len = NFA_HDR.size + len(prefix_bytes)
+    attrs += NFA_HDR.pack(prefix_attr_len, _NFULA_PREFIX)
     attrs += prefix_bytes
     # Pad to 4-byte alignment
     pad = (4 - (prefix_attr_len % 4)) % 4
     attrs += b"\x00" * pad
 
     # NFULA_PAYLOAD attribute
-    payload_attr_len = _NFA_HDR.size + len(raw_ip)
-    attrs += _NFA_HDR.pack(payload_attr_len, _NFULA_PAYLOAD)
+    payload_attr_len = NFA_HDR.size + len(raw_ip)
+    attrs += NFA_HDR.pack(payload_attr_len, _NFULA_PAYLOAD)
     attrs += raw_ip
     pad = (4 - (payload_attr_len % 4)) % 4
     attrs += b"\x00" * pad
 
     # nfgenmsg header
-    nfgen = _NFGEN_HDR.pack(af_family, 0, socket.htons(NFLOG_GROUP))
+    nfgen = NFGEN_HDR.pack(af_family, 0, socket.htons(NFLOG_GROUP))
 
     # netlink message header
     msg_type = (_NFNL_SUBSYS_ULOG << 8) | _NFULNL_MSG_PACKET
     payload = nfgen + attrs
-    nlmsg = _NLMSG_HDR.pack(
-        _NLMSG_HDR.size + len(payload),
+    nlmsg = NLMSG_HDR.pack(
+        NLMSG_HDR.size + len(payload),
         msg_type,
         0,
         0,
@@ -535,7 +531,7 @@ class TestExtractIpDest:
         ip_header[9] = 6  # TCP
         ip_header[16:20] = socket.inet_aton("198.51.100.1")
         transport = struct.pack("!HH", 54321, 8080)
-        dest, proto, port = _extract_ip_dest(bytes(ip_header) + transport)
+        dest, proto, port = extract_ip_dest(bytes(ip_header) + transport)
         assert dest == "198.51.100.1"
         assert proto == 6
         assert port == 8080
@@ -547,7 +543,7 @@ class TestExtractIpDest:
         ip_header[9] = 17  # UDP
         ip_header[16:20] = socket.inet_aton("203.0.113.1")
         transport = struct.pack("!HH", 12345, 53)
-        dest, proto, port = _extract_ip_dest(bytes(ip_header) + transport)
+        dest, proto, port = extract_ip_dest(bytes(ip_header) + transport)
         assert dest == "203.0.113.1"
         assert proto == 17
         assert port == 53
@@ -561,26 +557,26 @@ class TestExtractIpDest:
         # Destination address at offset 24
         ip6_header[24:40] = socket.inet_pton(socket.AF_INET6, "2001:db8::1")
         transport = struct.pack("!HH", 54321, 443)
-        dest, proto, port = _extract_ip_dest(bytes(ip6_header) + transport)
+        dest, proto, port = extract_ip_dest(bytes(ip6_header) + transport)
         assert dest == "2001:db8::1"
         assert proto == 6
         assert port == 443
 
     def test_too_short_returns_empty(self) -> None:
         """Packet shorter than minimum IP header returns empty tuple."""
-        assert _extract_ip_dest(b"\x45" * 10) == ("", 0, 0)
+        assert extract_ip_dest(b"\x45" * 10) == ("", 0, 0)
 
     def test_unknown_version_returns_empty(self) -> None:
         """Packet with unknown IP version returns empty tuple."""
         pkt = bytearray(20)
         pkt[0] = 0x35  # version=3 — invalid
-        assert _extract_ip_dest(bytes(pkt)) == ("", 0, 0)
+        assert extract_ip_dest(bytes(pkt)) == ("", 0, 0)
 
     def test_malformed_ihl_returns_empty(self) -> None:
         """IPv4 packet with IHL < 5 (20 bytes) is rejected as malformed."""
         pkt = bytearray(20)
         pkt[0] = 0x43  # version=4, IHL=3 (12 bytes — below minimum)
-        assert _extract_ip_dest(bytes(pkt)) == ("", 0, 0)
+        assert extract_ip_dest(bytes(pkt)) == ("", 0, 0)
 
 
 class TestParseNflogAttrs:
@@ -593,30 +589,30 @@ class TestParseNflogAttrs:
 
         attrs_data = b""
         # PREFIX attr
-        attr_len = _NFA_HDR.size + len(prefix)
-        attrs_data += _NFA_HDR.pack(attr_len, _NFULA_PREFIX) + prefix
+        attr_len = NFA_HDR.size + len(prefix)
+        attrs_data += NFA_HDR.pack(attr_len, _NFULA_PREFIX) + prefix
         pad = (4 - (attr_len % 4)) % 4
         attrs_data += b"\x00" * pad
         # PAYLOAD attr
-        attr_len = _NFA_HDR.size + len(payload)
-        attrs_data += _NFA_HDR.pack(attr_len, _NFULA_PAYLOAD) + payload
+        attr_len = NFA_HDR.size + len(payload)
+        attrs_data += NFA_HDR.pack(attr_len, _NFULA_PAYLOAD) + payload
         pad = (4 - (attr_len % 4)) % 4
         attrs_data += b"\x00" * pad
 
-        parsed = _parse_nflog_attrs(attrs_data)
+        parsed = parse_nflog_attrs(attrs_data)
         assert _NFULA_PREFIX in parsed
         assert _NFULA_PAYLOAD in parsed
         assert b"DENIED" in parsed[_NFULA_PREFIX]
 
     def test_empty_data_returns_empty_dict(self) -> None:
         """Empty data returns empty attribute dict."""
-        assert _parse_nflog_attrs(b"") == {}
+        assert parse_nflog_attrs(b"") == {}
 
     def test_truncated_attr_stops_parsing(self) -> None:
         """Attribute with length shorter than header stops parsing."""
         # Attribute claiming 2-byte length (less than 4-byte header)
-        data = _NFA_HDR.pack(2, _NFULA_PREFIX)
-        assert _parse_nflog_attrs(data) == {}
+        data = NFA_HDR.pack(2, _NFULA_PREFIX)
+        assert parse_nflog_attrs(data) == {}
 
 
 class TestBuildNflogBindMsg:
@@ -626,8 +622,8 @@ class TestBuildNflogBindMsg:
         """Bind message has correct netlink header structure."""
         msg = _build_nflog_bind_msg(NFLOG_GROUP)
         # Must be at least nlmsg header size
-        assert len(msg) >= _NLMSG_HDR.size
-        nl_len, nl_type, _flags, _seq, _pid = _NLMSG_HDR.unpack_from(msg, 0)
+        assert len(msg) >= NLMSG_HDR.size
+        nl_len, nl_type, _flags, _seq, _pid = NLMSG_HDR.unpack_from(msg, 0)
         assert nl_len == len(msg)
         # Type should be ULOG subsystem + CONFIG msg
         assert (nl_type >> 8) == _NFNL_SUBSYS_ULOG
@@ -705,15 +701,15 @@ class TestNflogWatcherParsing:
         watcher = self._make_watcher()
         # Build a message with prefix but no payload attribute
         prefix_bytes = b"TEROK_SHIELD_DENIED: \x00"
-        prefix_attr_len = _NFA_HDR.size + len(prefix_bytes)
-        attrs = _NFA_HDR.pack(prefix_attr_len, _NFULA_PREFIX) + prefix_bytes
+        prefix_attr_len = NFA_HDR.size + len(prefix_bytes)
+        attrs = NFA_HDR.pack(prefix_attr_len, _NFULA_PREFIX) + prefix_bytes
         pad = (4 - (prefix_attr_len % 4)) % 4
         attrs += b"\x00" * pad
 
-        nfgen = _NFGEN_HDR.pack(2, 0, socket.htons(NFLOG_GROUP))
+        nfgen = NFGEN_HDR.pack(2, 0, socket.htons(NFLOG_GROUP))
         msg_type = (_NFNL_SUBSYS_ULOG << 8) | _NFULNL_MSG_PACKET
         payload = nfgen + attrs
-        nlmsg = _NLMSG_HDR.pack(_NLMSG_HDR.size + len(payload), msg_type, 0, 0, 0) + payload
+        nlmsg = NLMSG_HDR.pack(NLMSG_HDR.size + len(payload), msg_type, 0, 0, 0) + payload
         events = watcher._parse_messages(nlmsg)
         assert events == []
 
@@ -744,7 +740,7 @@ class TestNflogWatcherParsing:
         """_parse_messages stops when nl_len is smaller than header size."""
         watcher = self._make_watcher()
         # Craft a message with nl_len = 4 (less than NLMSG_HDR.size=16)
-        bad_msg = _NLMSG_HDR.pack(4, 0, 0, 0, 0)
+        bad_msg = NLMSG_HDR.pack(4, 0, 0, 0, 0)
         events = watcher._parse_messages(bad_msg)
         assert events == []
 
@@ -780,7 +776,7 @@ class TestNflogWatcherCreate:
         mock_sock.bind.assert_called_once_with((0, 0))
         mock_sock.setblocking.assert_called_once_with(False)
         mock_sock.send.assert_called_once()
-        assert len(mock_sock.send.call_args[0][0]) >= _NLMSG_HDR.size
+        assert len(mock_sock.send.call_args[0][0]) >= NLMSG_HDR.size
         result.close()
 
     def test_returns_none_on_attribute_error(self) -> None:
@@ -794,7 +790,7 @@ class TestNflogWatcherCreate:
         mock_sock = MagicMock(spec=socket.socket)
         # Build an NLMSG_ERROR ACK with errno -1 (EPERM)
         ack_payload = struct.pack("=i", -1)
-        ack = _NLMSG_HDR.pack(_NLMSG_HDR.size + len(ack_payload), 2, 0, 0, 0) + ack_payload
+        ack = NLMSG_HDR.pack(NLMSG_HDR.size + len(ack_payload), 2, 0, 0, 0) + ack_payload
         mock_sock.recv.return_value = ack
         with patch("terok_shield.watch.socket.socket", return_value=mock_sock):
             result = NflogWatcher.create(_CONTAINER)
@@ -805,7 +801,7 @@ class TestNflogWatcherCreate:
         """create() succeeds when the kernel ACK has error code 0."""
         mock_sock = MagicMock(spec=socket.socket)
         ack_payload = struct.pack("=i", 0)
-        ack = _NLMSG_HDR.pack(_NLMSG_HDR.size + len(ack_payload), 2, 0, 0, 0) + ack_payload
+        ack = NLMSG_HDR.pack(NLMSG_HDR.size + len(ack_payload), 2, 0, 0, 0) + ack_payload
         mock_sock.recv.return_value = ack
         with patch("terok_shield.watch.socket.socket", return_value=mock_sock):
             result = NflogWatcher.create(_CONTAINER)

@@ -118,6 +118,7 @@ class TestShieldFileConfigDefaults:
         assert cfg.default_profiles == ["dev-standard"]
         assert cfg.loopback_ports == []
         assert cfg.interactive is False
+        assert cfg.nfqueue_timeout == 5
         assert cfg.audit.enabled is True
 
     def test_audit_defaults(self) -> None:
@@ -227,3 +228,37 @@ class TestShieldFileConfigAuditValidation:
         """audit.enabled must be a boolean."""
         with pytest.raises(ValidationError):
             ShieldFileConfig(audit={"enabled": "yes-please"})  # type: ignore[arg-type]
+
+
+class TestNfqueueTimeoutValidation:
+    """Pydantic and dataclass validation for nfqueue_timeout."""
+
+    def test_file_config_default(self) -> None:
+        """ShieldFileConfig nfqueue_timeout defaults to 5."""
+        cfg = ShieldFileConfig()
+        assert cfg.nfqueue_timeout == 5
+
+    def test_file_config_valid_range(self) -> None:
+        """Valid nfqueue_timeout values (1-60) are accepted."""
+        cfg = ShieldFileConfig(nfqueue_timeout=30)
+        assert cfg.nfqueue_timeout == 30
+
+    def test_file_config_too_low(self) -> None:
+        """nfqueue_timeout below 1 is rejected."""
+        with pytest.raises(ValidationError):
+            ShieldFileConfig(nfqueue_timeout=0)
+
+    def test_file_config_too_high(self) -> None:
+        """nfqueue_timeout above 60 is rejected."""
+        with pytest.raises(ValidationError):
+            ShieldFileConfig(nfqueue_timeout=61)
+
+    def test_shield_config_post_init_validation(self) -> None:
+        """ShieldConfig __post_init__ rejects out-of-range nfqueue_timeout."""
+        with pytest.raises(ValueError, match="nfqueue_timeout"):
+            ShieldConfig(state_dir=Path("/tmp/terok-shield-testing/x"), nfqueue_timeout=0)
+
+    def test_shield_config_valid(self) -> None:
+        """ShieldConfig accepts valid nfqueue_timeout."""
+        cfg = ShieldConfig(state_dir=Path("/tmp/terok-shield-testing/x"), nfqueue_timeout=15)
+        assert cfg.nfqueue_timeout == 15
