@@ -345,11 +345,9 @@ def test_start_exports_interface_and_spawns_subprocess(tmp_path: Path) -> None:
             spawn.assert_awaited_once()
             args = spawn.call_args[0]
             assert "terok_shield.cli.interactive" in args
+            await bridge.stop()
 
     asyncio.run(_test())
-    # Cleanup
-    if bridge._read_task and not bridge._read_task.done():
-        asyncio.run(bridge.stop())
 
 
 def test_start_passes_raw_env(tmp_path: Path) -> None:
@@ -362,10 +360,9 @@ def test_start_passes_raw_env(tmp_path: Path) -> None:
             await bridge.start()
             kwargs = spawn.call_args[1]
             assert kwargs["env"]["_TEROK_SHIELD_NFLOG_RAW"] == "1"
+            await bridge.stop()
 
     asyncio.run(_test())
-    if bridge._read_task and not bridge._read_task.done():
-        asyncio.run(bridge.stop())
 
 
 def test_stop_terminates_subprocess(tmp_path: Path) -> None:
