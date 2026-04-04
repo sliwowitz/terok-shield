@@ -7,8 +7,6 @@ Provides ``CommandRunner`` (Protocol) and ``SubprocessRunner``
 (default implementation).  Every external command goes through here.
 """
 
-from __future__ import annotations
-
 import ipaddress as _ipaddress
 import shutil
 import subprocess

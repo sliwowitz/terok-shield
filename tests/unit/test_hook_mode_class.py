@@ -18,7 +18,8 @@ from terok_shield.common.config import (
     ShieldState,
 )
 from terok_shield.core import state
-from terok_shield.core.mode_hook import HookMode, install_hooks
+from terok_shield.core.hook_install import install_hooks
+from terok_shield.core.mode_hook import HookMode
 from terok_shield.core.nft import bypass_ruleset, hook_ruleset
 from terok_shield.core.nft_constants import PASTA_HOST_LOOPBACK_MAP
 from terok_shield.core.run import ExecError
@@ -564,7 +565,7 @@ def test_install_hooks_creates_entrypoint_and_hook_jsons(tmp_path: Path) -> None
 
 def test_generate_entrypoint_is_stdlib_only(tmp_path: Path) -> None:
     """The entrypoint script uses /usr/bin/env python3 and has no terok_shield imports."""
-    from terok_shield.core.mode_hook import _generate_entrypoint
+    from terok_shield.core.hook_install import _generate_entrypoint
 
     content = _generate_entrypoint()
     assert content.splitlines()[0] == "#!/usr/bin/env python3"
@@ -598,7 +599,7 @@ def test_pre_start_writes_ruleset_nft(
 
 def test_setup_global_hooks_non_sudo(tmp_path: Path) -> None:
     """setup_global_hooks() installs hooks without sudo."""
-    from terok_shield.core.mode_hook import setup_global_hooks
+    from terok_shield.core.hook_install import setup_global_hooks
 
     target = tmp_path / "hooks.d"
     setup_global_hooks(target)
@@ -615,7 +616,7 @@ def test_setup_global_hooks_sudo_uses_subprocess(tmp_path: Path) -> None:
     """setup_global_hooks(use_sudo=True) calls sudo subprocess."""
     from unittest import mock
 
-    from terok_shield.core.mode_hook import setup_global_hooks
+    from terok_shield.core.hook_install import setup_global_hooks
 
     target = tmp_path / "system-hooks"
     with mock.patch("subprocess.run") as mock_run:

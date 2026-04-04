@@ -972,7 +972,7 @@ def test_build_config_uses_resolved_state_root_when_not_overridden(
 class TestSetupCommand:
     """Tests for the setup CLI command."""
 
-    @mock.patch("terok_shield.core.mode_hook.setup_global_hooks")
+    @mock.patch("terok_shield.core.hook_install.setup_global_hooks")
     @mock.patch("terok_shield.common.podman_info.ensure_containers_conf_hooks_dir")
     def test_setup_user(
         self,
@@ -986,7 +986,7 @@ class TestSetupCommand:
         mock_ensure.assert_called_once()
         assert "Done" in capsys.readouterr().out
 
-    @mock.patch("terok_shield.core.mode_hook.setup_global_hooks")
+    @mock.patch("terok_shield.core.hook_install.setup_global_hooks")
     def test_setup_root(
         self,
         mock_setup: mock.Mock,
@@ -1070,7 +1070,7 @@ def test_version_flag_podman_missing(
 class TestSetupInteractive:
     """Tests for interactive setup mode."""
 
-    @mock.patch("terok_shield.core.mode_hook.setup_global_hooks")
+    @mock.patch("terok_shield.core.hook_install.setup_global_hooks")
     @mock.patch("builtins.input", return_value="u")
     def test_interactive_user_choice(
         self,
@@ -1097,7 +1097,7 @@ class TestSetupInteractive:
         main(["setup"])
         assert "Cancelled" in capsys.readouterr().out
 
-    @mock.patch("terok_shield.core.mode_hook.setup_global_hooks")
+    @mock.patch("terok_shield.core.hook_install.setup_global_hooks")
     @mock.patch("builtins.input", return_value="r")
     def test_interactive_root_choice(
         self,

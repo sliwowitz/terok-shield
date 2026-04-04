@@ -24,8 +24,6 @@ Exit codes:
 Output is a single JSON object on stdout.
 """
 
-from __future__ import annotations
-
 import json
 import select
 import socket

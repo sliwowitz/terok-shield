@@ -11,8 +11,6 @@ static pre-start resolution cannot.
 This module is the single owner of dnsmasq config format and CLI args.
 """
 
-from __future__ import annotations
-
 import ipaddress
 import logging
 import os

@@ -10,14 +10,21 @@ The primary entry point is the ``Shield`` facade class:
     >>> from terok_shield import Shield, ShieldConfig
     >>> shield = Shield(ShieldConfig(state_dir=Path("/tmp/my-container")))
     >>> shield.pre_start("my-container", ["dev-standard"])
+
+Core and support layer modules are imported lazily — ``from terok_shield
+import ShieldConfig`` does not pull in nft, dnsmasq, or subprocess
+helpers.  Heavy imports are deferred until ``Shield`` is instantiated.
 """
 
+import importlib as _importlib
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+# ── Eager: common layer (zero-cost, pure data) ─────────
 from .common.config import (
     AuditFileConfig,
     DnsTier,
@@ -37,20 +44,43 @@ from .common.podman_info import (
     system_hooks_dir,
 )
 from .common.util import is_ip as _is_ip
-from .core import dnsmasq, state
-from .core.dns import DnsResolver
-from .core.mode_hook import setup_global_hooks
-from .core.nft import RulesetBuilder
-from .core.run import (
-    CommandRunner,
-    DigNotFoundError,
-    ExecError,
-    NftNotFoundError,
-    ShieldNeedsSetup,
-    SubprocessRunner,
-)
-from .lib.audit import AuditLogger
-from .lib.profiles import ProfileLoader
+
+if TYPE_CHECKING:
+    from .core.dns import DnsResolver
+    from .core.nft import RulesetBuilder
+    from .core.run import CommandRunner
+    from .lib.audit import AuditLogger
+    from .lib.profiles import ProfileLoader
+
+# ── Lazy: core + support layer ──────────────────────────
+# Re-exported names from __all__ that are deferred until first access.
+# Keeps ``from terok_shield import ShieldConfig`` lightweight.
+
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    "AuditLogger": ("terok_shield.lib.audit", "AuditLogger"),
+    "CommandRunner": ("terok_shield.core.run", "CommandRunner"),
+    "DigNotFoundError": ("terok_shield.core.run", "DigNotFoundError"),
+    "DnsResolver": ("terok_shield.core.dns", "DnsResolver"),
+    "ExecError": ("terok_shield.core.run", "ExecError"),
+    "NftNotFoundError": ("terok_shield.core.run", "NftNotFoundError"),
+    "ProfileLoader": ("terok_shield.lib.profiles", "ProfileLoader"),
+    "RulesetBuilder": ("terok_shield.core.nft", "RulesetBuilder"),
+    "ShieldNeedsSetup": ("terok_shield.core.run", "ShieldNeedsSetup"),
+    "SubprocessRunner": ("terok_shield.core.run", "SubprocessRunner"),
+    "setup_global_hooks": ("terok_shield.core.hook_install", "setup_global_hooks"),
+}
+
+
+def __getattr__(name: str) -> object:
+    """Lazy import for re-exported core/support layer names."""
+    if name in _LAZY_IMPORTS:
+        mod_path, attr = _LAZY_IMPORTS[name]
+        mod = _importlib.import_module(mod_path)
+        value = getattr(mod, attr)
+        globals()[name] = value  # cache for subsequent access
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 logger = logging.getLogger(__name__)
 
@@ -129,11 +159,11 @@ class Shield:
         self,
         config: ShieldConfig,
         *,
-        runner: CommandRunner | None = None,
-        audit: AuditLogger | None = None,
-        dns: DnsResolver | None = None,
-        profiles: ProfileLoader | None = None,
-        ruleset: RulesetBuilder | None = None,
+        runner: "CommandRunner | None" = None,
+        audit: "AuditLogger | None" = None,
+        dns: "DnsResolver | None" = None,
+        profiles: "ProfileLoader | None" = None,
+        ruleset: "RulesetBuilder | None" = None,
     ) -> None:
         """Create the shield facade.
 
@@ -145,6 +175,13 @@ class Shield:
             profiles: Profile loader (default: from config.profiles_dir).
             ruleset: Ruleset builder (default: from config loopback_ports).
         """
+        from .core import state
+        from .core.dns import DnsResolver
+        from .core.nft import RulesetBuilder
+        from .core.run import SubprocessRunner
+        from .lib.audit import AuditLogger
+        from .lib.profiles import ProfileLoader
+
         self.config = config
         self.runner = runner or SubprocessRunner()
         self.audit = audit or AuditLogger(
@@ -180,6 +217,8 @@ class Shield:
         :class:`EnvironmentCheck` with detected issues and setup hints.
         Does not raise — the caller decides how to handle issues.
         """
+        from .core import dnsmasq, state
+
         output = self.runner.run(["podman", "info", "-f", "json"], check=False)
         info = parse_podman_info(output)
         issues: list[str] = []
@@ -262,6 +301,8 @@ class Shield:
 
     def allow(self, container: str, target: str) -> list[str]:
         """Live-allow a domain or IP for a running container."""
+        from .core.run import ExecError
+
         is_domain = not _is_ip(target)
         ips = [target] if not is_domain else self.dns.resolve_domains([target])
         allowed: list[str] = []
@@ -280,6 +321,8 @@ class Shield:
 
     def deny(self, container: str, target: str) -> list[str]:
         """Live-deny a domain or IP for a running container."""
+        from .core.run import ExecError
+
         is_domain = not _is_ip(target)
         ips = [target] if not is_domain else self.dns.resolve_domains([target])
         denied: list[str] = []
@@ -329,6 +372,8 @@ class Shield:
         force: bool = False,
     ) -> list[str]:
         """Resolve DNS profiles and cache the results."""
+        from .core import state
+
         if profiles is None:
             profiles = list(self.config.default_profiles)
         entries = self.profiles.compose_profiles(profiles)

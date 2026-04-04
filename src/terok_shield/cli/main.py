@@ -470,7 +470,7 @@ def _cmd_setup(*, root: bool, user: bool) -> None:
         ensure_containers_conf_hooks_dir,
         system_hooks_dir,
     )
-    from ..core.mode_hook import setup_global_hooks
+    from ..core.hook_install import setup_global_hooks
 
     sys_dir = system_hooks_dir()
     usr_dir = USER_HOOKS_DIR.expanduser()

@@ -18,7 +18,7 @@ from terok_shield.common.podman_info import (
     has_global_hooks,
     parse_podman_info,
 )
-from terok_shield.core.mode_hook import setup_global_hooks
+from terok_shield.core.hook_install import setup_global_hooks
 from terok_shield.core.run import ShieldNeedsSetup
 
 from ..conftest import hooks_present, nft_missing, podman_missing
