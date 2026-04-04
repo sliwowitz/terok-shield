@@ -154,6 +154,27 @@ def test_submit_verdict_no_process(tmp_path: Path) -> None:
     assert asyncio.run(bridge.submit_verdict("myapp:1", "accept")) is False
 
 
+def test_submit_verdict_wrong_container(tmp_path: Path) -> None:
+    """submit_verdict() returns False when request_id targets a different container."""
+    bridge = _bridge(tmp_path)
+    bridge._process = _mock_process()
+    assert asyncio.run(bridge.submit_verdict("other:1", "accept")) is False
+
+
+def test_submit_verdict_invalid_action(tmp_path: Path) -> None:
+    """submit_verdict() returns False for actions other than accept/deny."""
+    bridge = _bridge(tmp_path)
+    bridge._process = _mock_process()
+    assert asyncio.run(bridge.submit_verdict("myapp:1", "maybe")) is False
+
+
+def test_submit_verdict_empty_container_prefix(tmp_path: Path) -> None:
+    """submit_verdict() returns False when request_id starts with a colon."""
+    bridge = _bridge(tmp_path)
+    bridge._process = _mock_process()
+    assert asyncio.run(bridge.submit_verdict(":1", "accept")) is False
+
+
 def test_submit_verdict_broken_pipe(tmp_path: Path) -> None:
     """submit_verdict() returns False on BrokenPipeError."""
     bridge = _bridge(tmp_path)
@@ -418,3 +439,104 @@ def test_stop_already_exited_process(tmp_path: Path) -> None:
     asyncio.run(bridge.stop())
 
     proc.terminate.assert_not_called()
+
+
+def test_start_unexports_on_spawn_failure(tmp_path: Path) -> None:
+    """start() rolls back the D-Bus export when subprocess creation fails."""
+    bridge = _bridge(tmp_path)
+
+    async def _test():
+        with mock.patch("asyncio.create_subprocess_exec", side_effect=OSError("no such binary")):
+            with pytest.raises(OSError, match="no such binary"):
+                await bridge.start()
+        # Interface was exported then unexported during rollback
+        bridge._bus.export.assert_called_once()
+        bridge._bus.unexport.assert_called_once()
+
+    asyncio.run(_test())
+
+
+def test_start_rollback_tolerates_unexport_failure(tmp_path: Path) -> None:
+    """start() rollback does not mask the original error when unexport also fails."""
+    bridge = _bridge(tmp_path)
+    bridge._bus.unexport.side_effect = RuntimeError("bus gone")
+
+    async def _test():
+        with mock.patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError("python")):
+            with pytest.raises(FileNotFoundError, match="python"):
+                await bridge.start()
+
+    asyncio.run(_test())
+
+
+# ── CLI entry point ────────────────────────────────────────
+
+
+def test_run_dbus_bridge_keyboard_interrupt(tmp_path: Path) -> None:
+    """run_dbus_bridge() exits cleanly on KeyboardInterrupt."""
+    from terok_shield.cli.dbus_bridge import run_dbus_bridge
+
+    container_id_path(tmp_path).write_text("aabbccddee12\n")
+
+    with mock.patch("terok_shield.cli.dbus_bridge._run_bridge", side_effect=KeyboardInterrupt):
+        # Should not raise
+        run_dbus_bridge(tmp_path, "myapp")
+
+
+def test_run_bridge_rejects_duplicate_bus_name(tmp_path: Path) -> None:
+    """_run_bridge exits with SystemExit(1) when bus name is already taken."""
+    from dbus_fast import RequestNameReply
+
+    from terok_shield.cli.dbus_bridge import _run_bridge
+
+    container_id_path(tmp_path).write_text("aabbccddee12\n")
+
+    mock_bus = mock.AsyncMock()
+    mock_bus.request_name = mock.AsyncMock(return_value=RequestNameReply.IN_QUEUE)
+    mock_bus.disconnect = mock.MagicMock()
+
+    mock_bus_cls = mock.MagicMock()
+    mock_bus_cls.return_value.connect = mock.AsyncMock(return_value=mock_bus)
+
+    async def _test():
+        with mock.patch("dbus_fast.aio.MessageBus", mock_bus_cls):
+            with pytest.raises(SystemExit) as exc_info:
+                await _run_bridge(tmp_path, "myapp")
+            assert exc_info.value.code == 1
+        mock_bus.disconnect.assert_called_once()
+
+    asyncio.run(_test())
+
+
+def test_run_bridge_starts_and_stops_on_signal(tmp_path: Path) -> None:
+    """_run_bridge acquires bus name, starts bridge, stops on SIGTERM."""
+    import signal as _signal
+
+    from dbus_fast import RequestNameReply
+
+    from terok_shield.cli.dbus_bridge import _run_bridge
+
+    container_id_path(tmp_path).write_text("aabbccddee12\n")
+
+    mock_bus = mock.AsyncMock()
+    mock_bus.request_name = mock.AsyncMock(return_value=RequestNameReply.PRIMARY_OWNER)
+    mock_bus.disconnect = mock.MagicMock()
+    mock_bus.export = mock.MagicMock()
+    mock_bus.unexport = mock.MagicMock()
+
+    mock_bus_cls = mock.MagicMock()
+    mock_bus_cls.return_value.connect = mock.AsyncMock(return_value=mock_bus)
+
+    async def _test():
+        with mock.patch("dbus_fast.aio.MessageBus", mock_bus_cls):
+            task = asyncio.create_task(_run_bridge(tmp_path, "myapp"))
+            # Let the bridge start and register signal handlers
+            await asyncio.sleep(0.05)
+            # Send SIGTERM to trigger the stop event
+            _signal.raise_signal(_signal.SIGTERM)
+            await asyncio.wait_for(task, timeout=5.0)
+
+        mock_bus.request_name.assert_awaited_once()
+        mock_bus.disconnect.assert_called()
+
+    asyncio.run(_test())

@@ -151,20 +151,26 @@ class ShieldBridge:
         stdout and emits D-Bus signals for each event.
         """
         self._bus.export(SHIELD_OBJECT_PATH, self._interface)
-
-        env = {**os.environ, _RAW_ENV: "1"}
-        env.pop(_NSENTER_ENV, None)
-        self._process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "terok_shield.cli.interactive",
-            str(self._state_dir),
-            self._container,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=None,
-            env=env,
-        )
+        try:
+            env = {**os.environ, _RAW_ENV: "1"}
+            env.pop(_NSENTER_ENV, None)
+            self._process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "terok_shield.cli.interactive",
+                str(self._state_dir),
+                self._container,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=None,
+                env=env,
+            )
+        except Exception:
+            try:
+                self._bus.unexport(SHIELD_OBJECT_PATH, self._interface)
+            except Exception:
+                logger.debug("Unexport failed during start rollback", exc_info=True)
+            raise
         self._read_task = asyncio.create_task(self._read_loop())
         logger.info(
             "Bridge started for %s (bus name: %s, pid: %s)",
@@ -208,12 +214,23 @@ class ShieldBridge:
             logger.warning("Cannot submit verdict — subprocess not running")
             return False
 
-        sep = request_id.rfind(":")
-        if sep < 0:
+        if action not in ("accept", "deny"):
+            logger.warning("Invalid verdict action: %s", action)
+            return False
+
+        container, sep, packet_raw = request_id.partition(":")
+        if not sep or not container:
             logger.warning("Invalid request_id format: %s", request_id)
             return False
+        if container != self._container:
+            logger.warning(
+                "request_id container mismatch: expected=%s got=%s",
+                self._container,
+                container,
+            )
+            return False
         try:
-            packet_id = int(request_id[sep + 1 :])
+            packet_id = int(packet_raw)
         except ValueError:
             logger.warning("Non-integer packet ID in request_id: %s", request_id)
             return False
