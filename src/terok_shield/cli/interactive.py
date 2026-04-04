@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import select
 import signal
 import sys
@@ -39,7 +38,7 @@ from ..core import state
 from ..core.nft import add_deny_elements_dual, add_elements_dual
 from ..core.run import CommandRunner, SubprocessRunner
 from ..core.state import read_interactive_tier
-from ..lib.watchers import NflogWatcher, WatchEvent
+from ..lib.watchers import DomainCache, NflogWatcher, WatchEvent
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +181,7 @@ class CliSessionIO:
         else:
             # Additional pending while the operator is thinking.
             print(f"\n[BLOCKED] {label} :{port} (queued)", flush=True)
+            self._prompt_head()
 
     def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
         """Show verdict result and prompt the next queued packet if any.
@@ -224,11 +224,7 @@ class CliSessionIO:
         print("Watching for blocked connections... (Ctrl-C to stop)\n", flush=True)
 
 
-# Matches dnsmasq log lines like:
-#   reply github.com is 140.82.121.4
-_REPLY_RE = re.compile(r"reply\s+(\S+)\s+is\s+(\S+)")
-
-# How often (seconds) to refresh the IP→domain cache from the dnsmasq log.
+# How often (seconds) to refresh the domain cache from the dnsmasq log.
 _DOMAIN_REFRESH_INTERVAL = 10.0
 
 # Module-level stop flag, set by signal handler.
@@ -287,10 +283,10 @@ class InteractiveSession:
         self._state_dir = state_dir
         self._container = container
         self._io: SessionIO = io if io is not None else JsonSessionIO()
+        self._domain_cache = DomainCache(state_dir)
 
         self._seen_ips: set[str] = set()
         self._pending_by_ip: dict[str, _PendingPacket] = {}
-        self._ip_to_domain: dict[str, str] = {}
         self._last_domain_refresh: float = 0.0
         self._next_id: int = 1
 
@@ -334,7 +330,8 @@ class InteractiveSession:
         buf = ""
         while _running:
             if time.monotonic() - self._last_domain_refresh > _DOMAIN_REFRESH_INTERVAL:
-                self._refresh_domain_cache()
+                self._domain_cache.refresh()
+                self._last_domain_refresh = time.monotonic()
 
             try:
                 readable, _, _ = select.select([watcher, stdin_fd], [], [], 1.0)
@@ -374,7 +371,10 @@ class InteractiveSession:
             return
 
         self._seen_ips.add(ip)
-        domain = self._ip_to_domain.get(ip, "")
+        domain = self._domain_cache.lookup(ip)
+        if not domain:
+            self._domain_cache.refresh()
+            domain = self._domain_cache.lookup(ip)
         packet_id = self._next_id
         self._next_id += 1
 
@@ -474,10 +474,55 @@ class InteractiveSession:
         # Persist to state files.
         if accept:
             _append_unique(state.live_allowed_path(self._state_dir), ip)
+            if pending.domain and self._is_dnsmasq_tier():
+                self._allow_domain(pending.domain)
         else:
             _append_unique(state.deny_path(self._state_dir), ip)
+            if pending.domain and self._is_dnsmasq_tier():
+                self._deny_domain(pending.domain)
 
         return True
+
+    def _allow_domain(self, domain: str) -> None:
+        """Add domain to dnsmasq config and signal reload.
+
+        Delegates to :func:`dnsmasq.add_domain` which persists to
+        ``live.domains`` and removes from ``denied.domains``.  A SIGHUP
+        makes the change take effect immediately — future DNS resolutions
+        for *domain* auto-populate the nft allow sets.
+        """
+        from ..core import dnsmasq
+
+        if not dnsmasq.add_domain(self._state_dir, domain):
+            return
+        self._reload_dnsmasq()
+
+    def _deny_domain(self, domain: str) -> None:
+        """Remove domain from dnsmasq config and signal reload.
+
+        Counterpart of :meth:`_allow_domain`.  Stops dnsmasq from
+        auto-populating nft sets for *domain* on future DNS queries.
+        """
+        from ..core import dnsmasq
+
+        if not dnsmasq.remove_domain(self._state_dir, domain):
+            return
+        self._reload_dnsmasq()
+
+    def _reload_dnsmasq(self) -> None:
+        """Regenerate dnsmasq config and send SIGHUP."""
+        from ..core import dnsmasq
+
+        try:
+            upstream = state.upstream_dns_path(self._state_dir).read_text().strip()
+        except OSError:
+            logger.warning("Cannot reload dnsmasq: upstream DNS not persisted")
+            return
+        domains = dnsmasq.read_merged_domains(self._state_dir)
+        try:
+            dnsmasq.reload(self._state_dir, upstream, domains)
+        except RuntimeError:
+            logger.exception("dnsmasq reload failed")
 
     def _nft_apply(self, nft_cmd: str) -> bool:
         """Apply nft commands via nsenter into the container's network namespace.
@@ -506,25 +551,6 @@ class InteractiveSession:
             return tier_path.is_file() and tier_path.read_text().strip() == "dnsmasq"
         except OSError:
             return False
-
-    def _refresh_domain_cache(self) -> None:
-        """Reload the IP-to-domain mapping from the dnsmasq query log.
-
-        Parses ``reply`` lines to build a reverse lookup table.  On
-        ``OSError`` the previous cache is preserved.
-        """
-        self._last_domain_refresh = time.monotonic()
-        log_path = state.dnsmasq_log_path(self._state_dir)
-        try:
-            text = log_path.read_text()
-        except OSError:
-            return
-
-        mapping: dict[str, str] = {}
-        for m in _REPLY_RE.finditer(text):
-            domain, ip = m.group(1), m.group(2)
-            mapping[ip] = domain.lower().rstrip(".")
-        self._ip_to_domain = mapping
 
 
 # ── Helpers ────────────────────────────────────────────
