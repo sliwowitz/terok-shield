@@ -13,7 +13,6 @@ global installation (called by the ``setup`` CLI command).
 """
 
 import json
-import stat
 from pathlib import Path
 
 from ..common.config import ANNOTATION_KEY
@@ -60,7 +59,7 @@ def _write_hook_files(
             the JSONs need to reference the final install location.
     """
     hook_entrypoint.write_text(_generate_entrypoint())
-    hook_entrypoint.chmod(hook_entrypoint.stat().st_mode | stat.S_IEXEC)
+    hook_entrypoint.chmod(0o755)
     ref_path = str(json_entrypoint_path or hook_entrypoint)
     for stage_name in ("createRuntime", "poststop"):
         hook_json = _generate_hook_json(ref_path, stage_name)
