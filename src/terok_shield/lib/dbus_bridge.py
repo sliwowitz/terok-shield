@@ -150,6 +150,10 @@ class ShieldBridge:
         ``/org/terok/Shield1``, then reads JSON lines from the subprocess
         stdout and emits D-Bus signals for each event.
         """
+        # Preload bus_name (file I/O) before any side effects so a
+        # missing container.id raises before we export or spawn.
+        name = self.bus_name
+
         self._bus.export(SHIELD_OBJECT_PATH, self._interface)
         try:
             env = {**os.environ, _RAW_ENV: "1"}
@@ -175,25 +179,17 @@ class ShieldBridge:
         logger.info(
             "Bridge started for %s (bus name: %s, pid: %s)",
             self._container,
-            self.bus_name,
+            name,
             self._process.pid,
         )
 
     async def stop(self) -> None:
         """Terminate the subprocess and clean up resources.
 
-        Shields cleanup from external cancellation: if ``stop()``
-        itself is cancelled while awaiting child tasks, cleanup runs
-        to completion before the ``CancelledError`` is re-raised.
+        Runs cleanup to completion even if the caller's task is
+        cancelled, then re-raises ``CancelledError``.
         """
-        try:
-            await asyncio.shield(self._stop_inner())
-        except asyncio.CancelledError:
-            await self._stop_inner()
-            raise
-
-    async def _stop_inner(self) -> None:
-        """Run the actual teardown sequence (unshielded)."""
+        cancelled = False
         if self._read_task and not self._read_task.done():
             self._read_task.cancel()
             try:
@@ -201,17 +197,29 @@ class ShieldBridge:
             except asyncio.CancelledError:
                 pass  # expected: we just cancelled it
         if self._process and self._process.returncode is None:
-            self._process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except TimeoutError:
-                self._process.kill()
-                await self._process.wait()
+                self._process.terminate()
+            except ProcessLookupError:
+                logger.debug("Subprocess already exited before terminate")
+            else:
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except TimeoutError:
+                    try:
+                        self._process.kill()
+                    except ProcessLookupError:
+                        logger.debug("Subprocess already exited before kill")
+                    else:
+                        await self._process.wait()
         try:
             self._bus.unexport(SHIELD_OBJECT_PATH, self._interface)
         except Exception:
             logger.debug("Unexport failed during stop", exc_info=True)
         logger.info("Bridge stopped for %s", self._container)
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def submit_verdict(self, request_id: str, action: str) -> bool:
         """Write a verdict command to the subprocess stdin.

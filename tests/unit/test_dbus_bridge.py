@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 
 dbus_fast = pytest.importorskip("dbus_fast", reason="dbus-fast not installed")
+pytest.importorskip("terok_dbus", reason="terok-dbus not installed")
 
 from terok_shield.core.state import container_id_path
 from terok_shield.lib.dbus_bridge import (
@@ -441,19 +442,70 @@ def test_stop_already_exited_process(tmp_path: Path) -> None:
     proc.terminate.assert_not_called()
 
 
-def test_stop_inner_is_idempotent(tmp_path: Path) -> None:
-    """_stop_inner() can be called twice without error."""
+def test_stop_handles_process_lookup_error_on_terminate(tmp_path: Path) -> None:
+    """stop() handles ProcessLookupError when subprocess exits before terminate."""
+    bridge = _bridge(tmp_path)
+    proc = _mock_process()
+    proc.terminate.side_effect = ProcessLookupError
+    bridge._process = proc
+    bridge._read_task = None
+
+    asyncio.run(bridge.stop())
+    proc.terminate.assert_called_once()
+    proc.kill.assert_not_called()
+
+
+def test_stop_handles_process_lookup_error_on_kill(tmp_path: Path) -> None:
+    """stop() handles ProcessLookupError when subprocess exits before kill."""
+    bridge = _bridge(tmp_path)
+    proc = _mock_process()
+    proc.wait = mock.AsyncMock(side_effect=[TimeoutError(), 0])
+    proc.kill.side_effect = ProcessLookupError
+    bridge._process = proc
+    bridge._read_task = None
+
+    asyncio.run(bridge.stop())
+    proc.terminate.assert_called_once()
+    proc.kill.assert_called_once()
+
+
+def test_stop_reraises_cancelled_error(tmp_path: Path) -> None:
+    """stop() re-raises CancelledError after completing cleanup."""
+    bridge = _bridge(tmp_path)
+    proc = _mock_process()
+    proc.wait = mock.AsyncMock(side_effect=asyncio.CancelledError)
+    bridge._process = proc
+    bridge._read_task = None
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(bridge.stop())
+    bridge._bus.unexport.assert_called_once()
+
+
+def test_stop_is_idempotent(tmp_path: Path) -> None:
+    """stop() can be called twice without error."""
     bridge = _bridge(tmp_path)
     proc = _mock_process()
     bridge._process = proc
     bridge._read_task = None
 
-    asyncio.run(bridge._stop_inner())
-    # Process already exited after first call
+    asyncio.run(bridge.stop())
     proc.returncode = 0
-    asyncio.run(bridge._stop_inner())
+    asyncio.run(bridge.stop())
 
     proc.terminate.assert_called_once()
+
+
+def test_start_preloads_bus_name(tmp_path: Path) -> None:
+    """start() reads container_id before any side effects."""
+    bus = mock.MagicMock()
+    # No container.id file — should fail before export
+    bridge = ShieldBridge(state_dir=tmp_path, container="myapp", bus=bus)
+
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(bridge.start())
+
+    bus.export.assert_not_called()
 
 
 def test_start_unexports_on_spawn_failure(tmp_path: Path) -> None:
