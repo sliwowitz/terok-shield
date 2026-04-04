@@ -119,10 +119,5 @@ def install_hooks(*, hook_entrypoint: Path, hooks_dir: Path) -> None:
         hooks_dir: Directory for hook JSON files.
     """
     hook_entrypoint.parent.mkdir(parents=True, exist_ok=True)
-    hook_entrypoint.write_text(_generate_entrypoint())
-    hook_entrypoint.chmod(hook_entrypoint.stat().st_mode | stat.S_IEXEC)
-
     hooks_dir.mkdir(parents=True, exist_ok=True)
-    for stage_name in ("createRuntime", "poststop"):
-        hook_json = _generate_hook_json(str(hook_entrypoint), stage_name)
-        (hooks_dir / f"terok-shield-{stage_name}.json").write_text(hook_json)
+    _write_hook_files(hook_entrypoint, hooks_dir)

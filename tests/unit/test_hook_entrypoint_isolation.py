@@ -45,11 +45,15 @@ class TestHookEntrypointImportIsolation:
                     assert top in stdlib, (
                         f"hook_entrypoint.py imports non-stdlib module: {alias.name}"
                     )
-            elif isinstance(node, ast.ImportFrom) and node.module:
+            elif isinstance(node, ast.ImportFrom):
                 if node.level > 0:
+                    rel = "." * node.level + (node.module or "")
                     raise AssertionError(
-                        f"hook_entrypoint.py has relative import: .{node.module} "
+                        f"hook_entrypoint.py has relative import: {rel} "
                         "(must be stdlib-only, no terok_shield imports)"
                     )
-                top = node.module.split(".")[0]
-                assert top in stdlib, f"hook_entrypoint.py imports non-stdlib module: {node.module}"
+                if node.module:
+                    top = node.module.split(".")[0]
+                    assert top in stdlib, (
+                        f"hook_entrypoint.py imports non-stdlib module: {node.module}"
+                    )
