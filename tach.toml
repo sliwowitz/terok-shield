@@ -40,6 +40,11 @@ depends_on = []
 path = "terok_shield.podman_info"
 depends_on = []
 
+# Shared netlink struct definitions and IP packet parsing — standalone
+[[modules]]
+path = "terok_shield.netlink"
+depends_on = []
+
 # Shared utilities — standalone, no internal deps
 [[modules]]
 path = "terok_shield.util"
@@ -89,12 +94,21 @@ depends_on = [
     "terok_shield.state",
 ]
 
+# Raw AF_NETLINK NFQUEUE handler for packet-queuing interactive mode
+[[modules]]
+path = "terok_shield.nfqueue"
+depends_on = [
+    "terok_shield.netlink",
+    "terok_shield.nft_constants",
+]
+
 # Watch — live blocked-access event stream
 [[modules]]
 path = "terok_shield.watch"
 depends_on = [
     "terok_shield.config",
     "terok_shield.dnsmasq",
+    "terok_shield.netlink",
     "terok_shield.nft_constants",
     "terok_shield.state",
 ]
@@ -113,10 +127,22 @@ depends_on = [
     "terok_shield.util",
 ]
 
-# Command registry — depends on watch for lazy-imported handler
+# Interactive verdict loop — NFLOG + NFQUEUE-based operator/validator approval
+[[modules]]
+path = "terok_shield.interactive"
+depends_on = [
+    "terok_shield.nfqueue",
+    "terok_shield.nft",
+    "terok_shield.run",
+    "terok_shield.state",
+    "terok_shield.watch",
+]
+
+# Command registry — depends on watch + interactive for lazy-imported handlers
 [[modules]]
 path = "terok_shield.registry"
 depends_on = [
+    "terok_shield.interactive",
     "terok_shield.watch",
 ]
 

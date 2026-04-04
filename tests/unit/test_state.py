@@ -20,12 +20,14 @@ from terok_shield.state import (
     hook_entrypoint,
     hook_json_path,
     hooks_dir,
+    interactive_path,
     live_allowed_path,
     live_domains_path,
     profile_allowed_path,
     profile_domains_path,
     read_denied_ips,
     read_effective_ips,
+    read_interactive_tier,
 )
 
 from ..testfs import FAKE_STATE_DIR
@@ -205,3 +207,39 @@ def test_hook_entrypoint_path_strings_match_state_functions() -> None:
             f"state.{fn.__name__}() returns that filename. "
             "Update hook_entrypoint.py to match."
         )
+
+
+# ── read_interactive_tier ────────────────────────────────
+
+
+class TestReadInteractiveTier:
+    """Tests for read_interactive_tier."""
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        """Returns None when the interactive file does not exist."""
+        assert read_interactive_tier(tmp_path) is None
+
+    def test_nflog_tier(self, tmp_path: Path) -> None:
+        """Returns 'nflog' when the file contains 'nflog'."""
+        interactive_path(tmp_path).write_text("nflog\n")
+        assert read_interactive_tier(tmp_path) == "nflog"
+
+    def test_nfqueue_tier(self, tmp_path: Path) -> None:
+        """Returns 'nfqueue' when the file contains 'nfqueue'."""
+        interactive_path(tmp_path).write_text("nfqueue\n")
+        assert read_interactive_tier(tmp_path) == "nfqueue"
+
+    def test_legacy_1_treated_as_nflog(self, tmp_path: Path) -> None:
+        """Legacy value '1' is treated as 'nflog'."""
+        interactive_path(tmp_path).write_text("1\n")
+        assert read_interactive_tier(tmp_path) == "nflog"
+
+    def test_empty_file_returns_none(self, tmp_path: Path) -> None:
+        """Returns None when the file is empty."""
+        interactive_path(tmp_path).write_text("")
+        assert read_interactive_tier(tmp_path) is None
+
+    def test_whitespace_only_returns_none(self, tmp_path: Path) -> None:
+        """Returns None when the file contains only whitespace."""
+        interactive_path(tmp_path).write_text("  \n")
+        assert read_interactive_tier(tmp_path) is None

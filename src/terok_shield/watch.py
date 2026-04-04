@@ -32,6 +32,7 @@ from pathlib import Path
 
 from . import dnsmasq, state
 from .config import DnsTier
+from .netlink import NFA_HDR, NFGEN_HDR, NLMSG_HDR, extract_ip_dest, parse_nflog_attrs
 from .nft_constants import NFLOG_GROUP
 
 logger = logging.getLogger(__name__)
@@ -238,18 +239,8 @@ _NFULA_PACKET_HDR = 1
 _NFULA_PREFIX = 3
 _NFULA_PAYLOAD = 9
 
-# IP protocol numbers
-_IPPROTO_TCP = 6
-_IPPROTO_UDP = 17
-
-# Netlink message header: length(4) + type(2) + flags(2) + seq(4) + pid(4)
-_NLMSG_HDR = struct.Struct("=IHHII")
-# nfgenmsg: family(1) + version(1) + res_id(2)
-_NFGEN_HDR = struct.Struct("=BBH")
 # nflog config command: command(1) + pad(1) + pf(2)
 _NFULNL_CFG_CMD = struct.Struct("=BBH")
-# nflog TLV attribute header: length(2) + type(2)
-_NFA_HDR = struct.Struct("=HH")
 
 _NLM_F_REQUEST = 1
 _NLM_F_ACK = 4
@@ -265,15 +256,15 @@ def _build_nflog_bind_msg(group: int) -> bytes:
     for the specified NFLOG group number.
     """
     msg_type = (_NFNL_SUBSYS_ULOG << 8) | _NFULNL_MSG_CONFIG
-    nfgen = _NFGEN_HDR.pack(_AF_INET, 0, socket.htons(group))
+    nfgen = NFGEN_HDR.pack(_AF_INET, 0, socket.htons(group))
     # Config command attribute: NFULA_CFG_CMD
     cmd_payload = _NFULNL_CFG_CMD.pack(_NFULNL_CFG_CMD_BIND, 0, socket.htons(_AF_INET))
     # Attribute TLV: type=1 (NFULA_CFG_CMD), length=header+payload
-    attr = _NFA_HDR.pack(_NFA_HDR.size + len(cmd_payload), 1) + cmd_payload
+    attr = NFA_HDR.pack(NFA_HDR.size + len(cmd_payload), 1) + cmd_payload
     payload = nfgen + attr
     nlmsg = (
-        _NLMSG_HDR.pack(
-            _NLMSG_HDR.size + len(payload),
+        NLMSG_HDR.pack(
+            NLMSG_HDR.size + len(payload),
             msg_type,
             _NLM_F_REQUEST | _NLM_F_ACK,
             0,
@@ -282,57 +273,6 @@ def _build_nflog_bind_msg(group: int) -> bytes:
         + payload
     )
     return nlmsg
-
-
-def _parse_nflog_attrs(data: bytes) -> dict[int, bytes]:
-    """Parse TLV attributes from an NFLOG packet message.
-
-    Returns a dict mapping attribute type to raw attribute value bytes.
-    """
-    attrs: dict[int, bytes] = {}
-    offset = 0
-    while offset + _NFA_HDR.size <= len(data):
-        nfa_len, nfa_type = _NFA_HDR.unpack_from(data, offset)
-        if nfa_len < _NFA_HDR.size:
-            break
-        # Mask out the nested/byteorder flags from the type field
-        nfa_type &= 0x7FFF
-        value = data[offset + _NFA_HDR.size : offset + nfa_len]
-        attrs[nfa_type] = value
-        # Attributes are 4-byte aligned
-        offset += (nfa_len + 3) & ~3
-    return attrs
-
-
-def _extract_ip_dest(payload: bytes) -> tuple[str, int, int]:
-    """Extract destination IP, protocol, and port from a raw IP packet.
-
-    Handles IPv4 only (NFLOG in inet tables delivers the IP header).
-    Returns ``("", 0, 0)`` if the packet cannot be parsed.
-    """
-    if len(payload) < 20:
-        return ("", 0, 0)
-    version = (payload[0] >> 4) & 0xF
-    if version != 4:
-        # IPv6 parsing: 40-byte header, dest at offset 24
-        if version == 6 and len(payload) >= 40:
-            dest_bytes = payload[24:40]
-            dest = socket.inet_ntop(socket.AF_INET6, dest_bytes)
-            proto = payload[6]  # Next Header
-            port = 0
-            if proto in (_IPPROTO_TCP, _IPPROTO_UDP) and len(payload) >= 44:
-                port = struct.unpack_from("!H", payload, 42)[0]  # dest port
-            return (dest, proto, port)
-        return ("", 0, 0)
-    ihl = (payload[0] & 0xF) * 4
-    if ihl < 20:
-        return ("", 0, 0)
-    proto = payload[9]
-    dest = socket.inet_ntop(socket.AF_INET, payload[16:20])
-    port = 0
-    if proto in (_IPPROTO_TCP, _IPPROTO_UDP) and len(payload) >= ihl + 4:
-        port = struct.unpack_from("!H", payload, ihl + 2)[0]  # dest port
-    return (dest, proto, port)
 
 
 class NflogWatcher:
@@ -375,8 +315,8 @@ class NflogWatcher:
             # NLMSG_ERROR layout: nlmsghdr (16 bytes) + error (int32).
             try:
                 ack = sock.recv(4096)
-                if len(ack) >= _NLMSG_HDR.size + 4:
-                    err = struct.unpack_from("=i", ack, _NLMSG_HDR.size)[0]
+                if len(ack) >= NLMSG_HDR.size + 4:
+                    err = struct.unpack_from("=i", ack, NLMSG_HDR.size)[0]
                     if err < 0:
                         sock.close()
                         logger.debug("NFLOG bind rejected (errno %d) — skipping", -err)
@@ -415,18 +355,18 @@ class NflogWatcher:
         """Parse one or more netlink messages from raw *data*."""
         events: list[WatchEvent] = []
         offset = 0
-        while offset + _NLMSG_HDR.size <= len(data):
-            nl_len, nl_type, _flags, _seq, _pid = _NLMSG_HDR.unpack_from(data, offset)
-            if nl_len < _NLMSG_HDR.size or offset + nl_len > len(data):
+        while offset + NLMSG_HDR.size <= len(data):
+            nl_len, nl_type, _flags, _seq, _pid = NLMSG_HDR.unpack_from(data, offset)
+            if nl_len < NLMSG_HDR.size or offset + nl_len > len(data):
                 break
             # Check this is an NFLOG packet message
             subsys = (nl_type >> 8) & 0xFF
             msg = nl_type & 0xFF
             if subsys == _NFNL_SUBSYS_ULOG and msg == _NFULNL_MSG_PACKET:
                 # Skip nlmsg header + nfgenmsg (4 bytes)
-                attr_offset = _NLMSG_HDR.size + _NFGEN_HDR.size
+                attr_offset = NLMSG_HDR.size + NFGEN_HDR.size
                 if offset + attr_offset < offset + nl_len:
-                    attrs = _parse_nflog_attrs(data[offset + attr_offset : offset + nl_len])
+                    attrs = parse_nflog_attrs(data[offset + attr_offset : offset + nl_len])
                     event = self._attr_to_event(attrs)
                     if event:
                         events.append(event)
@@ -448,11 +388,13 @@ class NflogWatcher:
             action = "allowed_connection"
         elif "BYPASS" in prefix:
             action = "bypass_connection"
+        elif "QUEUED" in prefix:
+            action = "queued_connection"
         else:
             action = "nflog"
 
         payload = attrs.get(_NFULA_PAYLOAD, b"")
-        dest, proto, port = _extract_ip_dest(payload)
+        dest, proto, port = extract_ip_dest(payload)
         if not dest:
             return None
 
