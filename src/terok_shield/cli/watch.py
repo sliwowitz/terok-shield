@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..common.config import DnsTier
 from ..core import state
-from ..lib.watchers import AuditLogWatcher, DnsLogWatcher, NflogWatcher, WatchEvent
+from ..lib.watchers import AuditLogWatcher, DnsLogWatcher, DomainCache, NflogWatcher, WatchEvent
 
 # ── Entry point ─────────────────────────────────────────
 
@@ -71,12 +71,35 @@ def _emit_events(events: list[WatchEvent]) -> None:
         print(event.to_json(), flush=True)
 
 
-def _poll_nflog_or_sleep(nflog_watcher: NflogWatcher | None) -> None:
+def _enrich_nflog(events: list[WatchEvent], cache: DomainCache) -> list[WatchEvent]:
+    """Attach cached domain names to NFLOG events that have a dest IP.
+
+    Refreshes the cache at most once per batch to avoid reparsing the
+    entire dnsmasq log for every cache miss.
+    """
+    enriched: list[WatchEvent] = []
+    refreshed = False
+    for ev in events:
+        if ev.dest and not ev.domain:
+            domain = cache.lookup(ev.dest)
+            if not domain and not refreshed:
+                cache.refresh()
+                refreshed = True
+                domain = cache.lookup(ev.dest)
+            if domain:
+                from dataclasses import replace
+
+                ev = replace(ev, domain=domain)
+        enriched.append(ev)
+    return enriched
+
+
+def _poll_nflog_or_sleep(nflog_watcher: NflogWatcher | None, domain_cache: DomainCache) -> None:
     """Wait on the NFLOG socket (or sleep) and emit any packets."""
     if nflog_watcher:
         readable, _, _ = select.select([nflog_watcher], [], [], 1.0)
         if readable:
-            _emit_events(nflog_watcher.poll())
+            _emit_events(_enrich_nflog(nflog_watcher.poll(), domain_cache))
     else:
         select.select([], [], [], 1.0)
 
@@ -109,10 +132,11 @@ def run_watch(state_dir: Path, container: str) -> None:
     dns_watcher = DnsLogWatcher(log_path, state_dir, container)
     audit_watcher = AuditLogWatcher(state.audit_path(state_dir), container)
     nflog_watcher = NflogWatcher.create(container)
+    domain_cache = DomainCache(state_dir)
 
     try:
         while _running:
-            _poll_nflog_or_sleep(nflog_watcher)
+            _poll_nflog_or_sleep(nflog_watcher, domain_cache)
             _emit_events(dns_watcher.poll())
             _emit_events(audit_watcher.poll())
     finally:

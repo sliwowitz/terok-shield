@@ -16,6 +16,7 @@ import pytest
 
 import terok_shield.cli.watch as _cli_watch_mod
 from terok_shield.cli.watch import (
+    _enrich_nflog,
     _ensure_log_file,
     _handle_signal,
     run_watch,
@@ -41,13 +42,22 @@ from terok_shield.lib.watchers import (
     _QUERY_RE,
     AuditLogWatcher,
     DnsLogWatcher,
+    DomainCache,
     NflogWatcher,
     WatchEvent,
     _build_nflog_bind_msg,
     _extract_ip_dest,
     _parse_nflog_attrs,
 )
-from tests.testnet import BLOCKED_DOMAIN, BLOCKED_SUBDOMAIN, TEST_DOMAIN, TEST_DOMAIN2
+from tests.testnet import (
+    BLOCKED_DOMAIN,
+    BLOCKED_SUBDOMAIN,
+    DNSMASQ_DOMAIN,
+    TEST_DOMAIN,
+    TEST_DOMAIN2,
+    TEST_IP1,
+    TEST_IP2,
+)
 
 _CONTAINER = "test-container"
 
@@ -1161,3 +1171,108 @@ class TestEnsureLogFile:
         log.write_text("existing content\n")
         _ensure_log_file(log)
         assert log.read_text() == "existing content\n"
+
+
+# ── _enrich_nflog ─────────────────────────────────────────
+
+
+class TestEnrichNflog:
+    """Tests for NFLOG event domain enrichment via DomainCache."""
+
+    def test_enriches_event_with_cached_domain(self, tmp_path: Path) -> None:
+        """_enrich_nflog attaches a cached domain to an NFLOG event."""
+        cache = DomainCache(tmp_path)
+        cache._mapping[TEST_IP1] = DNSMASQ_DOMAIN
+        event = WatchEvent(
+            ts="t",
+            source="nflog",
+            action="blocked_connection",
+            container=_CONTAINER,
+            dest=TEST_IP1,
+            port=443,
+        )
+        enriched = _enrich_nflog([event], cache)
+        assert enriched[0].domain == DNSMASQ_DOMAIN
+
+    def test_refreshes_cache_on_miss(self, tmp_path: Path) -> None:
+        """_enrich_nflog refreshes the cache when the IP is not initially mapped."""
+        from terok_shield.core import state as st
+
+        log_path = st.dnsmasq_log_path(tmp_path)
+        log_path.write_text(f"reply {DNSMASQ_DOMAIN} is {TEST_IP1}\n")
+        cache = DomainCache(tmp_path)
+        event = WatchEvent(
+            ts="t",
+            source="nflog",
+            action="blocked_connection",
+            container=_CONTAINER,
+            dest=TEST_IP1,
+            port=443,
+        )
+        enriched = _enrich_nflog([event], cache)
+        assert enriched[0].domain == DNSMASQ_DOMAIN
+
+    def test_leaves_domain_empty_when_unknown(self, tmp_path: Path) -> None:
+        """_enrich_nflog leaves domain empty when no DNS entry exists."""
+        cache = DomainCache(tmp_path)
+        event = WatchEvent(
+            ts="t",
+            source="nflog",
+            action="blocked_connection",
+            container=_CONTAINER,
+            dest=TEST_IP1,
+            port=443,
+        )
+        enriched = _enrich_nflog([event], cache)
+        assert enriched[0].domain == ""
+
+    def test_skips_events_with_existing_domain(self, tmp_path: Path) -> None:
+        """_enrich_nflog does not overwrite events that already have a domain."""
+        cache = DomainCache(tmp_path)
+        event = WatchEvent(
+            ts="t",
+            source="nflog",
+            action="blocked_connection",
+            container=_CONTAINER,
+            dest=TEST_IP1,
+            port=443,
+            domain="already.set",
+        )
+        enriched = _enrich_nflog([event], cache)
+        assert enriched[0].domain == "already.set"
+
+    def test_skips_events_without_dest(self, tmp_path: Path) -> None:
+        """_enrich_nflog skips events that have no dest IP."""
+        cache = DomainCache(tmp_path)
+        event = WatchEvent(
+            ts="t",
+            source="nflog",
+            action="blocked_connection",
+            container=_CONTAINER,
+        )
+        enriched = _enrich_nflog([event], cache)
+        assert enriched[0].domain == ""
+
+    def test_refreshes_cache_at_most_once_per_batch(self, tmp_path: Path) -> None:
+        """_enrich_nflog refreshes the cache only once even with multiple misses."""
+        cache = DomainCache(tmp_path)
+        ev1 = WatchEvent(
+            ts="t",
+            source="nflog",
+            action="blocked_connection",
+            container=_CONTAINER,
+            dest=TEST_IP1,
+            port=443,
+        )
+        ev2 = WatchEvent(
+            ts="t",
+            source="nflog",
+            action="blocked_connection",
+            container=_CONTAINER,
+            dest=TEST_IP2,
+            port=80,
+        )
+        original_refresh = cache.refresh
+        cache.refresh = MagicMock(side_effect=original_refresh)
+        _enrich_nflog([ev1, ev2], cache)
+        assert cache.refresh.call_count == 1

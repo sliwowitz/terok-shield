@@ -26,27 +26,205 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import select
 import signal
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from ..core import state
 from ..core.nft import add_deny_elements_dual, add_elements_dual
 from ..core.run import CommandRunner, SubprocessRunner
 from ..core.state import read_interactive_tier
-from ..lib.watchers import NflogWatcher, WatchEvent
+from ..lib.watchers import DomainCache, NflogWatcher, WatchEvent
 
 logger = logging.getLogger(__name__)
 
-# Matches dnsmasq log lines like:
-#   reply github.com is 140.82.121.4
-_REPLY_RE = re.compile(r"reply\s+(\S+)\s+is\s+(\S+)")
+# ── I/O protocol ──────────────────────────────────────
 
-# How often (seconds) to refresh the IP→domain cache from the dnsmasq log.
+
+@runtime_checkable
+class SessionIO(Protocol):
+    """I/O protocol for the interactive session.
+
+    Decouples rendering and parsing from the verdict engine so the same
+    :class:`InteractiveSession` can drive both machine-readable JSON-lines
+    (``--raw``) and human-friendly CLI output.
+    """
+
+    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
+        """Emit a pending-connection event to the operator."""
+        ...
+
+    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
+        """Emit a verdict-applied confirmation."""
+        ...
+
+    def parse_command(self, line: str) -> tuple[int, str] | None:
+        """Parse one line of operator input into *(packet_id, action)*.
+
+        Returns ``None`` when the line is invalid or unparseable.
+        """
+        ...
+
+    def emit_banner(self) -> None:
+        """Print a startup banner (no-op for machine protocols)."""
+        ...
+
+
+class JsonSessionIO:
+    """JSON-lines session I/O — machine-readable protocol.
+
+    Emits compact JSON objects (one per line) and expects JSON verdict
+    commands on stdin.  This is the original protocol from PR #162.
+    """
+
+    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
+        """Emit a pending event as a JSON line."""
+        out = {
+            "type": "pending",
+            "id": packet_id,
+            "dest": dest,
+            "port": port,
+            "proto": proto,
+            "domain": domain,
+        }
+        print(json.dumps(out, separators=(",", ":")), flush=True)
+
+    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
+        """Emit a verdict-applied confirmation as a JSON line."""
+        out = {
+            "type": "verdict_applied",
+            "id": verdict_id,
+            "dest": dest,
+            "action": action,
+            "ok": ok,
+        }
+        print(json.dumps(out, separators=(",", ":")), flush=True)
+
+    def parse_command(self, line: str) -> tuple[int, str] | None:
+        """Parse a JSON verdict command.
+
+        Expected format: ``{"type": "verdict", "id": 1, "action": "accept"}``.
+        Returns ``(id, action)`` on success or ``None`` on any validation failure.
+        """
+        try:
+            cmd = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("Invalid JSON on stdin: %s", line)
+            return None
+        if not isinstance(cmd, dict):
+            logger.warning("Expected JSON object, got %s", type(cmd).__name__)
+            return None
+        if cmd.get("type") != "verdict":
+            logger.warning("Unknown command type: %s", cmd.get("type"))
+            return None
+        verdict_id = cmd.get("id")
+        if isinstance(verdict_id, bool) or not isinstance(verdict_id, int):
+            logger.warning("Verdict id must be an integer, got %r", verdict_id)
+            return None
+        action = cmd.get("action")
+        if action not in ("accept", "deny"):
+            logger.warning("Verdict action must be 'accept' or 'deny', got %r", action)
+            return None
+        return (verdict_id, action)
+
+    def emit_banner(self) -> None:
+        """No-op — machine protocol has no banner."""
+
+
+# Mapping of human-friendly input to canonical action names.
+_INPUT_MAP: dict[str, str] = {
+    "a": "accept",
+    "allow": "accept",
+    "d": "deny",
+    "deny": "deny",
+}
+
+
+class CliSessionIO:
+    """Human-friendly interactive CLI session I/O.
+
+    Renders blocked connections as readable lines and accepts short
+    operator input (``a``/``d`` or ``allow``/``deny``).  Pending packets
+    are tracked in a FIFO queue — input always targets the oldest.
+    """
+
+    def __init__(self) -> None:
+        """Initialise with empty pending-packet queues."""
+        self._queue: list[int] = []
+        """FIFO of pending packet IDs awaiting a verdict."""
+
+        self._info: dict[int, tuple[str, int, str]] = {}
+        """Packet metadata: *id* → *(dest, port, domain)*."""
+
+    def _prompt_head(self) -> None:
+        """Print the allow/deny prompt for the head-of-queue packet."""
+        if not self._queue:
+            return
+        info = self._info.get(self._queue[0])
+        if info is None:
+            return
+        dest, port, domain = info
+        label = f"{dest} ({domain})" if domain else dest
+        print(f"[BLOCKED] {label} :{port} \u2014 allow/deny? ", end="", flush=True)
+
+    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
+        """Show a ``[BLOCKED]`` line and queue the packet for verdict."""
+        label = f"{dest} ({domain})" if domain else dest
+        self._queue.append(packet_id)
+        self._info[packet_id] = (dest, port, domain)
+        if len(self._queue) == 1:
+            self._prompt_head()
+        else:
+            # Additional pending while the operator is thinking.
+            print(f"\n[BLOCKED] {label} :{port} (queued)", flush=True)
+            self._prompt_head()
+
+    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
+        """Show verdict result and prompt the next queued packet if any.
+
+        On success the packet is removed from the queue.  On failure it
+        stays queued so the operator can retry with the same ``a``/``d``
+        input (mirrors :meth:`InteractiveSession._process_command` which
+        keeps failed verdicts in ``_pending_by_ip``).
+        """
+        info = self._info.get(verdict_id)
+        target = info[2] if info and info[2] else dest
+        if ok:
+            self._info.pop(verdict_id, None)
+            if verdict_id in self._queue:
+                self._queue.remove(verdict_id)
+            mark = "\u2713" if action == "accept" else "\u2717"
+            verb = "allowed" if action == "accept" else "denied"
+            print(f"  {mark} {verb} {target}")
+        else:
+            print(f"  ! verdict failed for {target} (retry with a/d)")
+        self._prompt_head()
+
+    def parse_command(self, line: str) -> tuple[int, str] | None:
+        """Map operator input to the oldest pending packet.
+
+        Accepts ``a``, ``d``, ``allow``, ``deny`` (case-insensitive).
+        Returns ``None`` and prints a hint on unrecognised input.
+        """
+        action = _INPUT_MAP.get(line.strip().lower())
+        if action is None:
+            print("  Unknown input. Type 'a' to allow or 'd' to deny.", flush=True)
+            self._prompt_head()
+            return None
+        if not self._queue:
+            return None
+        return (self._queue[0], action)
+
+    def emit_banner(self) -> None:
+        """Print a startup message."""
+        print("Watching for blocked connections... (Ctrl-C to stop)\n", flush=True)
+
+
+# How often (seconds) to refresh the domain cache from the dnsmasq log.
 _DOMAIN_REFRESH_INTERVAL = 10.0
 
 # Module-level stop flag, set by signal handler.
@@ -91,6 +269,7 @@ class InteractiveSession:
         runner: CommandRunner,
         state_dir: Path,
         container: str,
+        io: SessionIO | None = None,
     ) -> None:
         """Initialise the session.
 
@@ -98,14 +277,16 @@ class InteractiveSession:
             runner: Command runner for nft operations.
             state_dir: Per-container state directory.
             container: Container name (for nft nsenter).
+            io: I/O protocol implementation (defaults to :class:`JsonSessionIO`).
         """
         self._runner = runner
         self._state_dir = state_dir
         self._container = container
+        self._io: SessionIO = io if io is not None else JsonSessionIO()
+        self._domain_cache = DomainCache(state_dir)
 
         self._seen_ips: set[str] = set()
         self._pending_by_ip: dict[str, _PendingPacket] = {}
-        self._ip_to_domain: dict[str, str] = {}
         self._last_domain_refresh: float = 0.0
         self._next_id: int = 1
 
@@ -123,6 +304,8 @@ class InteractiveSession:
                 file=sys.stderr,
             )
             raise SystemExit(1)
+
+        self._io.emit_banner()
 
         stdin_fd = sys.stdin.fileno()
         _set_nonblocking(stdin_fd)
@@ -147,7 +330,8 @@ class InteractiveSession:
         buf = ""
         while _running:
             if time.monotonic() - self._last_domain_refresh > _DOMAIN_REFRESH_INTERVAL:
-                self._refresh_domain_cache()
+                self._domain_cache.refresh()
+                self._last_domain_refresh = time.monotonic()
 
             try:
                 readable, _, _ = select.select([watcher, stdin_fd], [], [], 1.0)
@@ -187,7 +371,10 @@ class InteractiveSession:
             return
 
         self._seen_ips.add(ip)
-        domain = self._ip_to_domain.get(ip, "")
+        domain = self._domain_cache.lookup(ip)
+        if not domain:
+            self._domain_cache.refresh()
+            domain = self._domain_cache.lookup(ip)
         packet_id = self._next_id
         self._next_id += 1
 
@@ -201,15 +388,7 @@ class InteractiveSession:
         )
         self._pending_by_ip[ip] = pending
 
-        out = {
-            "type": "pending",
-            "id": packet_id,
-            "dest": ip,
-            "port": event.port,
-            "proto": event.proto,
-            "domain": domain,
-        }
-        print(json.dumps(out, separators=(",", ":")), flush=True)
+        self._io.emit_pending(packet_id, ip, event.port, event.proto, domain)
 
     def _read_stdin(self, buf: str) -> str | None:
         """Read available bytes from stdin and process complete lines.
@@ -235,37 +414,20 @@ class InteractiveSession:
         return buf
 
     def _process_command(self, line: str) -> None:
-        """Parse and execute a single JSON command from stdin.
+        """Parse and execute a single command from stdin.
 
-        Expected format::
-
-            {"type": "verdict", "id": 1, "action": "accept"}
+        Delegates parsing to the :class:`SessionIO` implementation, then
+        looks up the pending packet, applies the verdict, and emits the
+        result.
 
         Args:
-            line: A single JSON line from the controlling process.
+            line: A single line of operator input.
         """
-        try:
-            cmd = json.loads(line)
-        except json.JSONDecodeError:
-            logger.warning("Invalid JSON on stdin: %s", line)
+        parsed = self._io.parse_command(line)
+        if parsed is None:
             return
 
-        if not isinstance(cmd, dict):
-            logger.warning("Expected JSON object, got %s", type(cmd).__name__)
-            return
-        if cmd.get("type") != "verdict":
-            logger.warning("Unknown command type: %s", cmd.get("type"))
-            return
-
-        verdict_id = cmd.get("id")
-        if isinstance(verdict_id, bool) or not isinstance(verdict_id, int):
-            logger.warning("Verdict id must be an integer, got %r", verdict_id)
-            return
-
-        action = cmd.get("action")
-        if action not in ("accept", "deny"):
-            logger.warning("Verdict action must be 'accept' or 'deny', got %r", action)
-            return
+        verdict_id, action = parsed
 
         # Find the pending packet by id.
         pending: _PendingPacket | None = None
@@ -284,14 +446,7 @@ class InteractiveSession:
         if ok:
             self._pending_by_ip.pop(pending.dest, None)
 
-        out = {
-            "type": "verdict_applied",
-            "id": verdict_id,
-            "dest": pending.dest,
-            "action": action,
-            "ok": ok,
-        }
-        print(json.dumps(out, separators=(",", ":")), flush=True)
+        self._io.emit_verdict_applied(verdict_id, pending.dest, action, ok=ok)
 
     def _apply_verdict(self, pending: _PendingPacket, *, accept: bool) -> bool:
         """Apply an accept or deny verdict to the nft ruleset and persist it.
@@ -319,10 +474,55 @@ class InteractiveSession:
         # Persist to state files.
         if accept:
             _append_unique(state.live_allowed_path(self._state_dir), ip)
+            if pending.domain and self._is_dnsmasq_tier():
+                self._allow_domain(pending.domain)
         else:
             _append_unique(state.deny_path(self._state_dir), ip)
+            if pending.domain and self._is_dnsmasq_tier():
+                self._deny_domain(pending.domain)
 
         return True
+
+    def _allow_domain(self, domain: str) -> None:
+        """Add domain to dnsmasq config and signal reload.
+
+        Delegates to :func:`dnsmasq.add_domain` which persists to
+        ``live.domains`` and removes from ``denied.domains``.  A SIGHUP
+        makes the change take effect immediately — future DNS resolutions
+        for *domain* auto-populate the nft allow sets.
+        """
+        from ..core import dnsmasq
+
+        if not dnsmasq.add_domain(self._state_dir, domain):
+            return
+        self._reload_dnsmasq()
+
+    def _deny_domain(self, domain: str) -> None:
+        """Remove domain from dnsmasq config and signal reload.
+
+        Counterpart of :meth:`_allow_domain`.  Stops dnsmasq from
+        auto-populating nft sets for *domain* on future DNS queries.
+        """
+        from ..core import dnsmasq
+
+        if not dnsmasq.remove_domain(self._state_dir, domain):
+            return
+        self._reload_dnsmasq()
+
+    def _reload_dnsmasq(self) -> None:
+        """Regenerate dnsmasq config and send SIGHUP."""
+        from ..core import dnsmasq
+
+        try:
+            upstream = state.upstream_dns_path(self._state_dir).read_text().strip()
+        except OSError:
+            logger.warning("Cannot reload dnsmasq: upstream DNS not persisted")
+            return
+        domains = dnsmasq.read_merged_domains(self._state_dir)
+        try:
+            dnsmasq.reload(self._state_dir, upstream, domains)
+        except RuntimeError:
+            logger.exception("dnsmasq reload failed")
 
     def _nft_apply(self, nft_cmd: str) -> bool:
         """Apply nft commands via nsenter into the container's network namespace.
@@ -351,25 +551,6 @@ class InteractiveSession:
             return tier_path.is_file() and tier_path.read_text().strip() == "dnsmasq"
         except OSError:
             return False
-
-    def _refresh_domain_cache(self) -> None:
-        """Reload the IP-to-domain mapping from the dnsmasq query log.
-
-        Parses ``reply`` lines to build a reverse lookup table.  On
-        ``OSError`` the previous cache is preserved.
-        """
-        self._last_domain_refresh = time.monotonic()
-        log_path = state.dnsmasq_log_path(self._state_dir)
-        try:
-            text = log_path.read_text()
-        except OSError:
-            return
-
-        mapping: dict[str, str] = {}
-        for m in _REPLY_RE.finditer(text):
-            domain, ip = m.group(1), m.group(2)
-            mapping[ip] = domain.lower().rstrip(".")
-        self._ip_to_domain = mapping
 
 
 # ── Helpers ────────────────────────────────────────────
@@ -412,9 +593,10 @@ def _append_unique(path: Path, value: str) -> None:
 # ── nsenter re-exec ───────────────────────────────────
 
 _NSENTER_ENV = "_TEROK_SHIELD_NFLOG_NSENTER"
+_RAW_ENV = "_TEROK_SHIELD_NFLOG_RAW"
 
 
-def _nsenter_reexec(state_dir: Path, container: str) -> None:
+def _nsenter_reexec(state_dir: Path, container: str, *, raw: bool) -> None:
     """Re-exec the interactive handler inside the container's network namespace.
 
     NFLOG messages are delivered per-netns — the watcher must be inside the
@@ -425,6 +607,7 @@ def _nsenter_reexec(state_dir: Path, container: str) -> None:
     Args:
         state_dir: Per-container state directory.
         container: Container name.
+        raw: Whether to use raw JSON-lines protocol.
     """
     import subprocess
 
@@ -445,6 +628,10 @@ def _nsenter_reexec(state_dir: Path, container: str) -> None:
         container,
     ]
     env = {**os.environ, _NSENTER_ENV: "1"}
+    if raw:
+        env[_RAW_ENV] = "1"
+    else:
+        env.pop(_RAW_ENV, None)
     try:
         subprocess.run(cmd, env=env, check=True)  # noqa: S603
     except subprocess.CalledProcessError as e:
@@ -454,7 +641,7 @@ def _nsenter_reexec(state_dir: Path, container: str) -> None:
 # ── Entry point ────────────────────────────────────────
 
 
-def run_interactive(state_dir: Path, container: str) -> None:
+def run_interactive(state_dir: Path, container: str, *, raw: bool = False) -> None:
     """Start the interactive NFLOG handler for a container.
 
     The NFLOG netlink socket must be inside the container's network
@@ -466,6 +653,8 @@ def run_interactive(state_dir: Path, container: str) -> None:
     Args:
         state_dir: Per-container state directory (may be relative).
         container: Container name.
+        raw: If ``True``, use JSON-lines protocol; otherwise use the
+            human-friendly CLI (default).
 
     Raises:
         SystemExit: If the interactive tier is not configured or NFLOG
@@ -481,19 +670,26 @@ def run_interactive(state_dir: Path, container: str) -> None:
         raise SystemExit(1)
 
     if os.environ.get(_NSENTER_ENV) != "1":
-        _nsenter_reexec(state_dir, container)
+        _nsenter_reexec(state_dir, container, raw=raw)
         return
 
+    io: SessionIO = JsonSessionIO() if raw else CliSessionIO()
     runner = SubprocessRunner()
-    session = InteractiveSession(runner=runner, state_dir=state_dir, container=container)
+    session = InteractiveSession(runner=runner, state_dir=state_dir, container=container, io=io)
     session.run()
 
 
-if __name__ == "__main__":
+def _main() -> None:
+    """CLI entry point for ``python -m terok_shield.cli.interactive``."""
     if len(sys.argv) != 3:
         print(
             f"Usage: {sys.executable} -m terok_shield.cli.interactive <state_dir> <container>",
             file=sys.stderr,
         )
         raise SystemExit(2)
-    run_interactive(Path(sys.argv[1]), sys.argv[2])
+    raw = os.environ.get(_RAW_ENV) == "1"
+    run_interactive(Path(sys.argv[1]), sys.argv[2], raw=raw)
+
+
+if __name__ == "__main__":
+    _main()

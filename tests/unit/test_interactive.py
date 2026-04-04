@@ -13,10 +13,15 @@ from unittest import mock
 import pytest
 
 from terok_shield.cli.interactive import (
+    _INPUT_MAP,
     _NSENTER_ENV,
+    _RAW_ENV,
+    CliSessionIO,
     InteractiveSession,
+    JsonSessionIO,
     _append_unique,
     _handle_signal,
+    _main,
     _PendingPacket,
     run_interactive,
 )
@@ -184,7 +189,7 @@ class TestHandleNflogEvent:
     ) -> None:
         """_handle_nflog_event looks up domain from the IP-to-domain cache."""
         session = _make_session(tmp_path)
-        session._ip_to_domain[TEST_IP1] = DNSMASQ_DOMAIN
+        session._domain_cache._mapping[TEST_IP1] = DNSMASQ_DOMAIN
         session._handle_nflog_event(_make_event(TEST_IP1))
         out = json.loads(capsys.readouterr().out.strip())
         assert out["domain"] == DNSMASQ_DOMAIN
@@ -397,51 +402,78 @@ class TestDrainWatcherAndReadableFds:
         assert result == {7, 42}
 
 
-# ── InteractiveSession._refresh_domain_cache ──────────────
+# ── DomainCache (via InteractiveSession) ──────────────────
 
 
-class TestRefreshDomainCache:
-    """Tests for InteractiveSession._refresh_domain_cache."""
+class TestDomainCacheIntegration:
+    """Tests for DomainCache as used by InteractiveSession."""
 
     def test_parses_dnsmasq_log(self, tmp_path: Path) -> None:
-        """_refresh_domain_cache parses dnsmasq 'reply' lines into IP-to-domain mapping."""
-        session = _make_session(tmp_path)
+        """DomainCache parses dnsmasq 'reply' lines into IP-to-domain mapping."""
         log_path = state.dnsmasq_log_path(tmp_path)
         log_path.write_text(
             f"reply {DNSMASQ_DOMAIN} is {TEST_IP1}\nreply {DNSMASQ_DOMAIN2} is {TEST_IP2}\n"
         )
-        session._refresh_domain_cache()
-        assert session._ip_to_domain[TEST_IP1] == DNSMASQ_DOMAIN
-        assert session._ip_to_domain[TEST_IP2] == DNSMASQ_DOMAIN2
+        from terok_shield.lib.watchers import DomainCache
+
+        cache = DomainCache(tmp_path)
+        cache.refresh()
+        assert cache.lookup(TEST_IP1) == DNSMASQ_DOMAIN
+        assert cache.lookup(TEST_IP2) == DNSMASQ_DOMAIN2
+
+    def test_parses_cached_lines(self, tmp_path: Path) -> None:
+        """DomainCache parses dnsmasq 'cached' lines (cache-hit responses)."""
+        log_path = state.dnsmasq_log_path(tmp_path)
+        log_path.write_text(
+            f"cached {DNSMASQ_DOMAIN} is {TEST_IP1}\ncached {DNSMASQ_DOMAIN2} is {TEST_IP2}\n"
+        )
+        from terok_shield.lib.watchers import DomainCache
+
+        cache = DomainCache(tmp_path)
+        cache.refresh()
+        assert cache.lookup(TEST_IP1) == DNSMASQ_DOMAIN
+        assert cache.lookup(TEST_IP2) == DNSMASQ_DOMAIN2
 
     def test_oserror_preserves_cache(self, tmp_path: Path) -> None:
         """OSError when reading dnsmasq log preserves the previous cache."""
-        session = _make_session(tmp_path)
-        session._ip_to_domain = {TEST_IP1: KEPT_DOMAIN}
+        from terok_shield.lib.watchers import DomainCache
+
+        cache = DomainCache(tmp_path)
+        cache._mapping[TEST_IP1] = KEPT_DOMAIN
         # dnsmasq.log does not exist, so read_text raises OSError
-        session._refresh_domain_cache()
-        assert session._ip_to_domain == {TEST_IP1: KEPT_DOMAIN}
+        cache.refresh()
+        assert cache.lookup(TEST_IP1) == KEPT_DOMAIN
 
     def test_replaces_stale_entries(self, tmp_path: Path) -> None:
         """A new log replaces the entire cache (old entries disappear)."""
-        session = _make_session(tmp_path)
+        from terok_shield.lib.watchers import DomainCache
+
         log_path = state.dnsmasq_log_path(tmp_path)
         log_path.write_text(f"reply {DNSMASQ_DOMAIN} is {TEST_IP1}\n")
-        session._refresh_domain_cache()
-        assert TEST_IP1 in session._ip_to_domain
-        # Write a new log without the old entry
+        cache = DomainCache(tmp_path)
+        cache.refresh()
+        assert cache.lookup(TEST_IP1) == DNSMASQ_DOMAIN
         log_path.write_text(f"reply {DNSMASQ_DOMAIN2} is {TEST_IP2}\n")
-        session._refresh_domain_cache()
-        assert TEST_IP1 not in session._ip_to_domain
-        assert session._ip_to_domain[TEST_IP2] == DNSMASQ_DOMAIN2
+        cache.refresh()
+        assert cache.lookup(TEST_IP1) == ""
+        assert cache.lookup(TEST_IP2) == DNSMASQ_DOMAIN2
 
     def test_strips_trailing_dot(self, tmp_path: Path) -> None:
         """Trailing dots in domain names are stripped."""
-        session = _make_session(tmp_path)
+        from terok_shield.lib.watchers import DomainCache
+
         log_path = state.dnsmasq_log_path(tmp_path)
         log_path.write_text(f"reply {DNSMASQ_DOMAIN}. is {TEST_IP1}\n")
-        session._refresh_domain_cache()
-        assert session._ip_to_domain[TEST_IP1] == DNSMASQ_DOMAIN
+        cache = DomainCache(tmp_path)
+        cache.refresh()
+        assert cache.lookup(TEST_IP1) == DNSMASQ_DOMAIN
+
+    def test_lookup_unknown_ip(self, tmp_path: Path) -> None:
+        """lookup returns empty string for unknown IPs."""
+        from terok_shield.lib.watchers import DomainCache
+
+        cache = DomainCache(tmp_path)
+        assert cache.lookup(TEST_IP1) == ""
 
 
 # ── InteractiveSession._read_stdin ────────────────────────
@@ -516,7 +548,7 @@ class TestRunInteractive:
         state.interactive_path(tmp_path).write_text("nflog\n")
         with mock.patch("terok_shield.cli.interactive._nsenter_reexec") as mock_reexec:
             run_interactive(tmp_path, _CONTAINER)
-        mock_reexec.assert_called_once_with(tmp_path, _CONTAINER)
+        mock_reexec.assert_called_once_with(tmp_path, _CONTAINER, raw=False)
 
     def test_dispatches_to_session_inside_netns(self, tmp_path: Path) -> None:
         """run_interactive creates a session when already inside the container netns."""
@@ -536,41 +568,35 @@ class TestRunInteractive:
 
 
 class TestMainBlock:
-    """Tests for the ``if __name__ == '__main__'`` entry point."""
+    """Tests for the :func:`_main` entry point."""
 
     def test_wrong_argc_exits_2(self) -> None:
         """Exits with code 2 when argument count is wrong."""
-        import subprocess
-        import sys
-
-        result = subprocess.run(
-            [sys.executable, "-m", "terok_shield.cli.interactive"],  # noqa: S603
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 2
-        assert "Usage:" in result.stderr
+        with (
+            mock.patch("sys.argv", []),
+            pytest.raises(SystemExit) as ctx,
+        ):
+            _main()
+        assert ctx.value.code == 2
 
     def test_correct_args_calls_run_interactive(self, tmp_path: Path) -> None:
         """Correct argc dispatches to run_interactive with parsed args."""
-        import subprocess
-        import sys
+        with (
+            mock.patch("sys.argv", ["prog", str(tmp_path), "test-ctr"]),
+            mock.patch("terok_shield.cli.interactive.run_interactive") as mock_run,
+        ):
+            _main()
+        mock_run.assert_called_once_with(tmp_path, "test-ctr", raw=False)
 
-        result = subprocess.run(
-            [  # noqa: S603
-                sys.executable,
-                "-m",
-                "terok_shield.cli.interactive",
-                str(tmp_path),
-                "test-ctr",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        # run_interactive will fail (no interactive tier), but the __main__
-        # block dispatched correctly — exit code 1, not 2.
-        assert result.returncode == 1
-        assert "nflog" in result.stderr
+    def test_raw_env_selects_raw_mode(self, tmp_path: Path) -> None:
+        """_main passes raw=True when _RAW_ENV is set."""
+        with (
+            mock.patch("sys.argv", ["prog", str(tmp_path), "test-ctr"]),
+            mock.patch.dict("os.environ", {_RAW_ENV: "1"}),
+            mock.patch("terok_shield.cli.interactive.run_interactive") as mock_run,
+        ):
+            _main()
+        mock_run.assert_called_once_with(tmp_path, "test-ctr", raw=True)
 
 
 # ── _nsenter_reexec ──────────────────────────────────────
@@ -588,7 +614,7 @@ class TestNsenterReexec:
             mock.patch("subprocess.run") as mock_run,
         ):
             mock_runner_cls.return_value.podman_inspect.return_value = "12345"
-            _nsenter_reexec(tmp_path, _CONTAINER)
+            _nsenter_reexec(tmp_path, _CONTAINER, raw=False)
 
         cmd = mock_run.call_args[0][0]
         assert cmd[:3] == ["podman", "unshare", "nsenter"]
@@ -598,6 +624,7 @@ class TestNsenterReexec:
         assert _CONTAINER in cmd
         env = mock_run.call_args[1]["env"]
         assert env[_NSENTER_ENV] == "1"
+        assert _RAW_ENV not in env
 
     def test_subprocess_failure_raises_systemexit(self, tmp_path: Path) -> None:
         """_nsenter_reexec raises SystemExit on subprocess failure."""
@@ -614,7 +641,7 @@ class TestNsenterReexec:
             pytest.raises(SystemExit) as ctx,
         ):
             mock_runner_cls.return_value.podman_inspect.return_value = "12345"
-            _nsenter_reexec(tmp_path, _CONTAINER)
+            _nsenter_reexec(tmp_path, _CONTAINER, raw=False)
         assert ctx.value.code == 42
 
 
@@ -779,3 +806,529 @@ class TestVerdictRemovesPending:
         with mock.patch.object(session, "_apply_verdict", return_value=False):
             session._process_command(json.dumps({"type": "verdict", "id": 1, "action": "accept"}))
         assert TEST_IP1 in session._pending_by_ip
+
+
+# ── JsonSessionIO ───────────────────────────────────────
+
+
+class TestJsonSessionIO:
+    """Tests for the JSON-lines machine protocol I/O."""
+
+    def test_emit_pending_writes_json_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """emit_pending prints a compact JSON line with all fields."""
+        io = JsonSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, DNSMASQ_DOMAIN)
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out == {
+            "type": "pending",
+            "id": 1,
+            "dest": TEST_IP1,
+            "port": 443,
+            "proto": 6,
+            "domain": DNSMASQ_DOMAIN,
+        }
+
+    def test_emit_verdict_applied_writes_json_line(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """emit_verdict_applied prints a compact JSON line."""
+        io = JsonSessionIO()
+        io.emit_verdict_applied(1, TEST_IP1, "accept", ok=True)
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out == {
+            "type": "verdict_applied",
+            "id": 1,
+            "dest": TEST_IP1,
+            "action": "accept",
+            "ok": True,
+        }
+
+    def test_parse_command_valid_verdict(self) -> None:
+        """parse_command returns (id, action) for a valid verdict."""
+        io = JsonSessionIO()
+        result = io.parse_command('{"type":"verdict","id":1,"action":"accept"}')
+        assert result == (1, "accept")
+
+    def test_parse_command_deny(self) -> None:
+        """parse_command handles deny action."""
+        io = JsonSessionIO()
+        result = io.parse_command('{"type":"verdict","id":2,"action":"deny"}')
+        assert result == (2, "deny")
+
+    def test_parse_command_invalid_json(self) -> None:
+        """parse_command returns None for invalid JSON."""
+        io = JsonSessionIO()
+        assert io.parse_command("not json") is None
+
+    def test_parse_command_non_dict(self) -> None:
+        """parse_command returns None for non-object JSON."""
+        io = JsonSessionIO()
+        assert io.parse_command("[1,2,3]") is None
+
+    def test_parse_command_wrong_type(self) -> None:
+        """parse_command returns None for unknown command type."""
+        io = JsonSessionIO()
+        assert io.parse_command('{"type":"other","id":1,"action":"accept"}') is None
+
+    def test_parse_command_bool_id(self) -> None:
+        """parse_command returns None when id is a boolean."""
+        io = JsonSessionIO()
+        assert io.parse_command('{"type":"verdict","id":true,"action":"accept"}') is None
+
+    def test_parse_command_invalid_action(self) -> None:
+        """parse_command returns None for unknown action."""
+        io = JsonSessionIO()
+        assert io.parse_command('{"type":"verdict","id":1,"action":"drop"}') is None
+
+    def test_emit_banner_is_noop(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """emit_banner produces no output for the machine protocol."""
+        io = JsonSessionIO()
+        io.emit_banner()
+        assert capsys.readouterr().out == ""
+
+
+# ── CliSessionIO ────────────────────────────────────────
+
+
+class TestCliSessionIO:
+    """Tests for the human-friendly CLI session I/O."""
+
+    def test_emit_pending_shows_blocked_with_domain(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """emit_pending renders a [BLOCKED] line with domain label."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, DNSMASQ_DOMAIN)
+        out = capsys.readouterr().out
+        assert "[BLOCKED]" in out
+        assert TEST_IP1 in out
+        assert DNSMASQ_DOMAIN in out
+        assert ":443" in out
+
+    def test_emit_pending_shows_ip_without_domain(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """emit_pending shows just the IP when no domain is known."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 80, 6, "")
+        out = capsys.readouterr().out
+        assert "[BLOCKED]" in out
+        assert TEST_IP1 in out
+        assert ":80" in out
+
+    def test_emit_pending_queues_second_packet(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """A second pending packet is shown as queued, then prompt re-rendered."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, DNSMASQ_DOMAIN)
+        io.emit_pending(2, TEST_IP2, 80, 6, DNSMASQ_DOMAIN2)
+        out = capsys.readouterr().out
+        assert "(queued)" in out
+        # Prompt for head-of-queue (packet 1) must be re-rendered after the queued line.
+        queued_pos = out.index("(queued)")
+        last_prompt_pos = out.rindex("allow/deny?")
+        assert last_prompt_pos > queued_pos
+
+    def test_emit_verdict_applied_accept(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Accept verdict shows a checkmark."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, DNSMASQ_DOMAIN)
+        capsys.readouterr()  # discard pending output
+        io.emit_verdict_applied(1, TEST_IP1, "accept", ok=True)
+        out = capsys.readouterr().out
+        assert "\u2713" in out
+        assert "allowed" in out
+        assert DNSMASQ_DOMAIN in out
+
+    def test_emit_verdict_applied_deny(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Deny verdict shows a cross."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, "")
+        capsys.readouterr()
+        io.emit_verdict_applied(1, TEST_IP1, "deny", ok=True)
+        out = capsys.readouterr().out
+        assert "\u2717" in out
+        assert "denied" in out
+
+    def test_emit_verdict_applied_failure(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Failed verdict shows an error marker and keeps the packet queued."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, "")
+        capsys.readouterr()
+        io.emit_verdict_applied(1, TEST_IP1, "accept", ok=False)
+        out = capsys.readouterr().out
+        assert "failed" in out
+        # Packet must remain queued for retry.
+        assert 1 in io._queue
+        assert 1 in io._info
+
+    def test_verdict_prompts_next_queued(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """After resolving the first packet, the next queued one is prompted."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, DNSMASQ_DOMAIN)
+        io.emit_pending(2, TEST_IP2, 80, 6, DNSMASQ_DOMAIN2)
+        capsys.readouterr()
+        io.emit_verdict_applied(1, TEST_IP1, "accept", ok=True)
+        out = capsys.readouterr().out
+        assert "[BLOCKED]" in out
+        assert DNSMASQ_DOMAIN2 in out
+
+    def test_parse_command_a(self) -> None:
+        """'a' maps to accept for the oldest pending packet."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, "")
+        assert io.parse_command("a") == (1, "accept")
+
+    def test_parse_command_d(self) -> None:
+        """'d' maps to deny."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, "")
+        assert io.parse_command("d") == (1, "deny")
+
+    def test_parse_command_allow(self) -> None:
+        """'allow' maps to accept."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, "")
+        assert io.parse_command("allow") == (1, "accept")
+
+    def test_parse_command_deny(self) -> None:
+        """'deny' maps to deny."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, "")
+        assert io.parse_command("deny") == (1, "deny")
+
+    def test_parse_command_case_insensitive(self) -> None:
+        """Input is case-insensitive."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, "")
+        assert io.parse_command("Allow") == (1, "accept")
+        assert io.parse_command("DENY") == (1, "deny")
+
+    def test_parse_command_unknown_input(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Unknown input prints a hint, re-prompts, and returns None."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, DNSMASQ_DOMAIN)
+        capsys.readouterr()
+        assert io.parse_command("x") is None
+        out = capsys.readouterr().out
+        assert "Unknown input" in out
+        # Prompt must be re-rendered after invalid input.
+        assert "allow/deny?" in out
+
+    def test_parse_command_empty_queue(self) -> None:
+        """Returns None when no packets are pending."""
+        io = CliSessionIO()
+        assert io.parse_command("a") is None
+
+    def test_prompt_head_missing_info(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """_prompt_head is a no-op when _info lacks the head-of-queue entry."""
+        io = CliSessionIO()
+        io._queue.append(99)  # ID with no matching _info entry
+        io._prompt_head()
+        assert capsys.readouterr().out == ""
+
+    def test_parse_fifo_order(self) -> None:
+        """Input targets the oldest pending packet (FIFO)."""
+        io = CliSessionIO()
+        io.emit_pending(1, TEST_IP1, 443, 6, "")
+        io.emit_pending(2, TEST_IP2, 80, 6, "")
+        result = io.parse_command("a")
+        assert result == (1, "accept")
+
+    def test_emit_banner(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """emit_banner prints a startup message."""
+        io = CliSessionIO()
+        io.emit_banner()
+        out = capsys.readouterr().out
+        assert "Watching" in out
+        assert "Ctrl-C" in out
+
+    def test_input_map_coverage(self) -> None:
+        """All expected input tokens are in _INPUT_MAP."""
+        assert _INPUT_MAP["a"] == "accept"
+        assert _INPUT_MAP["allow"] == "accept"
+        assert _INPUT_MAP["d"] == "deny"
+        assert _INPUT_MAP["deny"] == "deny"
+        assert len(_INPUT_MAP) == 4
+
+
+# ── --raw flag propagation ──────────────────────────────
+
+
+class TestSessionIOInjection:
+    """Tests for SessionIO injection into InteractiveSession."""
+
+    def test_falsy_session_io_is_preserved(self, tmp_path: Path) -> None:
+        """A non-None but falsy SessionIO is stored, not replaced by default."""
+
+        class _FalsyIO(JsonSessionIO):
+            def __bool__(self) -> bool:
+                return False
+
+        io = _FalsyIO()
+        session = InteractiveSession(
+            runner=mock.MagicMock(), state_dir=tmp_path, container="ctr", io=io
+        )
+        assert session._io is io
+
+
+class TestRawFlagPropagation:
+    """Tests for --raw flag through run_interactive and nsenter re-exec."""
+
+    def test_run_interactive_raw_false_uses_cli_io(self, tmp_path: Path) -> None:
+        """run_interactive defaults to CliSessionIO."""
+        state.interactive_path(tmp_path).write_text("nflog\n")
+        with (
+            mock.patch.dict("os.environ", {_NSENTER_ENV: "1"}),
+            mock.patch("terok_shield.cli.interactive.SubprocessRunner"),
+            mock.patch("terok_shield.cli.interactive.InteractiveSession") as mock_cls,
+        ):
+            run_interactive(tmp_path, _CONTAINER)
+        io_arg = mock_cls.call_args[1]["io"]
+        assert isinstance(io_arg, CliSessionIO)
+
+    def test_run_interactive_raw_true_uses_json_io(self, tmp_path: Path) -> None:
+        """run_interactive with raw=True uses JsonSessionIO."""
+        state.interactive_path(tmp_path).write_text("nflog\n")
+        with (
+            mock.patch.dict("os.environ", {_NSENTER_ENV: "1"}),
+            mock.patch("terok_shield.cli.interactive.SubprocessRunner"),
+            mock.patch("terok_shield.cli.interactive.InteractiveSession") as mock_cls,
+        ):
+            run_interactive(tmp_path, _CONTAINER, raw=True)
+        io_arg = mock_cls.call_args[1]["io"]
+        assert isinstance(io_arg, JsonSessionIO)
+
+    def test_nsenter_propagates_raw_env(self, tmp_path: Path) -> None:
+        """_nsenter_reexec sets _RAW_ENV when raw=True."""
+        from terok_shield.cli.interactive import _nsenter_reexec
+
+        with (
+            mock.patch("terok_shield.cli.interactive.SubprocessRunner") as mock_runner_cls,
+            mock.patch("subprocess.run") as mock_run,
+        ):
+            mock_runner_cls.return_value.podman_inspect.return_value = "12345"
+            _nsenter_reexec(tmp_path, _CONTAINER, raw=True)
+        env = mock_run.call_args[1]["env"]
+        assert env[_RAW_ENV] == "1"
+
+    def test_nsenter_omits_raw_env_when_false(self, tmp_path: Path) -> None:
+        """_nsenter_reexec does not set _RAW_ENV when raw=False."""
+        from terok_shield.cli.interactive import _nsenter_reexec
+
+        with (
+            mock.patch("terok_shield.cli.interactive.SubprocessRunner") as mock_runner_cls,
+            mock.patch("subprocess.run") as mock_run,
+        ):
+            mock_runner_cls.return_value.podman_inspect.return_value = "12345"
+            _nsenter_reexec(tmp_path, _CONTAINER, raw=False)
+        env = mock_run.call_args[1]["env"]
+        assert _RAW_ENV not in env
+
+
+# ── Domain-level allow/deny in _apply_verdict ────────────
+
+
+class TestApplyVerdictDomain:
+    """Tests for domain-level dnsmasq allow/deny in _apply_verdict."""
+
+    def test_accept_calls_allow_domain_when_dnsmasq(self, tmp_path: Path) -> None:
+        """Accept verdict calls _allow_domain when domain is known and tier is dnsmasq."""
+        session = _make_session(tmp_path)
+        state.dns_tier_path(tmp_path).write_text("dnsmasq\n")
+        pkt = _PendingPacket(
+            dest=TEST_IP1, port=443, proto=6, queued_at=1.0, packet_id=1, domain=DNSMASQ_DOMAIN
+        )
+        with (
+            mock.patch("terok_shield.cli.interactive.add_elements_dual", return_value=""),
+            mock.patch.object(session, "_allow_domain") as mock_allow,
+        ):
+            session._apply_verdict(pkt, accept=True)
+        mock_allow.assert_called_once_with(DNSMASQ_DOMAIN)
+
+    def test_deny_calls_deny_domain_when_dnsmasq(self, tmp_path: Path) -> None:
+        """Deny verdict calls _deny_domain when domain is known and tier is dnsmasq."""
+        session = _make_session(tmp_path)
+        state.dns_tier_path(tmp_path).write_text("dnsmasq\n")
+        pkt = _PendingPacket(
+            dest=TEST_IP1, port=443, proto=6, queued_at=1.0, packet_id=1, domain=DNSMASQ_DOMAIN
+        )
+        with (
+            mock.patch("terok_shield.cli.interactive.add_deny_elements_dual", return_value=""),
+            mock.patch.object(session, "_deny_domain") as mock_deny,
+        ):
+            session._apply_verdict(pkt, accept=False)
+        mock_deny.assert_called_once_with(DNSMASQ_DOMAIN)
+
+    def test_accept_skips_domain_when_no_domain(self, tmp_path: Path) -> None:
+        """Accept verdict skips dnsmasq calls when domain is empty."""
+        session = _make_session(tmp_path)
+        state.dns_tier_path(tmp_path).write_text("dnsmasq\n")
+        pkt = _PendingPacket(dest=TEST_IP1, port=443, proto=6, queued_at=1.0, packet_id=1)
+        with (
+            mock.patch("terok_shield.cli.interactive.add_elements_dual", return_value=""),
+            mock.patch.object(session, "_allow_domain") as mock_allow,
+        ):
+            session._apply_verdict(pkt, accept=True)
+        mock_allow.assert_not_called()
+
+    def test_accept_skips_domain_when_not_dnsmasq_tier(self, tmp_path: Path) -> None:
+        """Accept verdict skips dnsmasq calls when tier is dig."""
+        session = _make_session(tmp_path)
+        state.dns_tier_path(tmp_path).write_text("dig\n")
+        pkt = _PendingPacket(
+            dest=TEST_IP1, port=443, proto=6, queued_at=1.0, packet_id=1, domain=DNSMASQ_DOMAIN
+        )
+        with (
+            mock.patch("terok_shield.cli.interactive.add_elements_dual", return_value=""),
+            mock.patch.object(session, "_allow_domain") as mock_allow,
+        ):
+            session._apply_verdict(pkt, accept=True)
+        mock_allow.assert_not_called()
+
+
+# ── _allow_domain / _deny_domain / _reload_dnsmasq ──────
+
+
+class TestDnsmasqDomainHelpers:
+    """Tests for _allow_domain, _deny_domain, and _reload_dnsmasq."""
+
+    def test_allow_domain_delegates_to_dnsmasq(self, tmp_path: Path) -> None:
+        """_allow_domain calls dnsmasq.add_domain and _reload_dnsmasq."""
+        session = _make_session(tmp_path)
+        with (
+            mock.patch("terok_shield.core.dnsmasq.add_domain", return_value=True) as mock_add,
+            mock.patch.object(session, "_reload_dnsmasq") as mock_reload,
+        ):
+            session._allow_domain(DNSMASQ_DOMAIN)
+        mock_add.assert_called_once_with(tmp_path, DNSMASQ_DOMAIN)
+        mock_reload.assert_called_once()
+
+    def test_allow_domain_skips_reload_when_unchanged(self, tmp_path: Path) -> None:
+        """_allow_domain does not reload when add_domain returns False (already present)."""
+        session = _make_session(tmp_path)
+        with (
+            mock.patch("terok_shield.core.dnsmasq.add_domain", return_value=False),
+            mock.patch.object(session, "_reload_dnsmasq") as mock_reload,
+        ):
+            session._allow_domain(DNSMASQ_DOMAIN)
+        mock_reload.assert_not_called()
+
+    def test_deny_domain_delegates_to_dnsmasq(self, tmp_path: Path) -> None:
+        """_deny_domain calls dnsmasq.remove_domain and _reload_dnsmasq."""
+        session = _make_session(tmp_path)
+        with (
+            mock.patch("terok_shield.core.dnsmasq.remove_domain", return_value=True) as mock_rm,
+            mock.patch.object(session, "_reload_dnsmasq") as mock_reload,
+        ):
+            session._deny_domain(DNSMASQ_DOMAIN)
+        mock_rm.assert_called_once_with(tmp_path, DNSMASQ_DOMAIN)
+        mock_reload.assert_called_once()
+
+    def test_deny_domain_skips_reload_when_unchanged(self, tmp_path: Path) -> None:
+        """_deny_domain does not reload when remove_domain returns False."""
+        session = _make_session(tmp_path)
+        with (
+            mock.patch("terok_shield.core.dnsmasq.remove_domain", return_value=False),
+            mock.patch.object(session, "_reload_dnsmasq") as mock_reload,
+        ):
+            session._deny_domain(DNSMASQ_DOMAIN)
+        mock_reload.assert_not_called()
+
+    def test_reload_dnsmasq_reads_upstream_and_reloads(self, tmp_path: Path) -> None:
+        """_reload_dnsmasq reads upstream DNS and calls dnsmasq.reload."""
+        session = _make_session(tmp_path)
+        state.upstream_dns_path(tmp_path).write_text("169.254.0.1\n")
+        with (
+            mock.patch(
+                "terok_shield.core.dnsmasq.read_merged_domains", return_value={DNSMASQ_DOMAIN}
+            ) as mock_read,
+            mock.patch("terok_shield.core.dnsmasq.reload") as mock_reload,
+        ):
+            session._reload_dnsmasq()
+        mock_read.assert_called_once_with(tmp_path)
+        mock_reload.assert_called_once_with(tmp_path, "169.254.0.1", {DNSMASQ_DOMAIN})
+
+    def test_reload_dnsmasq_logs_on_missing_upstream(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """_reload_dnsmasq logs a warning when upstream DNS file is missing."""
+        session = _make_session(tmp_path)
+        session._reload_dnsmasq()
+        assert "upstream DNS" in caplog.text
+
+    def test_reload_dnsmasq_logs_on_reload_failure(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """_reload_dnsmasq logs an exception when dnsmasq.reload raises."""
+        session = _make_session(tmp_path)
+        state.upstream_dns_path(tmp_path).write_text("169.254.0.1\n")
+        with (
+            mock.patch("terok_shield.core.dnsmasq.read_merged_domains", return_value=set()),
+            mock.patch(
+                "terok_shield.core.dnsmasq.reload", side_effect=RuntimeError("dnsmasq crashed")
+            ),
+        ):
+            session._reload_dnsmasq()
+        assert "dnsmasq reload failed" in caplog.text
+
+
+# ── Eager domain cache refresh ────────────────────────────
+
+
+class TestEagerDomainRefresh:
+    """Tests for eager DomainCache refresh on unknown IPs in _handle_nflog_event."""
+
+    def test_refreshes_cache_on_unknown_ip(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """_handle_nflog_event refreshes the cache when IP is not in the mapping."""
+        session = _make_session(tmp_path)
+        # Write a dnsmasq log with the IP→domain entry
+        log_path = state.dnsmasq_log_path(tmp_path)
+        log_path.write_text(f"reply {DNSMASQ_DOMAIN} is {TEST_IP1}\n")
+        event = _make_event(TEST_IP1)
+        session._handle_nflog_event(event)
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["domain"] == DNSMASQ_DOMAIN
+
+    def test_domain_stays_empty_for_direct_ip(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Domain stays empty when the IP has no DNS entry (direct IP connection)."""
+        session = _make_session(tmp_path)
+        # No dnsmasq log → cache refresh finds nothing
+        event = _make_event(TEST_IP1)
+        session._handle_nflog_event(event)
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["domain"] == ""
+
+    def test_skips_refresh_when_already_cached(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """_handle_nflog_event does not refresh when the IP is already cached."""
+        session = _make_session(tmp_path)
+        session._domain_cache._mapping[TEST_IP1] = DNSMASQ_DOMAIN
+        with mock.patch.object(session._domain_cache, "refresh") as mock_refresh:
+            session._handle_nflog_event(_make_event(TEST_IP1))
+        mock_refresh.assert_not_called()
+        out = json.loads(capsys.readouterr().out.strip())
+        assert out["domain"] == DNSMASQ_DOMAIN
+
+    def test_nsenter_clears_inherited_raw_env(self, tmp_path: Path) -> None:
+        """_nsenter_reexec strips inherited _RAW_ENV when raw=False."""
+        from terok_shield.cli.interactive import _nsenter_reexec
+
+        with (
+            mock.patch.dict("os.environ", {_RAW_ENV: "1"}, clear=False),
+            mock.patch("terok_shield.cli.interactive.SubprocessRunner") as mock_runner_cls,
+            mock.patch("subprocess.run") as mock_run,
+        ):
+            mock_runner_cls.return_value.podman_inspect.return_value = "12345"
+            _nsenter_reexec(tmp_path, _CONTAINER, raw=False)
+        env = mock_run.call_args[1]["env"]
+        assert _RAW_ENV not in env
+
+    def test_run_interactive_passes_raw_to_nsenter(self, tmp_path: Path) -> None:
+        """run_interactive forwards raw=True to _nsenter_reexec."""
+        state.interactive_path(tmp_path).write_text("nflog\n")
+        with mock.patch("terok_shield.cli.interactive._nsenter_reexec") as mock_reexec:
+            run_interactive(tmp_path, _CONTAINER, raw=True)
+        mock_reexec.assert_called_once_with(tmp_path, _CONTAINER, raw=True)
