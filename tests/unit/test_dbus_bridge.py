@@ -330,6 +330,50 @@ def test_shield_interface_stores_bridge_reference() -> None:
     assert iface._bridge is bridge
 
 
+def test_connection_blocked_signal_body() -> None:
+    """connection_blocked() returns the argument list for D-Bus serialisation."""
+    bridge = mock.MagicMock()
+    iface = _ShieldInterface(bridge)
+    result = iface.connection_blocked(TEST_IP1, TEST_IP1, 443, 6, TEST_DOMAIN, "myapp:1")
+    assert result == [TEST_IP1, TEST_IP1, 443, 6, TEST_DOMAIN, "myapp:1"]
+
+
+def test_verdict_applied_signal_body() -> None:
+    """verdict_applied() returns the argument list for D-Bus serialisation."""
+    bridge = mock.MagicMock()
+    iface = _ShieldInterface(bridge)
+    result = iface.verdict_applied("myapp", TEST_IP1, "myapp:1", "accept", True)
+    assert result == ["myapp", TEST_IP1, "myapp:1", "accept", True]
+
+
+def test_verdict_method_delegates() -> None:
+    """The verdict method body awaits bridge.submit_verdict."""
+    bridge_mock = mock.MagicMock()
+    bridge_mock.submit_verdict = mock.AsyncMock(return_value=True)
+    iface = _ShieldInterface(bridge_mock)
+    # Call the original unwrapped coroutine to exercise the body
+    # (the @method() decorator intercepts normal calls for D-Bus dispatch).
+    orig_fn = _ShieldInterface.verdict.__wrapped__
+    result = asyncio.run(orig_fn(iface, "myapp:1", "accept"))
+    assert result is True
+    bridge_mock.submit_verdict.assert_awaited_once_with("myapp:1", "accept")
+
+
+# ── Registry handler ──────────────────────────────────────
+
+
+def test_handle_dbus_bridge_delegates(tmp_path: Path) -> None:
+    """_handle_dbus_bridge() delegates to run_dbus_bridge with state_dir and container."""
+    from terok_shield.cli.registry import _handle_dbus_bridge
+
+    shield = mock.MagicMock()
+    shield.config.state_dir = tmp_path
+
+    with mock.patch("terok_shield.cli.dbus_bridge.run_dbus_bridge") as run_mock:
+        _handle_dbus_bridge(shield, "myapp")
+        run_mock.assert_called_once_with(tmp_path, "myapp")
+
+
 # ── start / stop lifecycle ─────────────────────────────────
 
 
