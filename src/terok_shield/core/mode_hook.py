@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 
 
 class HookMode:
-    """Hook-mode shield backend (implements ``ShieldModeBackend``).
+    """Hook-mode shield backend (Strategy, implements ``ShieldModeBackend``).
 
     Manages the full lifecycle of OCI-hook-based container firewalling:
     pre-start DNS resolution and hook installation, live allow/deny,
