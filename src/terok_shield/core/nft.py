@@ -230,7 +230,8 @@ def bypass_ruleset(
     dns_af = "ip" if _is_v4(dns) else "ip6"
     set_v4 = _set_declaration("allow_v4", "ipv4_addr", set_timeout)
     set_v6 = _set_declaration("allow_v6", "ipv6_addr", set_timeout)
-    private_block = "" if allow_all else f"\n{_private_range_rules()}"
+    private_rules = _private_range_rules()
+    private_block = "" if allow_all else f"\n{private_rules}"
     bypass_log = (
         f'        ct state new log group {NFLOG_GROUP} prefix "{BYPASS_LOG_PREFIX}: " counter'
     )
@@ -349,12 +350,12 @@ def delete_deny_elements_dual(ips: list[str]) -> str:
             continue
         (v4 if _is_v4(sanitized) else v6).append(sanitized)
     parts: list[str] = []
-    if v4:
-        elements = ", ".join(v4)
-        parts.append(f"delete element {NFT_TABLE} deny_v4 {{ {elements} }}\n")
-    if v6:
-        elements = ", ".join(v6)
-        parts.append(f"delete element {NFT_TABLE} deny_v6 {{ {elements} }}\n")
+    cmd = delete_elements("deny_v4", v4)
+    if cmd:
+        parts.append(cmd)
+    cmd = delete_elements("deny_v6", v6)
+    if cmd:
+        parts.append(cmd)
     return "".join(parts)
 
 
@@ -382,6 +383,22 @@ def add_elements(
     else:
         elements = ", ".join(valid)
     return f"add element {table} {set_name} {{ {elements} }}\n"
+
+
+def delete_elements(set_name: str, ips: list[str], table: str = NFT_TABLE) -> str:
+    """Generate nft command to delete validated IPs from a set.
+
+    Both ``set_name`` and ``table`` are validated against injection.
+    Returns empty string if no valid IPs.
+    """
+    _safe_ident(set_name)
+    for part in table.split():
+        _safe_ident(part)
+    valid = [safe_ip(ip) for ip in ips if _try_validate(ip)]
+    if not valid:
+        return ""
+    elements = ", ".join(valid)
+    return f"delete element {table} {set_name} {{ {elements} }}\n"
 
 
 # ── Verification ────────────────────────────────────────
