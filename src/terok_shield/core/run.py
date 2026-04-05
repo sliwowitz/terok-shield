@@ -15,40 +15,6 @@ import subprocess
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-# ── Exceptions ──────────────────────────────────────────
-
-
-class ExecError(Exception):
-    """Raised when a subprocess fails."""
-
-    def __init__(self, cmd: list[str], rc: int, stderr: str) -> None:
-        """Store command details and format the error message."""
-        self.cmd = cmd
-        self.rc = rc
-        self.stderr = stderr
-        super().__init__(f"{cmd!r} failed (rc={rc}): {stderr.strip()}")
-
-
-class NftNotFoundError(RuntimeError):
-    """Raised when the ``nft`` binary is not found on the host."""
-
-
-class DigNotFoundError(RuntimeError):
-    """Raised when the ``dig`` binary is not found on the host.
-
-    DNS resolution requires ``dig`` (from ``bind-utils`` / ``dnsutils``).
-    """
-
-
-class ShieldNeedsSetup(RuntimeError):
-    """Raised when global OCI hooks are not installed.
-
-    Per-container ``--hooks-dir`` does not persist across container
-    restarts, so global hooks are required.  The message includes
-    system-specific setup hints.
-    """
-
-
 # ── CommandRunner protocol ──────────────────────────────
 
 
@@ -100,6 +66,40 @@ class CommandRunner(Protocol):
     def getent_hosts(self, domain: str) -> list[str]:
         """Resolve domain via ``getent hosts`` (fallback when dig is missing)."""
         ...
+
+
+# ── Exceptions ──────────────────────────────────────────
+
+
+class ExecError(Exception):
+    """Raised when a subprocess fails."""
+
+    def __init__(self, cmd: list[str], rc: int, stderr: str) -> None:
+        """Store command details and format the error message."""
+        self.cmd = cmd
+        self.rc = rc
+        self.stderr = stderr
+        super().__init__(f"{cmd!r} failed (rc={rc}): {stderr.strip()}")
+
+
+class NftNotFoundError(RuntimeError):
+    """Raised when the ``nft`` binary is not found on the host."""
+
+
+class DigNotFoundError(RuntimeError):
+    """Raised when the ``dig`` binary is not found on the host.
+
+    DNS resolution requires ``dig`` (from ``bind-utils`` / ``dnsutils``).
+    """
+
+
+class ShieldNeedsSetup(RuntimeError):
+    """Raised when global OCI hooks are not installed.
+
+    Per-container ``--hooks-dir`` does not persist across container
+    restarts, so global hooks are required.  The message includes
+    system-specific setup hints.
+    """
 
 
 # ── SubprocessRunner (default implementation) ───────────
