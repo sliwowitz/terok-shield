@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""CLI entry point for terok-shield."""
+"""Standalone CLI — parses argv, builds a Shield, and dispatches commands.
+
+Constructs :class:`ShieldConfig` from ``config.yml``, XDG conventions,
+and environment variables, then routes each subcommand through the
+:data:`~.registry.COMMANDS` registry.  Commands that need standalone CLI
+logic (``prepare``, ``run``, ``setup``) are handled directly here.
+"""
 
 import argparse
 import json
@@ -17,123 +23,103 @@ from ..common.config import ShieldFileConfig
 from ..common.validation import validate_container_name
 from .registry import COMMANDS, ArgDef, CommandDef
 
-# ── Config construction (formerly in config.py) ──────────
+# ── Entry point ──────────────────────────────────────────
 
 
-def _resolve_state_root() -> Path:
-    """Resolve the state root from env / XDG / default."""
-    env = os.environ.get("TEROK_SHIELD_STATE_DIR")
-    if env:
-        return Path(env)
-    xdg = os.environ.get("XDG_STATE_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".local" / "state"
-    return base / "terok" / "shield"
+def main(argv: list[str] | None = None) -> None:
+    """Run the terok-shield CLI."""
+    if argv is None:
+        argv = sys.argv[1:]
 
+    # The 'run' subcommand uses '--' to separate shield args from podman args.
+    # Split before argparse to avoid REMAINDER quirks with optional flags.
+    saw_separator = "--" in argv
+    run_trailing: list[str] = []
+    if saw_separator:
+        sep = argv.index("--")
+        run_trailing = argv[sep + 1 :]
+        argv = argv[:sep]
 
-def _resolve_config_root() -> Path:
-    """Resolve the config root from env / XDG / default."""
-    env = os.environ.get("TEROK_SHIELD_CONFIG_DIR")
-    if env:
-        return Path(env)
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "terok" / "shield"
+    parser = _build_parser()
+    args = parser.parse_args(argv)
 
+    if saw_separator and args.command != "run":
+        parser.error("'--' separator is only supported by the 'run' subcommand")
 
-def _auto_detect_mode() -> ShieldMode:
-    """Auto-detect the best available shield mode.
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
 
-    Currently only hook mode is supported.
-
-    Raises:
-        NftNotFoundError: If nft is not installed.
-    """
-    from ..core.run import NftNotFoundError, find_nft
-
-    if find_nft():
-        return ShieldMode.HOOK
-
-    raise NftNotFoundError("No supported shield mode available. Install nft for hook mode.")
-
-
-def _load_config_file() -> ShieldFileConfig:
-    """Load and validate ``config.yml`` via :class:`ShieldFileConfig`.
-
-    Returns defaults when the file is missing or contains invalid YAML.
-    Validation errors (typos, wrong types) abort with a clear message.
-    """
-    import yaml
-    from pydantic import ValidationError
-
-    config_file = _resolve_config_root() / "config.yml"
-    if not config_file.is_file():
-        return ShieldFileConfig()
+    if args.command == "run":
+        args.podman_args = run_trailing
 
     try:
-        raw = yaml.safe_load(config_file.read_text()) or {}
-    except yaml.YAMLError as e:
-        print(f"Warning [shield]: failed to parse {config_file}: {e}", file=sys.stderr)
-        return ShieldFileConfig()
-    except OSError as e:
-        print(f"Warning [shield]: failed to read {config_file}: {e}", file=sys.stderr)
-        return ShieldFileConfig()
-
-    if not isinstance(raw, dict):
-        print(
-            f"Warning [shield]: {config_file}: expected mapping, got {type(raw).__name__}",
-            file=sys.stderr,
-        )
-        return ShieldFileConfig()
-
-    try:
-        return ShieldFileConfig(**raw)
-    except ValidationError as e:
-        print(f"Error [shield]: invalid {config_file}:\n{e}", file=sys.stderr)
+        _dispatch(args)
+    except (RuntimeError, ValueError, ExecError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
-def _build_config(
-    container: str | None = None,
-    *,
-    state_dir_override: Path | None = None,
-    interactive: bool | None = None,
-) -> ShieldConfig:
-    """Build a ShieldConfig from config.yml + env vars.
+# ── Command dispatch ─────────────────────────────────────
 
-    Args:
-        container: Container name (used for per-container state_dir).
-        state_dir_override: Explicit state_dir from --state-dir flag.
-        interactive: Override config.yml interactive flag (CLI ``--interactive``).
-    """
-    file_cfg = _load_config_file()
+# Command lookup for dispatch
+_CMD_LOOKUP: dict[str, CommandDef] = {cmd.name: cmd for cmd in COMMANDS}
 
-    # Resolve mode
-    mode = _auto_detect_mode() if file_cfg.mode == "auto" else ShieldMode.HOOK
 
-    # State dir
-    if state_dir_override:
-        state_root = state_dir_override.resolve()
-    else:
-        state_root = _resolve_state_root().resolve()
+def _dispatch(args: argparse.Namespace) -> None:
+    """Dispatch to the appropriate subcommand handler."""
+    cmd_name = args.command
+    state_dir_override = getattr(args, "state_dir", None)
 
-    if container:
-        validate_container_name(container)
-        state_dir = state_root / "containers" / container
-    else:
-        state_dir = state_root / "containers" / "_default"
+    # CLI-only: setup doesn't need Shield
+    if cmd_name == "setup":
+        _cmd_setup(root=getattr(args, "root", False), user=getattr(args, "user", False))
+        return
 
-    # Profiles dir
-    profiles_dir = _resolve_config_root() / "profiles"
+    # CLI-only: logs with aggregated mode (no container -> scan all)
+    if cmd_name == "logs":
+        _cmd_logs_cli(
+            state_dir_override=state_dir_override,
+            container=getattr(args, "container", None),
+            n=args.n,
+        )
+        return
 
-    return ShieldConfig(
-        state_dir=state_dir,
-        mode=mode,
-        default_profiles=tuple(file_cfg.default_profiles),
-        loopback_ports=tuple(file_cfg.loopback_ports),
-        audit_enabled=file_cfg.audit.enabled,
-        profiles_dir=profiles_dir,
-        interactive=interactive if interactive is not None else file_cfg.interactive,
+    # All other commands need a per-container config + Shield
+    container = getattr(args, "container", None)
+    interactive_override = getattr(args, "interactive", None) or None  # False → None
+    config = _build_config(
+        container, state_dir_override=state_dir_override, interactive=interactive_override
     )
+    shield = Shield(config)
+
+    # CLI-only standalone commands with custom logic
+    if cmd_name == "prepare":
+        _cmd_prepare(shield, args.container, profiles=args.profiles, output_json=args.output_json)
+    elif cmd_name == "run":
+        _cmd_run(shield, args.container, profiles=args.profiles, podman_args=args.podman_args)
+    elif cmd_name == "resolve":
+        _cmd_resolve(shield, args.container, force=args.force)
+    else:
+        # Generic registry dispatch
+        cmd_def = _CMD_LOOKUP[cmd_name]
+        if cmd_def.handler is None:
+            raise RuntimeError(f"Command {cmd_name!r} has no handler (standalone-only)")
+        kwargs = _extract_handler_kwargs(args, cmd_def)
+        if cmd_def.needs_container:
+            cmd_def.handler(shield, container, **kwargs)
+        else:
+            cmd_def.handler(shield, **kwargs)
+
+
+def _extract_handler_kwargs(args: argparse.Namespace, cmd: CommandDef) -> dict:
+    """Extract keyword arguments for a registry handler from parsed args."""
+    kwargs: dict = {}
+    for arg in cmd.args:
+        key = arg.dest or arg.name.lstrip("-").replace("-", "_")
+        if hasattr(args, key):
+            kwargs[key] = getattr(args, key)
+    return kwargs
 
 
 # ── Argument parser ──────────────────────────────────────
@@ -151,27 +137,6 @@ _DESCRIPTIONS: dict[str, str] = {
         "  terok-shield run my-container -- alpine:latest sh"
     ),
 }
-
-# Command lookup for dispatch
-_CMD_LOOKUP: dict[str, CommandDef] = {cmd.name: cmd for cmd in COMMANDS}
-
-
-def _add_argdef(parser: argparse.ArgumentParser, arg: ArgDef) -> None:
-    """Add an :class:`ArgDef` to an argparse parser."""
-    kwargs: dict = {}
-    if arg.help:
-        kwargs["help"] = arg.help
-    if arg.type is not None:
-        kwargs["type"] = arg.type
-    if arg.default is not None:
-        kwargs["default"] = arg.default
-    if arg.action is not None:
-        kwargs["action"] = arg.action
-    if arg.dest is not None:
-        kwargs["dest"] = arg.dest
-    if arg.nargs is not None:
-        kwargs["nargs"] = arg.nargs
-    parser.add_argument(arg.name, **kwargs)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -236,97 +201,25 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Run the terok-shield CLI."""
-    if argv is None:
-        argv = sys.argv[1:]
-
-    # The 'run' subcommand uses '--' to separate shield args from podman args.
-    # Split before argparse to avoid REMAINDER quirks with optional flags.
-    saw_separator = "--" in argv
-    run_trailing: list[str] = []
-    if saw_separator:
-        sep = argv.index("--")
-        run_trailing = argv[sep + 1 :]
-        argv = argv[:sep]
-
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    if saw_separator and args.command != "run":
-        parser.error("'--' separator is only supported by the 'run' subcommand")
-
-    if args.command is None:
-        parser.print_help()
-        sys.exit(0)
-
-    if args.command == "run":
-        args.podman_args = run_trailing
-
-    try:
-        _dispatch(args)
-    except (RuntimeError, ValueError, ExecError, OSError) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _extract_handler_kwargs(args: argparse.Namespace, cmd: CommandDef) -> dict:
-    """Extract keyword arguments for a registry handler from parsed args."""
+def _add_argdef(parser: argparse.ArgumentParser, arg: ArgDef) -> None:
+    """Add an :class:`ArgDef` to an argparse parser."""
     kwargs: dict = {}
-    for arg in cmd.args:
-        key = arg.dest or arg.name.lstrip("-").replace("-", "_")
-        if hasattr(args, key):
-            kwargs[key] = getattr(args, key)
-    return kwargs
+    if arg.help:
+        kwargs["help"] = arg.help
+    if arg.type is not None:
+        kwargs["type"] = arg.type
+    if arg.default is not None:
+        kwargs["default"] = arg.default
+    if arg.action is not None:
+        kwargs["action"] = arg.action
+    if arg.dest is not None:
+        kwargs["dest"] = arg.dest
+    if arg.nargs is not None:
+        kwargs["nargs"] = arg.nargs
+    parser.add_argument(arg.name, **kwargs)
 
 
-def _dispatch(args: argparse.Namespace) -> None:
-    """Dispatch to the appropriate subcommand handler."""
-    cmd_name = args.command
-    state_dir_override = getattr(args, "state_dir", None)
-
-    # CLI-only: setup doesn't need Shield
-    if cmd_name == "setup":
-        _cmd_setup(root=getattr(args, "root", False), user=getattr(args, "user", False))
-        return
-
-    # CLI-only: logs with aggregated mode (no container -> scan all)
-    if cmd_name == "logs":
-        _cmd_logs_cli(
-            state_dir_override=state_dir_override,
-            container=getattr(args, "container", None),
-            n=args.n,
-        )
-        return
-
-    # All other commands need a per-container config + Shield
-    container = getattr(args, "container", None)
-    interactive_override = getattr(args, "interactive", None) or None  # False → None
-    config = _build_config(
-        container, state_dir_override=state_dir_override, interactive=interactive_override
-    )
-    shield = Shield(config)
-
-    # CLI-only standalone commands with custom logic
-    if cmd_name == "prepare":
-        _cmd_prepare(shield, args.container, profiles=args.profiles, output_json=args.output_json)
-    elif cmd_name == "run":
-        _cmd_run(shield, args.container, profiles=args.profiles, podman_args=args.podman_args)
-    elif cmd_name == "resolve":
-        _cmd_resolve(shield, args.container, force=args.force)
-    else:
-        # Generic registry dispatch
-        cmd_def = _CMD_LOOKUP[cmd_name]
-        if cmd_def.handler is None:
-            raise RuntimeError(f"Command {cmd_name!r} has no handler (standalone-only)")
-        kwargs = _extract_handler_kwargs(args, cmd_def)
-        if cmd_def.needs_container:
-            cmd_def.handler(shield, container, **kwargs)
-        else:
-            cmd_def.handler(shield, **kwargs)
-
-
-# ── CLI-only command handlers ─────────────────────────────
+# ── CLI-only command handlers ────────────────────────────
 
 
 def _cmd_prepare(
@@ -343,42 +236,6 @@ def _cmd_prepare(
         print(json.dumps(podman_args))
     else:
         print(" ".join(shlex.quote(a) for a in podman_args))
-
-
-_SHIELD_MANAGED_FLAGS = frozenset(
-    {
-        "--name",
-        "--network",
-        "--hooks-dir",
-        "--annotation",
-        "--cap-add",
-        "--cap-drop",
-    }
-)
-
-
-def _find_podman() -> str:
-    """Locate the podman binary for the ``run`` subcommand."""
-    found = shutil.which("podman")
-    if found:
-        resolved = Path(found).resolve()
-        if resolved.is_file() and os.access(resolved, os.X_OK):
-            return str(resolved)
-    raise OSError("podman binary not found. Install Podman to use 'terok-shield run'.")
-
-
-def _reject_shield_managed_flags(podman_args: list[str]) -> None:
-    """Reject podman flags that conflict with shield-managed configuration."""
-    conflicts: set[str] = set()
-    for arg in podman_args:
-        if arg.startswith("--"):
-            flag = arg.split("=", 1)[0]
-            if flag in _SHIELD_MANAGED_FLAGS:
-                conflicts.add(flag)
-    if conflicts:
-        raise ValueError(
-            f"Flag(s) managed by terok-shield, cannot override: {', '.join(sorted(conflicts))}"
-        )
 
 
 def _cmd_run(
@@ -404,6 +261,48 @@ def _cmd_run(
     os.execv(podman, argv)  # nosec B606
 
 
+_SHIELD_MANAGED_FLAGS = frozenset(
+    {
+        "--name",
+        "--network",
+        "--hooks-dir",
+        "--annotation",
+        "--cap-add",
+        "--cap-drop",
+    }
+)
+
+# Podman flag aliases that map to a canonical shield-managed flag.
+_FLAG_ALIASES: dict[str, str] = {
+    "--net": "--network",
+}
+
+
+def _find_podman() -> str:
+    """Locate the podman binary for the ``run`` subcommand."""
+    found = shutil.which("podman")
+    if found:
+        resolved = Path(found).resolve()
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return str(resolved)
+    raise OSError("podman binary not found. Install Podman to use 'terok-shield run'.")
+
+
+def _reject_shield_managed_flags(podman_args: list[str]) -> None:
+    """Reject podman flags that conflict with shield-managed configuration."""
+    conflicts: set[str] = set()
+    for arg in podman_args:
+        if arg.startswith("--"):
+            flag = arg.split("=", 1)[0]
+            flag = _FLAG_ALIASES.get(flag, flag)
+            if flag in _SHIELD_MANAGED_FLAGS:
+                conflicts.add(flag)
+    if conflicts:
+        raise ValueError(
+            f"Flag(s) managed by terok-shield, cannot override: {', '.join(sorted(conflicts))}"
+        )
+
+
 def _cmd_resolve(shield: Shield, container: str, force: bool) -> None:
     """Resolve DNS profiles and cache results."""
     ips = shield.resolve(force=force)
@@ -413,32 +312,13 @@ def _cmd_resolve(shield: Shield, container: str, force: bool) -> None:
         print(f"  {ip}")
 
 
-# ── CLI-only logs with aggregation ────────────────────────
-
-
-def _collect_all_audit_entries(state_root: Path, n: int) -> list[dict]:
-    """Collect audit entries from all containers, sorted by timestamp, trimmed to n."""
-    from ..lib.audit import AuditLogger
-
-    containers_dir = state_root / "containers"
-    if not containers_dir.is_dir():
-        return []
-    entries: list[dict] = []
-    for ctr_dir in sorted(containers_dir.iterdir()):
-        audit_file = ctr_dir / "audit.jsonl"
-        if audit_file.is_file():
-            entries.extend(AuditLogger(audit_path=audit_file).tail_log(n))
-    entries.sort(key=lambda e: e.get("ts", ""))
-    return entries[-n:]
-
-
 def _cmd_logs_cli(
     *,
     state_dir_override: Path | None,
     container: str | None,
     n: int,
 ) -> None:
-    """Show audit log entries (CLI-only: supports aggregated mode).
+    """Show audit log entries — supports aggregated mode without Shield.
 
     When ``container`` is given, tails that container's audit log directly
     (no Shield needed — avoids requiring nft for a read-only operation).
@@ -460,6 +340,22 @@ def _cmd_logs_cli(
             return
         for entry in entries:
             print(json.dumps(entry))
+
+
+def _collect_all_audit_entries(state_root: Path, n: int) -> list[dict]:
+    """Collect audit entries from all containers, sorted by timestamp, trimmed to n."""
+    from ..lib.audit import AuditLogger
+
+    containers_dir = state_root / "containers"
+    if not containers_dir.is_dir():
+        return []
+    entries: list[dict] = []
+    for ctr_dir in sorted(containers_dir.iterdir()):
+        audit_file = ctr_dir / "audit.jsonl"
+        if audit_file.is_file():
+            entries.extend(AuditLogger(audit_path=audit_file).tail_log(n))
+    entries.sort(key=lambda e: e.get("ts", ""))
+    return entries[-n:]
 
 
 def _cmd_setup(*, root: bool, user: bool) -> None:
@@ -506,11 +402,126 @@ def _cmd_setup(*, root: bool, user: bool) -> None:
         print("Done. Global hooks installed.")
 
 
-def _get_version() -> str:
-    """Return the package version."""
-    from .. import __version__
+# ── Config construction ──────────────────────────────────
 
-    return __version__
+
+def _build_config(
+    container: str | None = None,
+    *,
+    state_dir_override: Path | None = None,
+    interactive: bool | None = None,
+) -> ShieldConfig:
+    """Build a ShieldConfig from config.yml + env vars.
+
+    Args:
+        container: Container name (used for per-container state_dir).
+        state_dir_override: Explicit state_dir from --state-dir flag.
+        interactive: Override config.yml interactive flag (CLI ``--interactive``).
+    """
+    file_cfg = _load_config_file()
+
+    # Resolve mode
+    mode = _auto_detect_mode() if file_cfg.mode == "auto" else ShieldMode.HOOK
+
+    # State dir
+    if state_dir_override:
+        state_root = state_dir_override.resolve()
+    else:
+        state_root = _resolve_state_root().resolve()
+
+    if container:
+        validate_container_name(container)
+        state_dir = state_root / "containers" / container
+    else:
+        state_dir = state_root / "containers" / "_default"
+
+    # Profiles dir
+    profiles_dir = _resolve_config_root() / "profiles"
+
+    return ShieldConfig(
+        state_dir=state_dir,
+        mode=mode,
+        default_profiles=tuple(file_cfg.default_profiles),
+        loopback_ports=tuple(file_cfg.loopback_ports),
+        audit_enabled=file_cfg.audit.enabled,
+        profiles_dir=profiles_dir,
+        interactive=interactive if interactive is not None else file_cfg.interactive,
+    )
+
+
+def _load_config_file() -> ShieldFileConfig:
+    """Load and validate ``config.yml`` via :class:`ShieldFileConfig`.
+
+    Returns defaults when the file is missing or contains invalid YAML.
+    Validation errors (typos, wrong types) abort with a clear message.
+    """
+    import yaml
+    from pydantic import ValidationError
+
+    config_file = _resolve_config_root() / "config.yml"
+    if not config_file.is_file():
+        return ShieldFileConfig()
+
+    try:
+        raw = yaml.safe_load(config_file.read_text()) or {}
+    except yaml.YAMLError as e:
+        print(f"Warning [shield]: failed to parse {config_file}: {e}", file=sys.stderr)
+        return ShieldFileConfig()
+    except OSError as e:
+        print(f"Warning [shield]: failed to read {config_file}: {e}", file=sys.stderr)
+        return ShieldFileConfig()
+
+    if not isinstance(raw, dict):
+        print(
+            f"Warning [shield]: {config_file}: expected mapping, got {type(raw).__name__}",
+            file=sys.stderr,
+        )
+        return ShieldFileConfig()
+
+    try:
+        return ShieldFileConfig(**raw)
+    except ValidationError as e:
+        print(f"Error [shield]: invalid {config_file}:\n{e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _resolve_state_root() -> Path:
+    """Resolve the state root from env / XDG / default."""
+    env = os.environ.get("TEROK_SHIELD_STATE_DIR")
+    if env:
+        return Path(env)
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "state"
+    return base / "terok" / "shield"
+
+
+def _resolve_config_root() -> Path:
+    """Resolve the config root from env / XDG / default."""
+    env = os.environ.get("TEROK_SHIELD_CONFIG_DIR")
+    if env:
+        return Path(env)
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "terok" / "shield"
+
+
+def _auto_detect_mode() -> ShieldMode:
+    """Auto-detect the best available shield mode.
+
+    Currently only hook mode is supported.
+
+    Raises:
+        NftNotFoundError: If nft is not installed.
+    """
+    from ..core.run import NftNotFoundError, find_nft
+
+    if find_nft():
+        return ShieldMode.HOOK
+
+    raise NftNotFoundError("No supported shield mode available. Install nft for hook mode.")
+
+
+# ── Version display ──────────────────────────────────────
 
 
 def _version_string() -> str:
@@ -536,3 +547,10 @@ def _version_string() -> str:
     nft = find_nft()
     lines.append(f"nft {'found' if nft else 'not found'}")
     return "\n".join(lines)
+
+
+def _get_version() -> str:
+    """Return the package version."""
+    from .. import __version__
+
+    return __version__

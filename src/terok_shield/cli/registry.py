@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Command registry for terok-shield.
+"""Every subcommand terok-shield exposes — arguments, handler, and help text.
 
-Provides :class:`CommandDef` and :class:`ArgDef` dataclasses that describe
-every shield subcommand — its arguments, handler function, and metadata.
 The ``COMMANDS`` tuple is the single source of truth consumed by both the
-standalone CLI and the terok integration layer.
-
-Handler functions accept ``(shield, container?, **kwargs)`` and print to
-stdout, making them reusable across different CLI frontends.
+standalone CLI and the terok integration layer.  Handler functions accept
+``(shield, container?, **kwargs)`` and print to stdout, making them
+reusable across different CLI frontends.
 """
 
 import json
@@ -54,23 +51,7 @@ class CommandDef:
     standalone_only: bool = False
 
 
-# ── Handler functions ─────────────────────────────────────
-
-
-def _format_version(v: tuple[int, ...]) -> str:
-    """Format a version tuple as a dotted string."""
-    return ".".join(str(p) for p in v) if v != (0,) else "unknown"
-
-
-def _print_env_hint(env: EnvironmentCheck) -> None:
-    """Print human-readable environment issues and setup hint."""
-    if env.issues:
-        print()
-        for issue in env.issues:
-            print(f"  {issue}")
-    if env.setup_hint:
-        print()
-        print(env.setup_hint)
+# ── Handler functions (ordered to match COMMANDS) ────────
 
 
 def _handle_status(shield: Shield, *, container: str | None = None) -> None:
@@ -139,29 +120,6 @@ def _handle_rules(shield: Shield, container: str) -> None:
         print(f"No rules found for {container}")
 
 
-def _handle_logs(shield: Shield, container: str, *, n: int = 50) -> None:
-    """Show per-container audit log entries."""
-    for entry in shield.tail_log(n):
-        print(json.dumps(entry))
-
-
-def _handle_profiles(shield: Shield) -> None:
-    """List available shield profiles."""
-    for name in shield.profiles_list():
-        print(name)
-
-
-def _handle_check_environment(shield: Shield) -> None:
-    """Check podman environment for compatibility issues."""
-    result = shield.check_environment()
-    # Machine-readable block
-    print(f"podman_version={_format_version(result.podman_version)}")
-    print(f"hooks={result.hooks}")
-    print(f"health={result.health}")
-    # Human-readable details (shared with status)
-    _print_env_hint(result)
-
-
 def _handle_watch(shield: Shield, container: str) -> None:
     """Stream blocked-access events as JSON lines."""
     from .watch import run_watch
@@ -183,6 +141,27 @@ def _handle_dbus_bridge(shield: Shield, container: str) -> None:
     run_dbus_bridge(shield.config.state_dir, container)
 
 
+def _handle_logs(shield: Shield, container: str, *, n: int = 50) -> None:
+    """Show per-container audit log entries."""
+    for entry in shield.tail_log(n):
+        print(json.dumps(entry))
+
+
+def _handle_profiles(shield: Shield) -> None:
+    """List available shield profiles."""
+    for name in shield.profiles_list():
+        print(name)
+
+
+def _handle_check_environment(shield: Shield) -> None:
+    """Check podman environment for compatibility issues."""
+    result = shield.check_environment()
+    print(f"podman_version={_format_version(result.podman_version)}")
+    print(f"hooks={result.hooks}")
+    print(f"health={result.health}")
+    _print_env_hint(result)
+
+
 def _handle_preview(shield: Shield, *, down: bool = False, allow_all: bool = False) -> None:
     """Show ruleset that would be applied."""
     if allow_all and not down:
@@ -193,6 +172,22 @@ def _handle_preview(shield: Shield, *, down: bool = False, allow_all: bool = Fal
         label += " (all traffic)"
     print(f"# Ruleset preview ({label}):")
     print(ruleset)
+
+
+def _format_version(v: tuple[int, ...]) -> str:
+    """Format a version tuple as a dotted string."""
+    return ".".join(str(p) for p in v) if v != (0,) else "unknown"
+
+
+def _print_env_hint(env: EnvironmentCheck) -> None:
+    """Print human-readable environment issues and setup hint."""
+    if env.issues:
+        print()
+        for issue in env.issues:
+            print(f"  {issue}")
+    if env.setup_hint:
+        print()
+        print(env.setup_hint)
 
 
 # ── Command definitions ───────────────────────────────────
