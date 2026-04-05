@@ -1,17 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared utility functions."""
+"""IPv4 / IPv6 address and CIDR validation helpers."""
 
 import ipaddress
 
 
 def is_ipv4(value: str) -> bool:
-    """Return True if *value* is an IPv4 address or CIDR notation.
-
-    Uses ``ipaddress.IPv4Address`` for plain addresses and
-    ``ipaddress.IPv4Network(..., strict=False)`` for CIDRs.
-    """
+    """Return True if *value* is an IPv4 address or CIDR notation."""
     try:
         if "/" in value:
             ipaddress.IPv4Network(value, strict=False)
@@ -23,11 +19,7 @@ def is_ipv4(value: str) -> bool:
 
 
 def is_ipv6(value: str) -> bool:
-    """Return True if *value* is an IPv6 address or CIDR notation.
-
-    Uses ``ipaddress.IPv6Address`` for plain addresses and
-    ``ipaddress.IPv6Network(..., strict=False)`` for CIDRs.
-    """
+    """Return True if *value* is an IPv6 address or CIDR notation."""
     try:
         if "/" in value:
             ipaddress.IPv6Network(value, strict=False)

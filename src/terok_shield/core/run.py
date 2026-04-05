@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Subprocess helpers for shield.
+"""Subprocess execution boundary for all external commands.
 
-Provides ``CommandRunner`` (Protocol) and ``SubprocessRunner``
-(default implementation).  Every external command goes through here.
+Every shell-out in terok-shield flows through the :class:`CommandRunner`
+protocol.  Production code uses :class:`SubprocessRunner`; tests inject
+fakes.  This keeps external dependencies auditable and mockable in one
+place.
 """
 
 import ipaddress as _ipaddress
@@ -13,56 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-_SBIN_DIRS = ("/usr/sbin", "/sbin")
-
-
-def find_nft() -> str:
-    """Locate the nft binary, checking PATH then common sbin directories.
-
-    Returns the absolute path as a string, or empty string if not found.
-    """
-    found = shutil.which("nft")
-    if found:
-        return found
-    for d in _SBIN_DIRS:
-        candidate = Path(d) / "nft"
-        if candidate.is_file():
-            return str(candidate)
-    return ""
-
-
-class NftNotFoundError(RuntimeError):
-    """Raised when the ``nft`` binary is not found on the host."""
-
-
-class DigNotFoundError(RuntimeError):
-    """Raised when the ``dig`` binary is not found on the host.
-
-    DNS resolution requires ``dig`` (from ``bind-utils`` / ``dnsutils``).
-    """
-
-
-class ShieldNeedsSetup(RuntimeError):
-    """Raised when the podman environment requires one-time setup.
-
-    Raised when global hooks are not installed and per-container
-    ``--hooks-dir`` would not persist across container restarts.
-    The message includes system-specific setup hints.
-    """
-
-
-class ExecError(Exception):
-    """Raised when a subprocess fails."""
-
-    def __init__(self, cmd: list[str], rc: int, stderr: str) -> None:
-        """Store command details and format the error message."""
-        self.cmd = cmd
-        self.rc = rc
-        self.stderr = stderr
-        super().__init__(f"{cmd!r} failed (rc={rc}): {stderr.strip()}")
-
-
-# ── CommandRunner Protocol ───────────────────────────────
+# ── CommandRunner protocol ──────────────────────────────
 
 
 @runtime_checkable
@@ -70,7 +23,6 @@ class CommandRunner(Protocol):
     """Protocol for executing external commands.
 
     Decouples all subprocess calls behind a testable interface.
-    Production code uses ``SubprocessRunner``; tests inject fakes.
     """
 
     def run(
@@ -116,7 +68,7 @@ class CommandRunner(Protocol):
         ...
 
 
-# ── SubprocessRunner ─────────────────────────────────────
+# ── SubprocessRunner (default implementation) ───────────
 
 
 class SubprocessRunner:
@@ -138,6 +90,8 @@ class SubprocessRunner:
                 "  Arch:          sudo pacman -S nftables"
             )
 
+    # ── Core execution ──────────────────────────────────
+
     def run(
         self,
         cmd: list[str],
@@ -148,8 +102,7 @@ class SubprocessRunner:
     ) -> str:
         """Run a command, return stdout.  Raise ExecError on failure when check=True."""
         try:
-            # All external commands flow through this boundary as explicit argv
-            # lists with ``shell=False`` so call sites stay auditable and testable.
+            # Explicit argv list with shell=False — auditable and testable
             r = subprocess.run(
                 cmd,
                 input=stdin,
@@ -176,6 +129,8 @@ class SubprocessRunner:
             self._has_cache[name] = shutil.which(name) is not None
         return self._has_cache[name]
 
+    # ── nft ─────────────────────────────────────────────
+
     def nft(self, *args: str, stdin: str | None = None, check: bool = True) -> str:
         """Run nft command directly (hook mode, inside container netns)."""
         if stdin is not None:
@@ -198,16 +153,23 @@ class SubprocessRunner:
             return self.run([*cmd, *args, "-f", "-"], stdin=stdin, check=check)
         return self.run([*cmd, *args], check=check)
 
+    # ── Podman ──────────────────────────────────────────
+
     def podman_inspect(self, container: str, fmt: str) -> str:
         """Inspect a container attribute via podman."""
         return self.run(["podman", "inspect", "--format", fmt, container]).strip()
+
+    # ── DNS resolution ──────────────────────────────────
 
     def dig_all(self, domain: str, *, timeout: int = 10) -> list[str]:
         """Resolve domain to both IPv4 and IPv6 addresses in a single query.
 
         Runs ``dig +short domain A domain AAAA`` and validates each line
-        with ``ipaddress``.  Raises ``DigNotFoundError`` if ``dig`` is
-        not installed.  Returns empty list on lookup failure or timeout.
+        with ``ipaddress``.  Returns empty list on lookup failure or
+        timeout.
+
+        Raises:
+            DigNotFoundError: If ``dig`` is not installed.
         """
         if not self.has("dig"):
             raise DigNotFoundError(
@@ -238,7 +200,6 @@ class SubprocessRunner:
 
         Returns validated IP addresses from NSS resolution.  Typically
         returns fewer results than ``dig`` (often a single address).
-        Returns empty list on lookup failure.
         """
         out = self.run(["getent", "hosts", domain], check=False, timeout=10)
         result: list[str] = []
@@ -252,3 +213,58 @@ class SubprocessRunner:
             except ValueError:
                 continue
         return result
+
+
+# ── Exceptions ──────────────────────────────────────────
+
+
+class ExecError(Exception):
+    """Raised when a subprocess fails."""
+
+    def __init__(self, cmd: list[str], rc: int, stderr: str) -> None:
+        """Store command details and format the error message."""
+        self.cmd = cmd
+        self.rc = rc
+        self.stderr = stderr
+        super().__init__(f"{cmd!r} failed (rc={rc}): {stderr.strip()}")
+
+
+class NftNotFoundError(RuntimeError):
+    """Raised when the ``nft`` binary is not found on the host."""
+
+
+class DigNotFoundError(RuntimeError):
+    """Raised when the ``dig`` binary is not found on the host.
+
+    DNS resolution requires ``dig`` (from ``bind-utils`` / ``dnsutils``).
+    """
+
+
+class ShieldNeedsSetup(RuntimeError):
+    """Raised when global OCI hooks are not installed.
+
+    Per-container ``--hooks-dir`` does not persist across container
+    restarts, so global hooks are required.  The message includes
+    system-specific setup hints.
+    """
+
+
+# ── Standalone helpers ──────────────────────────────────
+
+_SBIN_DIRS = ("/usr/sbin", "/sbin")
+
+
+def find_nft() -> str:
+    """Locate the nft binary, checking PATH then common sbin directories.
+
+    sbin directories are checked explicitly because rootless users often
+    lack them in PATH.  Returns empty string if not found.
+    """
+    found = shutil.which("nft")
+    if found:
+        return found
+    for d in _SBIN_DIRS:
+        candidate = Path(d) / "nft"
+        if candidate.is_file():
+            return str(candidate)
+    return ""
