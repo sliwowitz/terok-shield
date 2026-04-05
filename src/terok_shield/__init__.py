@@ -3,13 +3,14 @@
 
 """terok-shield: nftables-based egress firewalling for Podman containers.
 
-Public API for standalone use and integration with terok.
+Public API facade.  The ``Shield`` class coordinates collaborators:
 
-The primary entry point is the ``Shield`` facade class:
-
-    >>> from terok_shield import Shield, ShieldConfig
-    >>> shield = Shield(ShieldConfig(state_dir=Path("/tmp/my-container")))
-    >>> shield.pre_start("my-container", ["dev-standard"])
+- **HookMode** (``core.mode_hook``) — per-container nft ruleset lifecycle
+- **DnsResolver** (``core.dns``) — domain resolution and caching
+- **ProfileLoader** (``lib.profiles``) — allowlist profile composition
+- **RulesetBuilder** (``core.nft``) — nftables ruleset generation
+- **AuditLogger** (``lib.audit``) — per-container JSONL audit trail
+- **CommandRunner** (``core.run``) — subprocess execution boundary
 
 Core and support layer modules are imported lazily — ``from terok_shield
 import ShieldConfig`` does not pull in nft, dnsmasq, or subprocess
@@ -150,13 +151,12 @@ def _read_installed_hook_version(hooks_dirs: list[Path]) -> int | None:
 
 
 class Shield:
-    """Facade: primary public API for terok-shield.
+    """Public API facade — coordinates collaborators per container.
 
-    Owns and wires together all service objects (audit, DNS, profiles,
-    ruleset builder, mode backend).  Construct once with a
-    ``ShieldConfig`` and call methods for the full shield lifecycle.
-
-    All collaborators are injectable for testing.
+    Delegates to ``HookMode`` for netns/nft operations, ``DnsResolver``
+    for name resolution, ``ProfileLoader`` for allowlists,
+    ``RulesetBuilder`` for ruleset generation, and ``AuditLogger`` for
+    the audit trail.  All collaborators are injectable for testing.
     """
 
     def __init__(
