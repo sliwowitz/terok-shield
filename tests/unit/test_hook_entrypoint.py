@@ -406,6 +406,7 @@ def test_createruntime_treats_permission_error_as_ns_exists(tmp_path: Path) -> N
         ),
         mock.patch("terok_shield.resources.hook_entrypoint._nsenter"),
         mock.patch("terok_shield.resources.hook_entrypoint._read_gateway", return_value=""),
+        mock.patch("terok_shield.resources.hook_entrypoint._read_gateway_v6", return_value=""),
     ):
         # Must not raise — PermissionError is treated as "namespace exists but inaccessible"
         hook_entrypoint._createruntime("1", sd)
@@ -429,7 +430,10 @@ def test_createruntime_applies_ruleset_without_gateway(tmp_path: Path) -> None:
 
     with mock.patch("terok_shield.resources.hook_entrypoint._nsenter") as mock_ns:
         with mock.patch("terok_shield.resources.hook_entrypoint._read_gateway", return_value=""):
-            hook_entrypoint._createruntime("1", sd)
+            with mock.patch(
+                "terok_shield.resources.hook_entrypoint._read_gateway_v6", return_value=""
+            ):
+                hook_entrypoint._createruntime("1", sd)
 
     # Only one nsenter call — apply the ruleset via stdin (not file path)
     assert mock_ns.call_count == 1
@@ -451,10 +455,13 @@ def test_createruntime_populates_gateway_set_when_discovered(tmp_path: Path) -> 
             "terok_shield.resources.hook_entrypoint._read_gateway", return_value="10.0.2.2"
         ):
             with mock.patch(
-                "terok_shield.resources.hook_entrypoint._find_nft",
-                return_value="/usr/sbin/nft",
+                "terok_shield.resources.hook_entrypoint._read_gateway_v6", return_value=""
             ):
-                hook_entrypoint._createruntime("1", sd)
+                with mock.patch(
+                    "terok_shield.resources.hook_entrypoint._find_nft",
+                    return_value="/usr/sbin/nft",
+                ):
+                    hook_entrypoint._createruntime("1", sd)
 
     # Two nsenter calls: apply ruleset + add element to gateway_v4
     assert mock_ns.call_count == 2
@@ -480,14 +487,66 @@ def test_createruntime_starts_dnsmasq_when_conf_present(tmp_path: Path) -> None:
     dnsmasq_conf = sd / "dnsmasq.conf"
     dnsmasq_conf.write_text("[dnsmasq config]")
 
-    with mock.patch("terok_shield.resources.hook_entrypoint._nsenter") as mock_ns:
+    def _fake_nsenter(*args: object, **kwargs: object) -> None:
+        # Simulate dnsmasq writing its PID file on launch.
+        if any("conf-file" in str(a) for a in args):
+            (sd / "dnsmasq.pid").write_text("42\n")
+
+    with mock.patch(
+        "terok_shield.resources.hook_entrypoint._nsenter", side_effect=_fake_nsenter
+    ) as mock_ns:
         with mock.patch("terok_shield.resources.hook_entrypoint._read_gateway", return_value=""):
-            hook_entrypoint._createruntime("1", sd)
+            with mock.patch(
+                "terok_shield.resources.hook_entrypoint._read_gateway_v6", return_value=""
+            ):
+                with mock.patch(
+                    "terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=True
+                ):
+                    hook_entrypoint._createruntime("1", sd)
 
     # nsenter called twice: apply ruleset + launch dnsmasq (no resolv.conf write)
     assert mock_ns.call_count == 2
     dnsmasq_call_args = mock_ns.call_args_list[1].args
     assert any("dnsmasq" in str(a) or "conf-file" in str(a) for a in dnsmasq_call_args)
+
+
+def test_createruntime_raises_when_dnsmasq_pid_file_not_written(tmp_path: Path) -> None:
+    """_createruntime() raises when dnsmasq starts but writes no PID file."""
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "ruleset.nft").write_text("table inet terok_shield {}")
+    (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
+
+    with mock.patch("terok_shield.resources.hook_entrypoint._nsenter"):
+        with mock.patch("terok_shield.resources.hook_entrypoint._read_gateway", return_value=""):
+            with mock.patch(
+                "terok_shield.resources.hook_entrypoint._read_gateway_v6", return_value=""
+            ):
+                with pytest.raises(RuntimeError, match="PID file not written"):
+                    hook_entrypoint._createruntime("1", sd)
+
+
+def test_createruntime_raises_when_dnsmasq_identity_check_fails(tmp_path: Path) -> None:
+    """_createruntime() raises when PID file exists but process is not our dnsmasq."""
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "ruleset.nft").write_text("table inet terok_shield {}")
+    (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
+
+    def _fake_nsenter(*args: object, **kwargs: object) -> None:
+        if any("conf-file" in str(a) for a in args):
+            (sd / "dnsmasq.pid").write_text("42\n")
+
+    with mock.patch("terok_shield.resources.hook_entrypoint._nsenter", side_effect=_fake_nsenter):
+        with mock.patch("terok_shield.resources.hook_entrypoint._read_gateway", return_value=""):
+            with mock.patch(
+                "terok_shield.resources.hook_entrypoint._read_gateway_v6", return_value=""
+            ):
+                with mock.patch(
+                    "terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=False
+                ):
+                    with pytest.raises(RuntimeError, match="not the expected process"):
+                        hook_entrypoint._createruntime("1", sd)
 
 
 # ── _is_our_dnsmasq ───────────────────────────────────────────────────────────
