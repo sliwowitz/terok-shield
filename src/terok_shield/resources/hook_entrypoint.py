@@ -38,10 +38,18 @@ from pathlib import Path
 #   "gateway_v6"     ↔  state.gateway_v6_path()
 #   "dnsmasq.conf"   ↔  state.dnsmasq_conf_path()
 #   "dnsmasq.pid"    ↔  state.dnsmasq_pid_path()
+#   "container.id"   ↔  state.container_id_path()
 _ANN_STATE_DIR = "terok.shield.state_dir"
 _ANN_VERSION = "terok.shield.version"
 _BUNDLE_VERSION = 4
 _TABLE = "inet terok_shield"
+
+# WORKAROUND(selinux-nft-stdin): nft runs as iptables_t (SELinux domain),
+# which cannot read files in data_home_t (~/.local/share/…).  Piping the
+# ruleset via stdin ("-f -") bypasses the file-read restriction — the hook
+# process (not nft) opens the file.
+# Remove when: SELinux policy grants nft read access to user state dirs,
+# or state_dir moves to an nft-accessible location.
 
 
 # ── Entry point ────────────────────────────────────────
@@ -144,11 +152,7 @@ def _createruntime(pid: str, sd: Path) -> None:
     if not ruleset.exists():
         raise RuntimeError(f"ruleset.nft not found: {ruleset}")
     nft = _find_nft()
-    # Read the ruleset in Python and feed it to nft via stdin ("-f -").
-    # nft runs as iptables_t (SELinux domain); that domain cannot read files
-    # in data_home_t (~/.local/share/…).  Piping via stdin bypasses the
-    # file-read restriction — the hook process (not nft) reads the file.
-    # This matches the pre-PR hook which also piped the ruleset via stdin.
+    # WORKAROUND(selinux-nft-stdin): pipe ruleset via stdin; see module header.
     _nsenter(pid, nft, "-f", "-", stdin=ruleset.read_text())
 
     # Discover gateways from routing tables, persist, and populate nft sets.

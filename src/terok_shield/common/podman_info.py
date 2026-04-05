@@ -41,7 +41,7 @@ HOOKS_DIR_PERSIST_VERSION = (99, 0, 0)
 # Hook JSON filename used to detect terok-shield global hooks.
 HOOK_JSON_FILENAME = "terok-shield-createRuntime.json"
 
-USER_HOOKS_DIR = Path("~/.local/share/containers/oci/hooks.d")
+USER_HOOKS_DIR: Path = Path("~/.local/share/containers/oci/hooks.d")
 
 
 # ── Podman version and capabilities ────────────────────
