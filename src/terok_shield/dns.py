@@ -42,7 +42,7 @@ class DnsResolver:
 
         Args:
             entries: Domain names and/or raw IPs from composed profiles.
-            cache_path: Per-container (one resolver may serve many containers).
+            cache_path: File to cache resolved IPs in, per-container scoped.
             max_age: Cache freshness threshold in seconds (default: 1 hour).
 
         Returns:
@@ -59,7 +59,11 @@ class DnsResolver:
         return all_ips
 
     def resolve_domains(self, domains: list[str]) -> list[str]:
-        """Best-effort resolution; deduplicated in first-seen order."""
+        """Resolve domain names to IP addresses via dig (A + AAAA).
+
+        Best-effort — unresolvable domains are skipped with a warning.
+        Returns deduplicated IPs in first-seen order.
+        """
         seen: set[str] = set()
         result: list[str] = []
         for domain in domains:
