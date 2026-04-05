@@ -3,9 +3,9 @@
 
 """DNS resolution with timestamp-based caching.
 
-Allowlist profiles use domain names rather than raw IPs because CDN and
-cloud addresses rotate.  This module resolves those names via ``dig``
-and caches the results so containers do not wait on DNS at every start.
+Resolves domain names from allowlist profiles via ``dig`` and caches
+the results so containers do not block on DNS at every start.  Profiles
+prefer domain names over raw IPs because CDN addresses rotate.
 """
 
 import logging
