@@ -21,6 +21,8 @@ persisted to ``live.allowed``; denied IPs are added to the deny sets and
 persisted to ``deny.list``.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -40,202 +42,68 @@ from ..lib.watchers import DomainCache, NflogWatcher, WatchEvent
 
 logger = logging.getLogger(__name__)
 
-# ── I/O protocol ──────────────────────────────────────
-
-
-@runtime_checkable
-class SessionIO(Protocol):
-    """I/O protocol for the interactive session.
-
-    Decouples rendering and parsing from the verdict engine so the same
-    :class:`InteractiveSession` can drive both machine-readable JSON-lines
-    (``--raw``) and human-friendly CLI output.
-    """
-
-    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
-        """Emit a pending-connection event to the operator."""
-        ...
-
-    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
-        """Emit a verdict-applied confirmation."""
-        ...
-
-    def parse_command(self, line: str) -> tuple[int, str] | None:
-        """Parse one line of operator input into *(packet_id, action)*.
-
-        Returns ``None`` when the line is invalid or unparseable.
-        """
-        ...
-
-    def emit_banner(self) -> None:
-        """Print a startup banner (no-op for machine protocols)."""
-        ...
-
-
-class JsonSessionIO:
-    """JSON-lines session I/O — machine-readable protocol.
-
-    Emits compact JSON objects (one per line) and expects JSON verdict
-    commands on stdin.  This is the original protocol from PR #162.
-    """
-
-    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
-        """Emit a pending event as a JSON line."""
-        out = {
-            "type": "pending",
-            "id": packet_id,
-            "dest": dest,
-            "port": port,
-            "proto": proto,
-            "domain": domain,
-        }
-        print(json.dumps(out, separators=(",", ":")), flush=True)
-
-    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
-        """Emit a verdict-applied confirmation as a JSON line."""
-        out = {
-            "type": "verdict_applied",
-            "id": verdict_id,
-            "dest": dest,
-            "action": action,
-            "ok": ok,
-        }
-        print(json.dumps(out, separators=(",", ":")), flush=True)
-
-    def parse_command(self, line: str) -> tuple[int, str] | None:
-        """Parse a JSON verdict command.
-
-        Expected format: ``{"type": "verdict", "id": 1, "action": "accept"}``.
-        Returns ``(id, action)`` on success or ``None`` on any validation failure.
-        """
-        try:
-            cmd = json.loads(line)
-        except json.JSONDecodeError:
-            logger.warning("Invalid JSON on stdin: %s", line)
-            return None
-        if not isinstance(cmd, dict):
-            logger.warning("Expected JSON object, got %s", type(cmd).__name__)
-            return None
-        if cmd.get("type") != "verdict":
-            logger.warning("Unknown command type: %s", cmd.get("type"))
-            return None
-        verdict_id = cmd.get("id")
-        if isinstance(verdict_id, bool) or not isinstance(verdict_id, int):
-            logger.warning("Verdict id must be an integer, got %r", verdict_id)
-            return None
-        action = cmd.get("action")
-        if action not in ("accept", "deny"):
-            logger.warning("Verdict action must be 'accept' or 'deny', got %r", action)
-            return None
-        return (verdict_id, action)
-
-    def emit_banner(self) -> None:
-        """No-op — machine protocol has no banner."""
-
-
-# Mapping of human-friendly input to canonical action names.
-_INPUT_MAP: dict[str, str] = {
-    "a": "accept",
-    "allow": "accept",
-    "d": "deny",
-    "deny": "deny",
-}
-
-
-class CliSessionIO:
-    """Human-friendly interactive CLI session I/O.
-
-    Renders blocked connections as readable lines and accepts short
-    operator input (``a``/``d`` or ``allow``/``deny``).  Pending packets
-    are tracked in a FIFO queue — input always targets the oldest.
-    """
-
-    def __init__(self) -> None:
-        """Initialise with empty pending-packet queues."""
-        self._queue: list[int] = []
-        """FIFO of pending packet IDs awaiting a verdict."""
-
-        self._info: dict[int, tuple[str, int, str]] = {}
-        """Packet metadata: *id* → *(dest, port, domain)*."""
-
-    def _prompt_head(self) -> None:
-        """Print the allow/deny prompt for the head-of-queue packet."""
-        if not self._queue:
-            return
-        info = self._info.get(self._queue[0])
-        if info is None:
-            return
-        dest, port, domain = info
-        label = f"{dest} ({domain})" if domain else dest
-        print(f"[BLOCKED] {label} :{port} \u2014 allow/deny? ", end="", flush=True)
-
-    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
-        """Show a ``[BLOCKED]`` line and queue the packet for verdict."""
-        label = f"{dest} ({domain})" if domain else dest
-        self._queue.append(packet_id)
-        self._info[packet_id] = (dest, port, domain)
-        if len(self._queue) == 1:
-            self._prompt_head()
-        else:
-            # Additional pending while the operator is thinking.
-            print(f"\n[BLOCKED] {label} :{port} (queued)", flush=True)
-            self._prompt_head()
-
-    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
-        """Show verdict result and prompt the next queued packet if any.
-
-        On success the packet is removed from the queue.  On failure it
-        stays queued so the operator can retry with the same ``a``/``d``
-        input (mirrors :meth:`InteractiveSession._process_command` which
-        keeps failed verdicts in ``_pending_by_ip``).
-        """
-        info = self._info.get(verdict_id)
-        target = info[2] if info and info[2] else dest
-        if ok:
-            self._info.pop(verdict_id, None)
-            if verdict_id in self._queue:
-                self._queue.remove(verdict_id)
-            mark = "\u2713" if action == "accept" else "\u2717"
-            verb = "allowed" if action == "accept" else "denied"
-            print(f"  {mark} {verb} {target}")
-        else:
-            print(f"  ! verdict failed for {target} (retry with a/d)")
-        self._prompt_head()
-
-    def parse_command(self, line: str) -> tuple[int, str] | None:
-        """Map operator input to the oldest pending packet.
-
-        Accepts ``a``, ``d``, ``allow``, ``deny`` (case-insensitive).
-        Returns ``None`` and prints a hint on unrecognised input.
-        """
-        action = _INPUT_MAP.get(line.strip().lower())
-        if action is None:
-            print("  Unknown input. Type 'a' to allow or 'd' to deny.", flush=True)
-            self._prompt_head()
-            return None
-        if not self._queue:
-            return None
-        return (self._queue[0], action)
-
-    def emit_banner(self) -> None:
-        """Print a startup message."""
-        print("Watching for blocked connections... (Ctrl-C to stop)\n", flush=True)
-
+# Environment variables for the nsenter re-exec handshake.
+_NSENTER_ENV = "_TEROK_SHIELD_NFLOG_NSENTER"
+_RAW_ENV = "_TEROK_SHIELD_NFLOG_RAW"
 
 # How often (seconds) to refresh the domain cache from the dnsmasq log.
 _DOMAIN_REFRESH_INTERVAL = 10.0
 
-# Module-level stop flag, set by signal handler.
-_running = True
+
+# ── Entry point ──────────────────────────────────────────
 
 
-def _handle_signal(_signum: int, _frame: object) -> None:
-    """Set the module-level stop flag on SIGINT/SIGTERM."""
-    global _running  # noqa: PLW0603
-    _running = False
+def run_interactive(state_dir: Path, container: str, *, raw: bool = False) -> None:
+    """Start the interactive NFLOG handler for a container.
+
+    The NFLOG netlink socket must be inside the container's network
+    namespace to receive packets logged by nft rules.  On first
+    invocation, re-execs via ``podman unshare nsenter`` into the
+    container's netns.  The re-exec sets ``_TEROK_SHIELD_NFLOG_NSENTER``
+    so the second invocation runs the handler directly.
+
+    Args:
+        state_dir: Per-container state directory (may be relative).
+        container: Container name.
+        raw: If ``True``, use JSON-lines protocol; otherwise use the
+            human-friendly CLI (default).
+
+    Raises:
+        SystemExit: If the interactive tier is not configured or NFLOG
+            watcher creation fails.
+    """
+    state_dir = state_dir.resolve()
+    tier = read_interactive_tier(state_dir)
+    if tier != "nflog":
+        print(
+            f"Error: interactive tier not configured (got {tier!r}, expected 'nflog').",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if os.environ.get(_NSENTER_ENV) != "1":
+        _nsenter_reexec(state_dir, container, raw=raw)
+        return
+
+    io: SessionIO = JsonSessionIO() if raw else CliSessionIO()
+    runner = SubprocessRunner()
+    session = InteractiveSession(runner=runner, state_dir=state_dir, container=container, io=io)
+    session.run()
 
 
-# ── Data types ─────────────────────────────────────────
+def _main() -> None:
+    """CLI entry point for ``python -m terok_shield.cli.interactive``."""
+    if len(sys.argv) != 3:
+        print(
+            f"Usage: {sys.executable} -m terok_shield.cli.interactive <state_dir> <container>",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    raw = os.environ.get(_RAW_ENV) == "1"
+    run_interactive(Path(sys.argv[1]), sys.argv[2], raw=raw)
+
+
+# ── Interactive session ──────────────────────────────────
 
 
 @dataclass
@@ -248,9 +116,6 @@ class _PendingPacket:
     queued_at: float
     domain: str = ""
     packet_id: int = 0
-
-
-# ── Session ────────────────────────────────────────────
 
 
 class InteractiveSession:
@@ -551,47 +416,189 @@ class InteractiveSession:
             return False
 
 
-# ── Helpers ────────────────────────────────────────────
+# ── I/O protocol ─────────────────────────────────────────
 
 
-def _readable_fds(readable: list) -> set[int]:
-    """Extract file descriptor ints from a ``select.select()`` readable list.
+@runtime_checkable
+class SessionIO(Protocol):
+    """I/O protocol for the interactive session.
 
-    Handles both raw int fds and objects with a ``fileno()`` method.
+    Decouples rendering and parsing from the verdict engine so the same
+    :class:`InteractiveSession` can drive both machine-readable JSON-lines
+    (``--raw``) and human-friendly CLI output.
     """
-    return {r if isinstance(r, int) else r.fileno() for r in readable}
+
+    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
+        """Emit a pending-connection event to the operator."""
+        ...
+
+    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
+        """Emit a verdict-applied confirmation."""
+        ...
+
+    def parse_command(self, line: str) -> tuple[int, str] | None:
+        """Parse one line of operator input into *(packet_id, action)*.
+
+        Returns ``None`` when the line is invalid or unparseable.
+        """
+        ...
+
+    def emit_banner(self) -> None:
+        """Print a startup banner (no-op for machine protocols)."""
+        ...
 
 
-def _set_nonblocking(fd: int) -> None:
-    """Set a file descriptor to non-blocking mode."""
-    import fcntl
+class JsonSessionIO:
+    """JSON-lines session I/O — machine-readable protocol.
 
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-
-def _append_unique(path: Path, value: str) -> None:
-    """Append *value* to a newline-delimited file if not already present.
-
-    Creates the file if it does not exist.
-
-    Args:
-        path: Path to the file.
-        value: The value to append (without trailing newline).
+    Emits compact JSON objects (one per line) and expects JSON verdict
+    commands on stdin.  This is the original protocol from PR #162.
     """
-    existing: set[str] = set()
-    if path.is_file():
-        existing = {line.strip() for line in path.read_text().splitlines() if line.strip()}
-    if value in existing:
-        return
-    with open(path, "a") as f:
-        f.write(value + "\n")
+
+    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
+        """Emit a pending event as a JSON line."""
+        out = {
+            "type": "pending",
+            "id": packet_id,
+            "dest": dest,
+            "port": port,
+            "proto": proto,
+            "domain": domain,
+        }
+        print(json.dumps(out, separators=(",", ":")), flush=True)
+
+    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
+        """Emit a verdict-applied confirmation as a JSON line."""
+        out = {
+            "type": "verdict_applied",
+            "id": verdict_id,
+            "dest": dest,
+            "action": action,
+            "ok": ok,
+        }
+        print(json.dumps(out, separators=(",", ":")), flush=True)
+
+    def parse_command(self, line: str) -> tuple[int, str] | None:
+        """Parse a JSON verdict command.
+
+        Expected format: ``{"type": "verdict", "id": 1, "action": "accept"}``.
+        Returns ``(id, action)`` on success or ``None`` on any validation failure.
+        """
+        try:
+            cmd = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("Invalid JSON on stdin: %s", line)
+            return None
+        if not isinstance(cmd, dict):
+            logger.warning("Expected JSON object, got %s", type(cmd).__name__)
+            return None
+        if cmd.get("type") != "verdict":
+            logger.warning("Unknown command type: %s", cmd.get("type"))
+            return None
+        verdict_id = cmd.get("id")
+        if isinstance(verdict_id, bool) or not isinstance(verdict_id, int):
+            logger.warning("Verdict id must be an integer, got %r", verdict_id)
+            return None
+        action = cmd.get("action")
+        if action not in ("accept", "deny"):
+            logger.warning("Verdict action must be 'accept' or 'deny', got %r", action)
+            return None
+        return (verdict_id, action)
+
+    def emit_banner(self) -> None:
+        """No-op — machine protocol has no banner."""
 
 
-# ── nsenter re-exec ───────────────────────────────────
+# Mapping of human-friendly input to canonical action names.
+_INPUT_MAP: dict[str, str] = {
+    "a": "accept",
+    "allow": "accept",
+    "d": "deny",
+    "deny": "deny",
+}
 
-_NSENTER_ENV = "_TEROK_SHIELD_NFLOG_NSENTER"
-_RAW_ENV = "_TEROK_SHIELD_NFLOG_RAW"
+
+class CliSessionIO:
+    """Human-friendly interactive CLI session I/O.
+
+    Renders blocked connections as readable lines and accepts short
+    operator input (``a``/``d`` or ``allow``/``deny``).  Pending packets
+    are tracked in a FIFO queue — input always targets the oldest.
+    """
+
+    def __init__(self) -> None:
+        """Initialise with empty pending-packet queues."""
+        self._queue: list[int] = []
+        """FIFO of pending packet IDs awaiting a verdict."""
+
+        self._info: dict[int, tuple[str, int, str]] = {}
+        """Packet metadata: *id* → *(dest, port, domain)*."""
+
+    def _prompt_head(self) -> None:
+        """Print the allow/deny prompt for the head-of-queue packet."""
+        if not self._queue:
+            return
+        info = self._info.get(self._queue[0])
+        if info is None:
+            return
+        dest, port, domain = info
+        label = f"{dest} ({domain})" if domain else dest
+        print(f"[BLOCKED] {label} :{port} \u2014 allow/deny? ", end="", flush=True)
+
+    def emit_pending(self, packet_id: int, dest: str, port: int, proto: int, domain: str) -> None:
+        """Show a ``[BLOCKED]`` line and queue the packet for verdict."""
+        label = f"{dest} ({domain})" if domain else dest
+        self._queue.append(packet_id)
+        self._info[packet_id] = (dest, port, domain)
+        if len(self._queue) == 1:
+            self._prompt_head()
+        else:
+            # Additional pending while the operator is thinking.
+            print(f"\n[BLOCKED] {label} :{port} (queued)", flush=True)
+            self._prompt_head()
+
+    def emit_verdict_applied(self, verdict_id: int, dest: str, action: str, *, ok: bool) -> None:
+        """Show verdict result and prompt the next queued packet if any.
+
+        On success the packet is removed from the queue.  On failure it
+        stays queued so the operator can retry with the same ``a``/``d``
+        input (mirrors :meth:`InteractiveSession._process_command` which
+        keeps failed verdicts in ``_pending_by_ip``).
+        """
+        info = self._info.get(verdict_id)
+        target = info[2] if info and info[2] else dest
+        if ok:
+            self._info.pop(verdict_id, None)
+            if verdict_id in self._queue:
+                self._queue.remove(verdict_id)
+            mark = "\u2713" if action == "accept" else "\u2717"
+            verb = "allowed" if action == "accept" else "denied"
+            print(f"  {mark} {verb} {target}")
+        else:
+            print(f"  ! verdict failed for {target} (retry with a/d)")
+        self._prompt_head()
+
+    def parse_command(self, line: str) -> tuple[int, str] | None:
+        """Map operator input to the oldest pending packet.
+
+        Accepts ``a``, ``d``, ``allow``, ``deny`` (case-insensitive).
+        Returns ``None`` and prints a hint on unrecognised input.
+        """
+        action = _INPUT_MAP.get(line.strip().lower())
+        if action is None:
+            print("  Unknown input. Type 'a' to allow or 'd' to deny.", flush=True)
+            self._prompt_head()
+            return None
+        if not self._queue:
+            return None
+        return (self._queue[0], action)
+
+    def emit_banner(self) -> None:
+        """Print a startup message."""
+        print("Watching for blocked connections... (Ctrl-C to stop)\n", flush=True)
+
+
+# ── nsenter re-exec ──────────────────────────────────────
 
 
 def _nsenter_reexec(state_dir: Path, container: str, *, raw: bool) -> None:
@@ -636,57 +643,50 @@ def _nsenter_reexec(state_dir: Path, container: str, *, raw: bool) -> None:
         raise SystemExit(e.returncode) from e
 
 
-# ── Entry point ────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────
+
+# Module-level stop flag, set by signal handler.
+_running = True
 
 
-def run_interactive(state_dir: Path, container: str, *, raw: bool = False) -> None:
-    """Start the interactive NFLOG handler for a container.
+def _handle_signal(_signum: int, _frame: object) -> None:
+    """Set the module-level stop flag on SIGINT/SIGTERM."""
+    global _running  # noqa: PLW0603
+    _running = False
 
-    The NFLOG netlink socket must be inside the container's network
-    namespace to receive packets logged by nft rules.  On first
-    invocation, re-execs via ``podman unshare nsenter`` into the
-    container's netns.  The re-exec sets ``_TEROK_SHIELD_NFLOG_NSENTER``
-    so the second invocation runs the handler directly.
+
+def _readable_fds(readable: list) -> set[int]:
+    """Extract file descriptor ints from a ``select.select()`` readable list.
+
+    Handles both raw int fds and objects with a ``fileno()`` method.
+    """
+    return {r if isinstance(r, int) else r.fileno() for r in readable}
+
+
+def _set_nonblocking(fd: int) -> None:
+    """Set a file descriptor to non-blocking mode."""
+    import fcntl
+
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+
+def _append_unique(path: Path, value: str) -> None:
+    """Append *value* to a newline-delimited file if not already present.
+
+    Creates the file if it does not exist.
 
     Args:
-        state_dir: Per-container state directory (may be relative).
-        container: Container name.
-        raw: If ``True``, use JSON-lines protocol; otherwise use the
-            human-friendly CLI (default).
-
-    Raises:
-        SystemExit: If the interactive tier is not configured or NFLOG
-            watcher creation fails.
+        path: Path to the file.
+        value: The value to append (without trailing newline).
     """
-    state_dir = state_dir.resolve()
-    tier = read_interactive_tier(state_dir)
-    if tier != "nflog":
-        print(
-            f"Error: interactive tier not configured (got {tier!r}, expected 'nflog').",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-    if os.environ.get(_NSENTER_ENV) != "1":
-        _nsenter_reexec(state_dir, container, raw=raw)
+    existing: set[str] = set()
+    if path.is_file():
+        existing = {line.strip() for line in path.read_text().splitlines() if line.strip()}
+    if value in existing:
         return
-
-    io: SessionIO = JsonSessionIO() if raw else CliSessionIO()
-    runner = SubprocessRunner()
-    session = InteractiveSession(runner=runner, state_dir=state_dir, container=container, io=io)
-    session.run()
-
-
-def _main() -> None:
-    """CLI entry point for ``python -m terok_shield.cli.interactive``."""
-    if len(sys.argv) != 3:
-        print(
-            f"Usage: {sys.executable} -m terok_shield.cli.interactive <state_dir> <container>",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-    raw = os.environ.get(_RAW_ENV) == "1"
-    run_interactive(Path(sys.argv[1]), sys.argv[2], raw=raw)
+    with open(path, "a") as f:
+        f.write(value + "\n")
 
 
 if __name__ == "__main__":
