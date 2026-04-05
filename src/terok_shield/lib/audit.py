@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Structured audit logging for shield (JSON-lines format).
+"""Per-container JSON-lines audit logging.
 
-Provides ``AuditLogger`` -- owns an audit file path and an enabled
-flag, writes JSON-lines entries to a single per-container file.
+Writes structured events (setup, teardown, allow, deny) to a single
+file per container.  Can be toggled on/off at runtime without losing
+the file handle.
 """
 
 import json
