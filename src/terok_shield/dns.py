@@ -53,7 +53,7 @@ class DnsResolver:
 
         Args:
             entries: Domain names and/or raw IPs from composed profiles.
-            cache_path: Path to the cache file for this container.
+            cache_path: Per-container cache file (one resolver may serve many containers).
             max_age: Cache freshness threshold in seconds (default: 1 hour).
 
         Returns:
