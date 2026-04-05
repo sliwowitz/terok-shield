@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shield configuration and mode protocol.
+"""Shield configuration types, enums, and mode protocol.
 
-Houses the core value types (``ShieldConfig``, ``ShieldMode``,
-``ShieldState``) and the ``ShieldModeBackend`` protocol that strategy
-implementations must satisfy.
+Defines the vocabulary shared across the entire codebase: what a shield
+configuration looks like, what modes and states exist, and what contract
+a mode backend must satisfy.
 """
 
 import enum
@@ -16,6 +16,9 @@ from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# ── OCI annotation keys ─────────────────────────────────
+
+
 ANNOTATION_KEY = "terok.shield.profiles"
 ANNOTATION_NAME_KEY = "terok.shield.name"
 ANNOTATION_STATE_DIR_KEY = "terok.shield.state_dir"
@@ -25,6 +28,9 @@ ANNOTATION_AUDIT_ENABLED_KEY = "terok.shield.audit_enabled"
 ANNOTATION_UPSTREAM_DNS_KEY = "terok.shield.upstream_dns"
 ANNOTATION_DNS_TIER_KEY = "terok.shield.dns_tier"
 ANNOTATION_INTERACTIVE_KEY = "terok.shield.interactive"
+
+
+# ── DNS tier ────────────────────────────────────────────
 
 
 class DnsTier(enum.Enum):
@@ -49,22 +55,23 @@ def detect_dns_tier(
 ) -> DnsTier:
     """Detect the best available DNS resolution tier.
 
-    Uses *has* to probe for executables on ``PATH``.  Shared by
-    ``HookMode._detect_dns_tier`` and ``Shield.check_environment``.
+    Probes for executables in priority order: dnsmasq (with nftset
+    support) > dig > getent.
 
     Args:
-        has: Callable that returns True if the named executable exists
-            (e.g. ``CommandRunner.has``).
-        dnsmasq_nftset_ok: Callable that returns True if the installed
-            dnsmasq supports ``--nftset``.  Defaults to ``lambda: True``
-            (skip capability probe); production callers with a live runner
-            should pass :func:`~terok_shield.dnsmasq.has_nftset_support`.
+        has: Returns True if the named executable exists on PATH.
+        dnsmasq_nftset_ok: Returns True if installed dnsmasq supports
+            ``--nftset``.  Defaults to ``lambda: True`` (skip probe);
+            production callers should pass a real capability check.
     """
     if has("dnsmasq") and dnsmasq_nftset_ok():
         return DnsTier.DNSMASQ
     if has("dig"):
         return DnsTier.DIG
     return DnsTier.GETENT
+
+
+# ── Shield mode and state ───────────────────────────────
 
 
 class ShieldMode(enum.Enum):
@@ -94,7 +101,7 @@ class ShieldState(enum.Enum):
     ERROR = "error"
 
 
-# -- ShieldConfig -----------------------------------------
+# ── ShieldConfig ────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -115,7 +122,7 @@ class ShieldConfig:
     interactive: bool = False
 
 
-# -- Config-file schema (Pydantic) ------------------------
+# ── Config-file schema (Pydantic) ───────────────────────
 
 
 class AuditFileConfig(BaseModel):
@@ -176,7 +183,7 @@ class ShieldFileConfig(BaseModel):
         return ports
 
 
-# -- ShieldModeBackend Protocol ---------------------------
+# ── ShieldModeBackend protocol ──────────────────────────
 
 
 @runtime_checkable

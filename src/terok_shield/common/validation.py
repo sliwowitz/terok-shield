@@ -1,17 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared input validators for container and profile names.
+"""Input validators for container names, profile names, and allowlist files.
 
-Pure functions with no internal dependencies -- safe to import from any module.
-Eliminates ``_SAFE_NAME`` / ``_SAFE_CONTAINER`` regex duplication across
-audit.py, dns.py, and profiles.py.
+Pure functions with no internal dependencies — safe to import from any module.
 """
 
 import re
 
 SAFE_CONTAINER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
-"""Container name pattern -- allows leading underscore (podman convention)."""
+"""Container name pattern — allows leading underscore (podman convention)."""
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 """Strict name pattern for profiles, cache keys, etc."""
@@ -31,7 +29,7 @@ def validate_container_name(name: str) -> str:
 def validate_safe_name(name: str) -> str:
     """Validate a generic safe name (profiles, cache keys).
 
-    Stricter than container names -- no leading underscore.
+    Stricter than container names — no leading underscore.
 
     Raises:
         ValueError: If the name contains path separators or other unsafe chars.
@@ -42,11 +40,7 @@ def validate_safe_name(name: str) -> str:
 
 
 def parse_entries(text: str) -> list[str]:
-    """Parse a text file into a list of non-blank, non-comment lines.
-
-    Strips leading/trailing whitespace from each line.
-    Lines starting with ``#`` (after stripping) are treated as comments.
-    """
+    """Parse an allowlist text file into non-blank, non-comment lines."""
     return [
         line.strip()
         for line in text.splitlines()
