@@ -10,6 +10,7 @@ static pre-start resolution cannot.
 
 This module is the single owner of dnsmasq config format and CLI args.
 """
+# WAYPOINT: HookMode (mode_hook)
 
 import ipaddress
 import logging

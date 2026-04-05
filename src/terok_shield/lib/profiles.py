@@ -7,6 +7,7 @@ Finds, reads, and merges ``.txt`` allowlist profiles from user and
 bundled directories.  User profiles override bundled ones with the
 same name, so site-specific customisation works without forking.
 """
+# WAYPOINT: Shield (__init__), HookMode (mode_hook)
 
 from importlib import resources as importlib_resources
 from pathlib import Path

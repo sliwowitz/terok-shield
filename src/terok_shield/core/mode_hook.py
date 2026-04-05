@@ -5,10 +5,19 @@
 
 Uses OCI hooks to apply per-container nftables rules inside each
 container's network namespace.  No root required — only podman and nft.
-The stdlib-only ``hook_entrypoint.py`` applies the pre-generated ruleset
-at container creation; this module handles DNS pre-resolution, live
-allow/deny, and shield lifecycle (up/down/state).
+
+Orchestrates collaborators per lifecycle phase:
+
+- **RulesetBuilder** (``core.nft``) — generates and verifies nft rulesets
+- **DnsResolver** (``core.dns``) — pre-start domain resolution
+- **ProfileLoader** (``lib.profiles``) — allowlist profile composition
+- **AuditLogger** (``lib.audit``) — event logging
+- **CommandRunner** (``core.run``) — subprocess execution (nft, nsenter)
+- **dnsmasq** (``core.dnsmasq``) — runtime DNS with nftset auto-population
+- **hook_install** (``core.hook_install``) — OCI hook file generation
+- **state** (``core.state``) — per-container state bundle I/O
 """
+# WAYPOINT: Shield (__init__)
 
 import logging
 import os
@@ -67,9 +76,10 @@ if TYPE_CHECKING:
 class HookMode:
     """Hook-mode shield backend (Strategy, implements ``ShieldModeBackend``).
 
-    Manages the full lifecycle of OCI-hook-based container firewalling:
-    pre-start DNS resolution and hook installation, live allow/deny,
-    bypass (down/up), and ruleset preview.
+    Coordinates the full lifecycle of OCI-hook-based container firewalling.
+    Delegates to ``RulesetBuilder`` for nft generation, ``DnsResolver`` for
+    name resolution, ``ProfileLoader`` for allowlists, ``dnsmasq`` for
+    runtime DNS, and ``state`` for per-container persistence.
     """
 
     def __init__(

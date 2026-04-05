@@ -10,6 +10,7 @@ and :func:`setup_global_hooks` for one-time system-wide installation.
 
 Pure file I/O — no runtime container interaction.
 """
+# WAYPOINT: HookMode (mode_hook)
 
 import json
 from pathlib import Path

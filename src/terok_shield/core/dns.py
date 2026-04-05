@@ -12,6 +12,7 @@ IPs are captured (no parallel A + AAAA query), but resolution still
 works.  When the dnsmasq tier is active, domain resolution happens at
 runtime via ``--nftset``; this module then only handles raw IPs.
 """
+# WAYPOINT: Shield (__init__), HookMode (mode_hook)
 
 import logging
 import time

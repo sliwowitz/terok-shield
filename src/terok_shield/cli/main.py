@@ -3,10 +3,11 @@
 
 """Standalone CLI — parses argv, builds a Shield, and dispatches commands.
 
-Constructs :class:`ShieldConfig` from ``config.yml``, XDG conventions,
-and environment variables, then routes each subcommand through the
-:data:`~.registry.COMMANDS` registry.  Commands that need standalone CLI
-logic (``prepare``, ``run``, ``setup``) are handled directly here.
+Constructs ``ShieldConfig`` from ``config.yml``, XDG conventions, and
+environment variables, then routes each subcommand through the
+``COMMANDS`` registry (``cli.registry``).  Commands that need standalone
+CLI logic (``prepare``, ``run``, ``setup``) are handled directly here;
+all others delegate to ``Shield`` (the public API facade).
 """
 
 import argparse

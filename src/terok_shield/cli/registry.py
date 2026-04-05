@@ -8,6 +8,7 @@ standalone CLI and the terok integration layer.  Handler functions accept
 ``(shield, container?, **kwargs)`` and print to stdout, making them
 reusable across different CLI frontends.
 """
+# WAYPOINT: main (cli.main)
 
 import json
 from collections.abc import Callable
