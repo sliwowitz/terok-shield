@@ -110,7 +110,8 @@ class HookMode:
         the podman CLI arguments needed for shield protection.
 
         Raises:
-            ShieldNeedsSetup: On podman < 5.6.0 without global hooks.
+            ShieldNeedsSetup: When global hooks are not installed
+                (see ``WORKAROUND(hooks-dir-persist)``).
         """
         sd = self._config.state_dir.resolve()
         info = self._get_podman_info()
@@ -167,7 +168,7 @@ class HookMode:
             f"{ANNOTATION_INTERACTIVE_KEY}={str(interactive).lower()}",
         ]
 
-        # Hooks dir: per-container on modern podman, global on old podman
+        # WORKAROUND(hooks-dir-persist): currently always takes the global path
         if info.hooks_dir_persists:
             args += ["--hooks-dir", str(state.hooks_dir(sd))]
         elif has_global_hooks():
