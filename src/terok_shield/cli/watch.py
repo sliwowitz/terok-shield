@@ -26,8 +26,10 @@ _running = True
 def run_watch(state_dir: Path, container: str) -> None:
     """Stream blocked-access events as JSON lines to stdout.
 
-    Validates the dnsmasq tier, opens the watchers, and enters a
-    ``select``-based event loop.
+    Only meaningful under the dnsmasq tier — the query log and nftset
+    integration that feed the watchers do not exist in the dig/getent
+    tiers.  Uses ``select`` so a single thread can multiplex the DNS
+    log, audit log, and NFLOG socket without blocking on any one source.
 
     Args:
         state_dir: Per-container state directory.
