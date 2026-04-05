@@ -480,7 +480,14 @@ def test_createruntime_starts_dnsmasq_when_conf_present(tmp_path: Path) -> None:
     dnsmasq_conf = sd / "dnsmasq.conf"
     dnsmasq_conf.write_text("[dnsmasq config]")
 
-    with mock.patch("terok_shield.resources.hook_entrypoint._nsenter") as mock_ns:
+    def _fake_nsenter(*args: object, **kwargs: object) -> None:
+        # Simulate dnsmasq writing its PID file on launch.
+        if any("conf-file" in str(a) for a in args):
+            (sd / "dnsmasq.pid").write_text("42\n")
+
+    with mock.patch(
+        "terok_shield.resources.hook_entrypoint._nsenter", side_effect=_fake_nsenter
+    ) as mock_ns:
         with mock.patch("terok_shield.resources.hook_entrypoint._read_gateway", return_value=""):
             hook_entrypoint._createruntime("1", sd)
 

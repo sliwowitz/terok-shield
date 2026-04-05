@@ -178,7 +178,19 @@ def _createruntime(pid: str, sd: Path) -> None:
         # resolv.conf is pre-written by pre_start() and bind-mounted :ro via
         # --volume, so DNS is already pointing to 127.0.0.1 before this hook
         # runs.  No write needed here.
+        pid_file = sd / "dnsmasq.pid"
+        # Remove stale PID file so the post-launch check is not fooled
+        # by a leftover from a previous run (mirrors dnsmasq.launch()).
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
         _nsenter(pid, _find_dnsmasq(), f"--conf-file={dnsmasq_conf}")
+        if not pid_file.is_file():
+            raise RuntimeError(
+                f"dnsmasq started but PID file not written at {pid_file}. "
+                "The container's DNS may not be functional."
+            )
 
 
 def _poststop(sd: Path) -> None:
