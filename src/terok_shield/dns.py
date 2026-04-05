@@ -3,11 +3,9 @@
 
 """DNS resolution with timestamp-based caching.
 
-Given a mix of domain names and raw IP addresses, resolve the domains
-via ``dig``, combine with the pass-through IPs, and cache the result.
-On subsequent calls the cache is returned if still fresh.
-
-The entry point is :meth:`DnsResolver.resolve_and_cache`.
+Allowlist profiles use domain names rather than raw IPs because CDN and
+cloud addresses rotate.  This module resolves those names via ``dig``
+and caches the results so containers do not wait on DNS at every start.
 """
 
 import logging
@@ -21,21 +19,14 @@ logger = logging.getLogger(__name__)
 
 
 class DnsResolver:
-    """Stateless DNS resolver with file-based caching.
+    """Stateless DNS resolver — all persistence is in the cache file.
 
-    All state lives on the filesystem (the cache file).  The only
-    dependency is a :class:`CommandRunner` for ``dig`` calls.
+    The only dependency is a :class:`CommandRunner` for ``dig`` calls.
     """
 
     def __init__(self, *, runner: CommandRunner) -> None:
-        """Create a resolver.
-
-        Args:
-            runner: Command runner for ``dig`` subprocess calls.
-        """
+        """Inject the command runner used for all ``dig`` calls."""
         self._runner = runner
-
-    # ── Main story ──────────────────────────────────────────
 
     def resolve_and_cache(
         self,
@@ -46,18 +37,16 @@ class DnsResolver:
     ) -> list[str]:
         """Resolve profile entries and cache the result.
 
-        Profiles mix domain names with literal IPs/CIDRs because domains
-        are more stable for allowlists (CDN addresses rotate), but some
-        targets are only reachable by address.  This method handles both:
-        domains go through ``dig``, literals pass through unchanged.
+        Profiles mix domain names with literal IPs/CIDRs — domains go
+        through ``dig``, literals pass through unchanged.
 
         Args:
             entries: Domain names and/or raw IPs from composed profiles.
-            cache_path: Per-container cache file (one resolver may serve many containers).
+            cache_path: Per-container (one resolver may serve many containers).
             max_age: Cache freshness threshold in seconds (default: 1 hour).
 
         Returns:
-            List of resolved IPv4/IPv6 addresses + raw IPs/CIDRs.
+            Resolved IPv4/IPv6 addresses combined with raw IPs/CIDRs.
         """
         if self._cache_fresh(cache_path, max_age):
             return self._read_cache(cache_path)
@@ -69,15 +58,8 @@ class DnsResolver:
         self._write_cache(cache_path, all_ips)
         return all_ips
 
-    # ── Resolution detail ───────────────────────────────────
-
     def resolve_domains(self, domains: list[str]) -> list[str]:
-        """Resolve domain names to IPv4 and IPv6 addresses.
-
-        Queries both A and AAAA records for each domain.
-        Skips domains that fail to resolve (best-effort).
-        Returns deduplicated IPs in first-seen order.
-        """
+        """Best-effort resolution; deduplicated in first-seen order."""
         seen: set[str] = set()
         result: list[str] = []
         for domain in domains:
@@ -90,8 +72,6 @@ class DnsResolver:
                     result.append(ip)
         return result
 
-    # ── Helpers ─────────────────────────────────────────────
-
     @staticmethod
     def _split_entries(entries: list[str]) -> tuple[list[str], list[str]]:
         """Separate entries into (domains, raw_ips)."""
@@ -102,7 +82,7 @@ class DnsResolver:
 
     @staticmethod
     def _cache_fresh(path: Path, max_age: int) -> bool:
-        """Return True if the cache file exists and is younger than *max_age* seconds."""
+        """Check whether the cache file exists and is younger than *max_age* seconds."""
         try:
             mtime = path.stat().st_mtime
         except OSError:
