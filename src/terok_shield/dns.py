@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""DNS domain resolution with timestamp-based caching.
+"""DNS resolution with timestamp-based caching.
 
-Provides ``DnsResolver`` -- stateless resolver that takes an explicit
-cache path per call.  All ``dig`` calls go through a ``CommandRunner``.
+Given a mix of domain names and raw IP addresses, resolve the domains
+via ``dig``, combine with the pass-through IPs, and cache the result.
+On subsequent calls the cache is returned if still fresh.
+
+The entry point is :meth:`DnsResolver.resolve_and_cache`.
 """
 
 import logging
@@ -17,35 +20,11 @@ from .util import is_ip as _is_ip
 logger = logging.getLogger(__name__)
 
 
-# ── Pure helpers ─────────────────────────────────────────
-
-
-def _split_entries(entries: list[str]) -> tuple[list[str], list[str]]:
-    """Split entries into (domains, raw_ips)."""
-    domains, ips = [], []
-    for entry in entries:
-        (_ips := ips if _is_ip(entry) else domains).append(entry)
-    return domains, ips
-
-
-def _cache_fresh(path: Path, max_age: int) -> bool:
-    """Return True if the cache file exists and is younger than max_age seconds."""
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return False
-    return (time.time() - mtime) < max_age
-
-
-# ── DnsResolver ──────────────────────────────────────────
-
-
 class DnsResolver:
     """Stateless DNS resolver with file-based caching.
 
-    Resolves domain names to IP addresses (A + AAAA) via ``dig``.
-    Cache path is provided per call -- no internal state beyond
-    the ``CommandRunner``.
+    All state lives on the filesystem (the cache file).  The only
+    dependency is a :class:`CommandRunner` for ``dig`` calls.
     """
 
     def __init__(self, *, runner: CommandRunner) -> None:
@@ -56,12 +35,51 @@ class DnsResolver:
         """
         self._runner = runner
 
+    # ── Main story ──────────────────────────────────────────
+
+    def resolve_and_cache(
+        self,
+        entries: list[str],
+        cache_path: Path,
+        *,
+        max_age: int = 3600,
+    ) -> list[str]:
+        """Resolve profile entries and cache the result.
+
+        This is the single entry point for callers.  The flow:
+
+        1. If the cache is fresh, return it immediately.
+        2. Otherwise split entries into domains and raw IPs/CIDRs.
+        3. Resolve the domains via dig (A + AAAA).
+        4. Combine raw IPs with resolved IPs, write cache, return.
+
+        Args:
+            entries: Domain names and/or raw IPs from composed profiles.
+            cache_path: Path to the cache file for this container.
+            max_age: Cache freshness threshold in seconds (default: 1 hour).
+
+        Returns:
+            List of resolved IPv4/IPv6 addresses + raw IPs/CIDRs.
+        """
+        if self._cache_fresh(cache_path, max_age):
+            return self._read_cache(cache_path)
+
+        # Profiles mix domains and literal IPs — split so we only resolve the domains
+        domains, raw_ips = self._split_entries(entries)
+        resolved = self.resolve_domains(domains)
+        all_ips = raw_ips + resolved
+
+        self._write_cache(cache_path, all_ips)
+        return all_ips
+
+    # ── Resolution detail ───────────────────────────────────
+
     def resolve_domains(self, domains: list[str]) -> list[str]:
-        """Resolve a list of domains to IPv4 and IPv6 addresses.
+        """Resolve domain names to IPv4 and IPv6 addresses.
 
         Queries both A and AAAA records for each domain.
         Skips domains that fail to resolve (best-effort).
-        Returns deduplicated IPs.
+        Returns deduplicated IPs in first-seen order.
         """
         seen: set[str] = set()
         result: list[str] = []
@@ -75,35 +93,24 @@ class DnsResolver:
                     result.append(ip)
         return result
 
-    def resolve_and_cache(
-        self,
-        entries: list[str],
-        cache_path: Path,
-        *,
-        max_age: int = 3600,
-    ) -> list[str]:
-        """Resolve domains and cache results.  Return cached IPs if fresh.
+    # ── Helpers ─────────────────────────────────────────────
 
-        Entries can be a mix of domain names and raw IP/CIDR addresses.
-        Raw IPs are passed through without resolution.
+    @staticmethod
+    def _split_entries(entries: list[str]) -> tuple[list[str], list[str]]:
+        """Separate entries into (domains, raw_ips)."""
+        domains, ips = [], []
+        for entry in entries:
+            (_ips := ips if _is_ip(entry) else domains).append(entry)
+        return domains, ips
 
-        Args:
-            entries: Domain names and/or raw IPs from composed profiles.
-            cache_path: Path to the cache file for this container.
-            max_age: Cache freshness threshold in seconds (default: 1 hour).
-
-        Returns:
-            List of resolved IPv4/IPv6 addresses + raw IPs/CIDRs.
-        """
-        if _cache_fresh(cache_path, max_age):
-            return self._read_cache(cache_path)
-
-        domains, raw_ips = _split_entries(entries)
-        resolved = self.resolve_domains(domains)
-        all_ips = raw_ips + resolved
-
-        self._write_cache(cache_path, all_ips)
-        return all_ips
+    @staticmethod
+    def _cache_fresh(path: Path, max_age: int) -> bool:
+        """Return True if the cache file exists and is younger than *max_age* seconds."""
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return False
+        return (time.time() - mtime) < max_age
 
     @staticmethod
     def _read_cache(path: Path) -> list[str]:
