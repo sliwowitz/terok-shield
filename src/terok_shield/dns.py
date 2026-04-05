@@ -46,12 +46,10 @@ class DnsResolver:
     ) -> list[str]:
         """Resolve profile entries and cache the result.
 
-        This is the single entry point for callers.  The flow:
-
-        1. If the cache is fresh, return it immediately.
-        2. Otherwise split entries into domains and raw IPs/CIDRs.
-        3. Resolve the domains via dig (A + AAAA).
-        4. Combine raw IPs with resolved IPs, write cache, return.
+        Profiles mix domain names with literal IPs/CIDRs because domains
+        are more stable for allowlists (CDN addresses rotate), but some
+        targets are only reachable by address.  This method handles both:
+        domains go through ``dig``, literals pass through unchanged.
 
         Args:
             entries: Domain names and/or raw IPs from composed profiles.
@@ -64,7 +62,6 @@ class DnsResolver:
         if self._cache_fresh(cache_path, max_age):
             return self._read_cache(cache_path)
 
-        # Profiles mix domains and literal IPs — split so we only resolve the domains
         domains, raw_ips = self._split_entries(entries)
         resolved = self.resolve_domains(domains)
         all_ips = raw_ips + resolved
