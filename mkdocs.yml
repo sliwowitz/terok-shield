@@ -104,7 +104,7 @@ nav:
     - Security & Design: security.md
     - Architecture: design.md
     - Contributing: developer.md
-    - Code Quality: quality_report.md
+    - Code Metrics: quality_report.md
     - CI Workflow Map: ci_map.md
     - Module Map: module_map.md
     - Integration Test Map: test_map.md
