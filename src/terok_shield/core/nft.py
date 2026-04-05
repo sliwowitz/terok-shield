@@ -41,8 +41,8 @@ class RulesetBuilder:
     Security boundary: only stdlib + nft_constants imports.
     All inputs validated before interpolation.
 
-    Binds ``dns`` and ``loopback_ports`` once at construction -- these
-    were previously threaded as parameters to every function call.
+    Binds ``dns`` and ``loopback_ports`` once at construction so
+    callers do not repeat them on every generation or verification call.
     """
 
     def __init__(
