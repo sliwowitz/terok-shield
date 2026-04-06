@@ -6,7 +6,7 @@
 import pytest
 
 from terok_shield.core.nft import RulesetBuilder
-from terok_shield.core.nft_constants import BYPASS_LOG_PREFIX
+from terok_shield.core.nft_constants import BLOCKED_LOG_PREFIX, BYPASS_LOG_PREFIX
 
 from ..testnet import EXPECTED_PRIVATE_RANGES, IPV6_CLOUDFLARE, LINK_LOCAL_DNS, TEST_IP1, TEST_IP2
 
@@ -99,13 +99,14 @@ class TestRulesetBuilderBuildBlock:
         """Block ruleset includes blocked nflog prefix."""
         builder = RulesetBuilder()
         rs = builder.build_block()
-        assert "TEROK_SHIELD_BLOCKED" in rs
+        assert BLOCKED_LOG_PREFIX in rs
 
     def test_has_no_allow_sets(self) -> None:
         """Block ruleset has no allowlist sets."""
         builder = RulesetBuilder()
         rs = builder.build_block()
         assert "allow_v4" not in rs
+        assert "allow_v6" not in rs
 
 
 class TestRulesetBuilderVerify:
