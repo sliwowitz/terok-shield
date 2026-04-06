@@ -86,8 +86,42 @@ class TestRulesetBuilderBuildBypass:
         assert EXPECTED_PRIVATE_RANGES[0] not in rs  # 10.0.0.0/8
 
 
+class TestRulesetBuilderBuildBlock:
+    """Test RulesetBuilder.build_block()."""
+
+    def test_produces_drop_policy(self) -> None:
+        """Block ruleset has drop policy."""
+        builder = RulesetBuilder()
+        rs = builder.build_block()
+        assert "policy drop" in rs
+
+    def test_includes_blocked_log(self) -> None:
+        """Block ruleset includes blocked nflog prefix."""
+        builder = RulesetBuilder()
+        rs = builder.build_block()
+        assert "TEROK_SHIELD_BLOCKED" in rs
+
+    def test_has_no_allow_sets(self) -> None:
+        """Block ruleset has no allowlist sets."""
+        builder = RulesetBuilder()
+        rs = builder.build_block()
+        assert "allow_v4" not in rs
+
+
 class TestRulesetBuilderVerify:
     """Test RulesetBuilder verification methods."""
+
+    def test_verify_block_passes(self) -> None:
+        """verify_block returns empty for valid block ruleset."""
+        builder = RulesetBuilder()
+        rs = builder.build_block()
+        assert builder.verify_block(rs) == []
+
+    def test_verify_block_fails_on_hook(self) -> None:
+        """verify_block fails on hook ruleset (has allow sets)."""
+        builder = RulesetBuilder()
+        rs = builder.build_hook()
+        assert len(builder.verify_block(rs)) > 0
 
     def test_verify_hook_passes(self) -> None:
         """verify_hook returns empty for valid hook ruleset."""
