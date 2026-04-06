@@ -248,6 +248,8 @@ def test_hook_ruleset_terminal_rule_is_standalone_log_reject() -> None:
 def test_hook_ruleset_deny_sets_use_denied_prefix() -> None:
     """Deny set rules use the DENIED prefix (not BLOCKED)."""
     ruleset = hook_ruleset()
+    assert "@deny_v4" in ruleset, "deny_v4 set rule missing from ruleset"
+    assert "@deny_v6" in ruleset, "deny_v6 set rule missing from ruleset"
     # Deny set rules have a daddr selector + DENIED prefix
     lines = [ln for ln in ruleset.splitlines() if "@deny_v4" in ln or "@deny_v6" in ln]
     assert all(_DENY_LOG_PREFIX in ln for ln in lines)
