@@ -1813,13 +1813,13 @@ tomli-w = ">=1.0,<2.0"
 
 [[package]]
 name = "terok-dbus"
-version = "0.5.4"
+version = "0.5.5"
 description = "D-Bus desktop notification package for terok"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["dbus"]
 files = [
-    {file = "terok_dbus-0.5.4-py3-none-any.whl", hash = "sha256:ec40197c72fb2bf42bfe10f320e462ed2789ce4515b9f13c58a925ffc8386b63"},
+    {file = "terok_dbus-0.5.5-py3-none-any.whl", hash = "sha256:4452222a204608ded3ebcc1dd1131d54970d1a86151cc59a29913958be7e8ebf"},
 ]
 
 [package.dependencies]
@@ -1827,7 +1827,7 @@ dbus-fast = ">=2.0,<5.0"
 
 [package.source]
 type = "url"
-url = "https://github.com/terok-ai/terok-dbus/releases/download/v0.5.4/terok_dbus-0.5.4-py3-none-any.whl"
+url = "https://github.com/terok-ai/terok-dbus/releases/download/v0.5.5/terok_dbus-0.5.5-py3-none-any.whl"
 
 [[package]]
 name = "tomli"
@@ -2065,4 +2065,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "a9d6a13de27a3200d7252b4d2490449d8e0ef36f4eafd9f4789be67f793f439c"
+content-hash = "84834546048214a1b32bb6d9f2c5e4f783245b2ba067b406e891e1cf213da2d9"
