@@ -124,10 +124,10 @@ These annotations are set automatically by `terok-shield run` (or
 
 | Annotation | Value | Purpose |
 |------------|-------|---------|
-| `terok.shield.profiles` | Comma-separated names | Which profiles to apply |
+| `terok.shield.profiles` | Colon-separated names | Which profiles to apply |
 | `terok.shield.name` | Container name | Audit log identification |
 | `terok.shield.state_dir` | Absolute path | Where the hook finds its state bundle |
-| `terok.shield.loopback_ports` | Comma-separated ints | Ports for ruleset generation |
+| `terok.shield.loopback_ports` | Colon-separated ints | Ports for ruleset generation |
 | `terok.shield.version` | Integer | Bundle version (hard-fail on mismatch) |
 | `terok.shield.audit_enabled` | `true` / `false` | Whether to write audit logs |
 | `terok.shield.upstream_dns` | IP address | Upstream DNS forwarder for dnsmasq |
