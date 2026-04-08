@@ -19,8 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ── OCI annotation keys ─────────────────────────────────
 
 # Delimiter for list-valued annotations (profiles, loopback_ports).
-# Podman 4.x registers --annotation as StringSliceVar (pflag), which splits
-# values on commas.  Colons are safe across both Podman 4.x and 5.x.
+# Podman ≤4.9.x registers --annotation as StringSliceVar (pflag), which
+# splits values on commas.  Fixed in 5.0.0 (containers/podman#20945).
+# Colons are safe across all versions.
 ANNOTATION_LIST_SEP = ":"
 
 ANNOTATION_KEY = "terok.shield.profiles"
