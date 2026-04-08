@@ -346,6 +346,24 @@ def test_verdict_applied_signal_body() -> None:
     assert result == ["myapp", TEST_IP1, "myapp:1", "accept", True]
 
 
+def test_signal_wire_names_are_camelcase() -> None:
+    """Introspected signal member names must be CamelCase on the D-Bus wire.
+
+    Regression: dbus-fast defaults to the Python method name (snake_case)
+    unless ``@signal(name=...)`` overrides it.  The subscriber and the
+    Shield1 introspection XML both expect CamelCase.
+    """
+    bridge = mock.MagicMock()
+    iface = _ShieldInterface(bridge)
+    introspection = iface.introspect()
+    signal_names = {s.name for s in introspection.signals}
+    assert "ConnectionBlocked" in signal_names
+    assert "VerdictApplied" in signal_names
+    # Ensure no snake_case leaks through
+    assert "connection_blocked" not in signal_names
+    assert "verdict_applied" not in signal_names
+
+
 def test_verdict_method_delegates() -> None:
     """The verdict method body awaits bridge.submit_verdict."""
     bridge_mock = mock.MagicMock()
