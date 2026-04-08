@@ -29,6 +29,7 @@ from ..config import (
     ANNOTATION_AUDIT_ENABLED_KEY,
     ANNOTATION_DNS_TIER_KEY,
     ANNOTATION_KEY,
+    ANNOTATION_LIST_SEP,
     ANNOTATION_LOOPBACK_PORTS_KEY,
     ANNOTATION_NAME_KEY,
     ANNOTATION_STATE_DIR_KEY,
@@ -155,10 +156,10 @@ class HookMode:
             args += ["--volume", f"{state.resolv_conf_path(sd)}:/etc/resolv.conf:ro,Z"]
 
         # Annotations: profiles, name, state_dir, loopback_ports, version, dns
-        ports_str = ",".join(str(p) for p in self._config.loopback_ports)
+        ports_str = ANNOTATION_LIST_SEP.join(str(p) for p in self._config.loopback_ports)
         args += [
             "--annotation",
-            f"{ANNOTATION_KEY}={','.join(profiles)}",
+            f"{ANNOTATION_KEY}={ANNOTATION_LIST_SEP.join(profiles)}",
             "--annotation",
             f"{ANNOTATION_NAME_KEY}={container}",
             "--annotation",

@@ -18,6 +18,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ── OCI annotation keys ─────────────────────────────────
 
+# Delimiter for list-valued annotations (profiles, loopback_ports).
+# Colons instead of commas — some Podman builds (e.g. Nvidia's Ubuntu 24.04)
+# treat commas in annotation values as key=value pair separators.
+ANNOTATION_LIST_SEP = ":"
 
 ANNOTATION_KEY = "terok.shield.profiles"
 ANNOTATION_NAME_KEY = "terok.shield.name"
