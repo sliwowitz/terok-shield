@@ -11,8 +11,7 @@ from unittest import mock
 
 import pytest
 
-from terok_shield import ExecError, Shield, ShieldConfig, ShieldState
-from terok_shield import state
+from terok_shield import ExecError, Shield, ShieldConfig, ShieldState, state
 
 from ..testfs import NFT_BINARY
 from ..testnet import TEST_DOMAIN, TEST_IP1, TEST_IP2
