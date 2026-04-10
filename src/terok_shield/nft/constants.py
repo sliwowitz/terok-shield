@@ -41,7 +41,14 @@ IPV6_PRIVATE: tuple[str, ...] = (
 PRIVATE_RANGES: tuple[str, ...] = RFC1918 + IPV6_PRIVATE
 
 # ── slirp4netns defaults ──────────────────────────────
-SLIRP4NETNS_DNS = "10.0.2.3"  # slirp4netns default DNS forwarder
+# Gateway and DNS are deterministic offsets from the CIDR base address.
+# Only the --cidr flag can change them; the +2/+3 offsets are compile-time
+# constants in slirp4netns (DEFAULT_VHOST_OFFSET / DEFAULT_VNAMESERVER_OFFSET).
+# IPv6 is hardcoded at fd00::/64 with no override flag.
+SLIRP4NETNS_CIDR = "10.0.2.0/24"
+SLIRP4NETNS_GATEWAY = "10.0.2.2"  # CIDR base + 2
+SLIRP4NETNS_GATEWAY_V6 = "fd00::2"  # fd00:: + 2 (no --cidr6 exists)
+SLIRP4NETNS_DNS = "10.0.2.3"  # CIDR base + 3
 
 # ── dnsmasq defaults ─────────────────────────────────
 DNSMASQ_BIND = "127.0.0.1"  # dnsmasq listen address inside container
@@ -57,5 +64,4 @@ BLOCKED_LOG_PREFIX = "TEROK_SHIELD_BLOCKED"  # terminal default-deny (unclassifi
 DENIED_LOG_PREFIX = "TEROK_SHIELD_DENIED"  # explicit deny set (operator refused)
 PRIVATE_LOG_PREFIX = "TEROK_SHIELD_PRIVATE"
 ALLOWED_LOG_PREFIX = "TEROK_SHIELD_ALLOWED"
-BLOCKED_LOG_PREFIX = "TEROK_SHIELD_BLOCKED"
 BYPASS_LOG_PREFIX = "TEROK_SHIELD_BYPASS"
