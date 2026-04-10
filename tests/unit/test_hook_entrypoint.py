@@ -39,6 +39,12 @@ _ROUTE_NO_DEFAULT = (
     "eth0\t0A000000\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n"
 )
 
+# Default route with zero gateway (connected route, not a real gateway)
+_ROUTE_ZERO_GATEWAY = (
+    "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+    "eth0\t00000000\t00000000\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+)
+
 
 def _oci_json(
     pid: int = 42,
@@ -162,41 +168,73 @@ def test_find_binary_uses_which_or_falls_back(
 # ── _read_gateway ─────────────────────────────────────────────────────────────
 
 
-def test_read_gateway_returns_ip_for_default_route() -> None:
-    """_read_gateway() parses the default gateway from a slirp4netns routing table."""
+def test_parse_gateway_v4_returns_ip_for_default_route() -> None:
+    """_parse_gateway_v4() parses the default gateway from a slirp4netns routing table."""
     with mock.patch("terok_shield.resources.hook_entrypoint.Path") as mock_path_cls:
         mock_path_cls.return_value.read_text.return_value = _ROUTE_WITH_DEFAULT
-        gw = hook_entrypoint._read_gateway("42")
-
-    assert gw == "10.0.2.2"
+        assert hook_entrypoint._parse_gateway_v4("42") == "10.0.2.2"
 
 
-def test_read_gateway_returns_empty_when_no_default_route() -> None:
-    """_read_gateway() returns '' when there is no default (00000000 destination) route."""
+def test_parse_gateway_v4_returns_empty_when_no_default_route() -> None:
+    """_parse_gateway_v4() returns '' when no default route exists."""
     with mock.patch("terok_shield.resources.hook_entrypoint.Path") as mock_path_cls:
         mock_path_cls.return_value.read_text.return_value = _ROUTE_NO_DEFAULT
-        gw = hook_entrypoint._read_gateway("42")
-
-    assert gw == ""
+        assert hook_entrypoint._parse_gateway_v4("42") == ""
 
 
-def test_read_gateway_returns_empty_on_oserror() -> None:
-    """_read_gateway() returns '' when /proc/{pid}/net/route is unreadable."""
+def test_parse_gateway_v4_returns_empty_on_oserror() -> None:
+    """_parse_gateway_v4() returns '' when /proc/{pid}/net/route is unreadable."""
     with mock.patch("terok_shield.resources.hook_entrypoint.Path") as mock_path_cls:
         mock_path_cls.return_value.read_text.side_effect = OSError("no file")
-        gw = hook_entrypoint._read_gateway("42")
-
-    assert gw == ""
+        assert hook_entrypoint._parse_gateway_v4("42") == ""
 
 
-def test_read_gateway_returns_empty_on_malformed_hex() -> None:
-    """_read_gateway() returns '' when the gateway hex is malformed."""
+def test_parse_gateway_v4_returns_empty_on_malformed_hex() -> None:
+    """_parse_gateway_v4() returns '' when the gateway hex is malformed."""
     malformed = "Iface\tDestination\tGateway\neth0\t00000000\tZZZZZZZZ\n"
     with mock.patch("terok_shield.resources.hook_entrypoint.Path") as mock_path_cls:
         mock_path_cls.return_value.read_text.return_value = malformed
-        gw = hook_entrypoint._read_gateway("42")
+        assert hook_entrypoint._parse_gateway_v4("42") == ""
 
-    assert gw == ""
+
+def test_parse_gateway_v4_skips_zero_gateway() -> None:
+    """_parse_gateway_v4() returns '' for a connected route with gateway 0.0.0.0."""
+    with mock.patch("terok_shield.resources.hook_entrypoint.Path") as mock_path_cls:
+        mock_path_cls.return_value.read_text.return_value = _ROUTE_ZERO_GATEWAY
+        assert hook_entrypoint._parse_gateway_v4("42") == ""
+
+
+def test_read_gateway_retries_until_route_appears() -> None:
+    """_read_gateway() polls until slirp4netns populates the routing table."""
+    call_count = 0
+
+    def _delayed_route(*_a: object, **_kw: object) -> str:
+        nonlocal call_count
+        call_count += 1
+        return _ROUTE_WITH_DEFAULT if call_count >= 3 else _ROUTE_NO_DEFAULT
+
+    with (
+        mock.patch("terok_shield.resources.hook_entrypoint.Path") as mock_path_cls,
+        mock.patch("terok_shield.resources.hook_entrypoint.time.sleep"),
+    ):
+        mock_path_cls.return_value.read_text.side_effect = _delayed_route
+        assert hook_entrypoint._read_gateway("42") == "10.0.2.2"
+    assert call_count == 3
+
+
+def test_read_gateway_raises_on_timeout() -> None:
+    """_read_gateway() raises RuntimeError when no route appears within the timeout."""
+    with (
+        mock.patch("terok_shield.resources.hook_entrypoint.Path") as mock_path_cls,
+        mock.patch(
+            "terok_shield.resources.hook_entrypoint.time.monotonic",
+            side_effect=[0.0, 0.0, 6.0],  # start, first check, expired
+        ),
+        mock.patch("terok_shield.resources.hook_entrypoint.time.sleep"),
+        pytest.raises(RuntimeError, match="no default IPv4 route"),
+    ):
+        mock_path_cls.return_value.read_text.return_value = _ROUTE_NO_DEFAULT
+        hook_entrypoint._read_gateway("42")
 
 
 # ── _read_gateway_v6 ─────────────────────────────────────────────────────────

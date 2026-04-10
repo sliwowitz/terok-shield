@@ -29,6 +29,7 @@ import socket
 import struct
 import subprocess  # nosec B404
 import sys
+import time
 from pathlib import Path
 
 # These constants are intentionally duplicated from src/terok_shield/state.py
@@ -293,33 +294,32 @@ def _nsenter(pid: str, *cmd: str, stdin: str | None = None) -> None:
 # ── Gateway discovery ──────────────────────────────────
 
 
-def _read_gateway(pid: str) -> str:
-    """Read the default IPv4 gateway from the container's routing table.
+_GATEWAY_POLL_INTERVAL = 0.05  # 50 ms between retries
+_GATEWAY_POLL_TIMEOUT = 5.0  # give up after 5 s
 
-    Parses ``/proc/{pid}/net/route`` (the kernel routing table for the
-    container's network namespace).  Returns an empty string when no default
-    route is present (e.g. pasta mode) or when parsing fails — fail-closed:
-    the nft ruleset is still applied, gateway sets stay empty.
+
+def _parse_gateway_v4(pid: str) -> str:
+    """Parse the default IPv4 gateway from ``/proc/{pid}/net/route``.
+
+    Returns empty string when no default route is present or parsing fails.
     """
     try:
         for line in Path(f"/proc/{pid}/net/route").read_text().splitlines()[1:]:
             fields = line.split()
             if len(fields) >= 3 and fields[1] == "00000000":
                 gw = socket.inet_ntoa(struct.pack("=I", int(fields[2], 16)))
-                ipaddress.ip_address(gw)  # validate — raises ValueError if malformed
+                if ipaddress.ip_address(gw).is_unspecified:
+                    continue  # 0.0.0.0 = connected route, not a real gateway
                 return gw
     except (OSError, ValueError, struct.error):
         pass
     return ""
 
 
-def _read_gateway_v6(pid: str) -> str:
-    """Read the default IPv6 gateway from the container's routing table.
+def _parse_gateway_v6(pid: str) -> str:
+    """Parse the default IPv6 gateway from ``/proc/{pid}/net/ipv6_route``.
 
-    Parses ``/proc/{pid}/net/ipv6_route``.  Each line has 10 space-separated
-    hex fields; the default route has dest_net=32 zeros and prefix_len=00.
-    The nexthop (field index 4) is a 128-bit address stored as 32 hex chars.
-    Returns an empty string when no default route is present or parsing fails.
+    Returns empty string when no default route is present or parsing fails.
     """
     try:
         for line in Path(f"/proc/{pid}/net/ipv6_route").read_text().splitlines():
@@ -331,6 +331,38 @@ def _read_gateway_v6(pid: str) -> str:
     except (OSError, ValueError):
         pass
     return ""
+
+
+def _read_gateway(pid: str) -> str:
+    """Read the default IPv4 gateway, retrying until the route appears.
+
+    On rootless Podman the network backend (slirp4netns / pasta) may not
+    have populated the routing table yet when the ``createRuntime`` OCI
+    hook fires.  Poll briefly so the gateway set is populated before the
+    container process starts.
+
+    Raises ``RuntimeError`` after the timeout — a container without a
+    gateway cannot reach host services (gate, credential proxy).
+    """
+    deadline = time.monotonic() + _GATEWAY_POLL_TIMEOUT
+    while True:
+        if gw := _parse_gateway_v4(pid):
+            return gw
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"no default IPv4 route in /proc/{pid}/net/route after "
+                f"{_GATEWAY_POLL_TIMEOUT:.0f} s — network backend not ready"
+            )
+        time.sleep(_GATEWAY_POLL_INTERVAL)
+
+
+def _read_gateway_v6(pid: str) -> str:
+    """Read the default IPv6 gateway (best-effort, no retry).
+
+    IPv6 is optional — many setups are v4-only.  Returns empty string
+    when no default route is present.
+    """
+    return _parse_gateway_v6(pid)
 
 
 # ── Process identity ───────────────────────────────────
