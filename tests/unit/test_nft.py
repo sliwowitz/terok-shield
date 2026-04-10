@@ -23,6 +23,7 @@ from terok_shield.nft.constants import (
     RFC1918,
 )
 from terok_shield.nft.rules import (
+    RulesetBuilder,
     _is_v4,
     _safe_timeout,
     add_deny_elements_dual,
@@ -916,6 +917,13 @@ class TestGatewayPortRules:
         """hook_ruleset() with no loopback_ports produces no gateway rules."""
         rs = hook_ruleset(dns=SLIRP4NETNS_DNS, loopback_ports=())
         assert f"ip daddr {self._GW_V4} accept" not in rs
+
+    def test_swapped_gateway_families_rejected(self) -> None:
+        """RulesetBuilder rejects IPv6 in gateway_v4 and vice versa."""
+        with pytest.raises(ValueError, match="Expected IPv4"):
+            RulesetBuilder(gateway_v4="fd00::2")
+        with pytest.raises(ValueError, match="Expected IPv6"):
+            RulesetBuilder(gateway_v6="10.0.2.2")
 
 
 # ── _safe_timeout validation ─────────────────────────────
