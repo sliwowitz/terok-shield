@@ -667,8 +667,6 @@ def test_pre_start_writes_ruleset_nft(
     assert ruleset_file.is_file(), "pre_start() must write ruleset.nft"
     content = ruleset_file.read_text()
     assert "terok_shield" in content
-    # pasta mode: no gateway sets or literal IPs — gateways only for slirp4netns
-    assert "set gateway_v4" not in content
 
 
 def test_setup_global_hooks_non_sudo(tmp_path: Path) -> None:
