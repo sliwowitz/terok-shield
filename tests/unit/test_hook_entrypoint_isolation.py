@@ -38,6 +38,7 @@ class TestHookEntrypointImportIsolation:
             "struct",
             "subprocess",
             "sys",
+            "time",
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
