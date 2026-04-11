@@ -242,6 +242,9 @@ def bypass_ruleset(
     dns_af = "ip" if _is_v4(dns) else "ip6"
     set_v4 = _set_declaration("allow_v4", "ipv4_addr", set_timeout)
     set_v6 = _set_declaration("allow_v6", "ipv6_addr", set_timeout)
+    set_deny_v4 = _set_declaration("deny_v4", "ipv4_addr")
+    set_deny_v6 = _set_declaration("deny_v6", "ipv6_addr")
+    deny_rules = _deny_set_rules()
     private_rules = _private_range_rules()
     private_block = "" if allow_all else f"\n{private_rules}"
     bypass_log = (
@@ -251,6 +254,8 @@ def bypass_ruleset(
         table {NFT_TABLE} {{
             {set_v4}
             {set_v6}
+            {set_deny_v4}
+            {set_deny_v6}
 
             chain output {{
                 type filter hook output priority filter; policy accept;
@@ -258,6 +263,7 @@ def bypass_ruleset(
                 ct state established,related accept
                 udp dport 53 {dns_af} daddr {dns} accept
                 tcp dport 53 {dns_af} daddr {dns} accept{infra_block}\
+        {deny_rules}
         {bypass_log}{private_block}
             }}
 
@@ -521,10 +527,9 @@ def verify_bypass_ruleset(nft_output: str, *, allow_all: bool = False) -> list[s
             errors.append(f"{chain} chain missing")
     if BYPASS_LOG_PREFIX not in nft_output:
         errors.append("bypass nflog prefix missing")
-    if "allow_v4" not in nft_output:
-        errors.append("allow_v4 set missing")
-    if "allow_v6" not in nft_output:
-        errors.append("allow_v6 set missing")
+    for sname in ("allow_v4", "allow_v6", "deny_v4", "deny_v6"):
+        if sname not in nft_output:
+            errors.append(f"{sname} set missing")
     if not allow_all:
         errors.extend(_verify_private_blocks(nft_output))
     return errors
