@@ -60,6 +60,7 @@ def _propagate_pythonpath(env: dict[str, str]) -> None:
     paths = sys.path if site in sys.path else [site, *sys.path]
     env["PYTHONPATH"] = os.pathsep.join(paths)
 
+
 def bus_name_for_container(short_id: str) -> str:
     """Derive the per-container well-known bus name.
 

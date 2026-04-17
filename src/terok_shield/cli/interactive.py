@@ -668,6 +668,7 @@ def _propagate_pythonpath(env: dict[str, str]) -> None:
     paths = sys.path if site in sys.path else [site, *sys.path]
     env["PYTHONPATH"] = os.pathsep.join(paths)
 
+
 # ── Helpers ──────────────────────────────────────────────
 
 # Module-level stop flag, set by signal handler.
