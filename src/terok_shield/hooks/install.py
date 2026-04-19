@@ -18,6 +18,7 @@ from pathlib import Path
 from ..config import ANNOTATION_KEY
 
 _ENTRYPOINT_NAME = "terok-shield-hook"
+_BRIDGE_HOOK_NAME = "terok-shield-bridge-hook"
 _HOOK_STAGES = ("createRuntime", "poststop")
 
 
@@ -39,6 +40,32 @@ def install_hooks(*, hook_entrypoint: Path, hooks_dir: Path) -> None:
     hook_entrypoint.parent.mkdir(parents=True, exist_ok=True)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     _write_hook_files(hook_entrypoint, hooks_dir)
+
+
+def install_bridge_hooks(*, hook_entrypoint: Path, hooks_dir: Path) -> None:
+    """Register the bridge hook pair that spawns and reaps the NFLOG reader.
+
+    Reuses the shared entrypoint script (no extra binary on disk) —
+    dispatches to reader spawn/reap via ``args[0] = terok-shield-bridge-hook``.
+    Users who install without this (``terok setup --no-dbus-bridge``) only
+    see the nft hook pair in their hooks directory.
+
+    Args:
+        hook_entrypoint: The already-installed shared entrypoint script path.
+        hooks_dir: Directory for hook JSON descriptors.
+    """
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    _write_bridge_hook_files(hook_entrypoint, hooks_dir)
+
+
+def uninstall_bridge_hooks(*, hooks_dir: Path) -> None:
+    """Remove bridge hook JSON files, leaving the nft hook pair intact.
+
+    Args:
+        hooks_dir: Directory the hook JSON files live in.
+    """
+    for stage in _HOOK_STAGES:
+        (hooks_dir / f"terok-shield-bridge-{stage}.json").unlink(missing_ok=True)
 
 
 def setup_global_hooks(target_dir: Path, *, use_sudo: bool = False) -> None:
@@ -108,8 +135,16 @@ def _write_hook_files(
     hook_entrypoint.chmod(0o755)
     ref_path = str(json_entrypoint_path or hook_entrypoint)
     for stage in _HOOK_STAGES:
-        hook_json = _generate_hook_json(ref_path, stage)
+        hook_json = _generate_hook_json(ref_path, stage, _ENTRYPOINT_NAME)
         (hooks_dir / f"terok-shield-{stage}.json").write_text(hook_json)
+
+
+def _write_bridge_hook_files(hook_entrypoint: Path, hooks_dir: Path) -> None:
+    """Write the bridge-hook JSON pair that references the shared entrypoint."""
+    ref_path = str(hook_entrypoint)
+    for stage in _HOOK_STAGES:
+        hook_json = _generate_hook_json(ref_path, stage, _BRIDGE_HOOK_NAME)
+        (hooks_dir / f"terok-shield-bridge-{stage}.json").write_text(hook_json)
 
 
 # ── Generators ──────────────────────────────────────────
@@ -124,16 +159,22 @@ def _generate_entrypoint() -> str:
     return (Path(__file__).parent.parent / "resources" / "hook_entrypoint.py").read_text()
 
 
-def _generate_hook_json(entrypoint: str, stage: str) -> str:
+def _generate_hook_json(entrypoint: str, stage: str, hook_name: str) -> str:
     """Build an OCI hook JSON descriptor for a given lifecycle stage.
+
+    *hook_name* goes into ``args[0]`` so the shared entrypoint can
+    dispatch by inspecting ``sys.argv[0]`` — the nft pair uses
+    ``terok-shield-hook`` and the bridge pair uses
+    ``terok-shield-bridge-hook``.
 
     Args:
         entrypoint: Absolute path to the hook entrypoint script.
         stage: OCI hook stage (``createRuntime`` or ``poststop``).
+        hook_name: Program name that the entrypoint receives as ``argv[0]``.
     """
     hook = {
         "version": "1.0.0",
-        "hook": {"path": entrypoint, "args": ["terok-shield-hook", stage]},
+        "hook": {"path": entrypoint, "args": [hook_name, stage]},
         "when": {"annotations": {ANNOTATION_KEY: ".*"}},
         "stages": [stage],
     }
