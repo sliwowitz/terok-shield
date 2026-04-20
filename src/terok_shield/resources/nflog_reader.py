@@ -22,6 +22,7 @@ execute anywhere without depending on the terok-shield virtual environment.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -93,19 +94,34 @@ class BlockedEvent:
 
 
 def main() -> None:
-    """Parse arguments, enter the container netns if needed, and run the reader."""
+    """Two-stage entry: outer bridges, inner reads NFLOG inside the container netns.
+
+    The reader can't do everything in one process because the two things it
+    needs — NFLOG delivery and a live D-Bus session — sit in incompatible
+    namespaces.  NFLOG is per-netns, so the socket bind has to happen inside
+    the container's netns, which on rootless podman means going through
+    ``podman unshare`` into ``NS_ROOTLESS``.  But the user's session
+    ``dbus-daemon`` lives in the host user namespace, and its SO_PEERCRED
+    auth rejects connections originating from ``NS_ROOTLESS``.
+
+    So the process splits: the outer (re-entered with ``_NSENTER_ENV`` unset,
+    still in the host userns) spawns the inner via ``podman unshare nsenter``
+    and bridges its JSON stream.  The inner (re-entered with
+    ``_NSENTER_ENV=1``, inside the container netns) only does NFLOG → JSON —
+    it never touches D-Bus itself.
+    """
     args = _parse_args()
     logging.basicConfig(level=logging.INFO, format="nflog-reader: %(message)s")
 
     if os.environ.get(_NSENTER_ENV) != "1":
-        _reexec_inside_container_netns(args.state_dir, args.container, args.emit)
+        _run_outer(args.state_dir, args.container, args.emit)
         return
 
-    emitter = _select_emitter(args.emit)
+    # Inner: NFLOG → JSON.  Ignore --emit; we never emit D-Bus from in here.
     session = ReaderSession(
         state_dir=args.state_dir,
         container=args.container,
-        emitter=emitter,
+        emitter=JsonEmitter(),
     )
     session.run()
 
@@ -288,11 +304,6 @@ class JsonEmitter:
         )
 
 
-def _select_emitter(mode: str) -> EventEmitter:
-    """Resolve the ``--emit`` flag to the matching emitter implementation."""
-    return DbusEmitter() if mode == "dbus" else JsonEmitter()
-
-
 # ── NFLOG socket / parsing ────────────────────────────────────────────
 
 
@@ -466,16 +477,16 @@ class _DomainCache:
         }
 
 
-# ── nsenter re-exec ───────────────────────────────────────────────────
+# ── Outer: spawn inner, bridge its events to the target channel ─────
 
 
-def _reexec_inside_container_netns(state_dir: Path, container: str, emit: str) -> None:
-    """Re-enter this script inside the container's netns so NFLOG is reachable.
+def _run_outer(state_dir: Path, container: str, emit: str) -> None:
+    """Host-userns half: spawn the inner reader and forward its JSON events.
 
-    NFLOG is delivered per-netns; the reader must bind from inside the
-    container's network namespace.  ``podman unshare`` enters the persistent
-    rootless user namespace that owns the container netns (not the inner
-    userns) so ``CAP_NET_ADMIN`` is available for the NFLOG bind.
+    When *emit* is ``"dbus"``, parses each JSON line as it arrives and calls
+    ``dbus-send`` from here — where ``SO_PEERCRED`` against the session
+    dbus-daemon still succeeds.  When *emit* is ``"json"`` (fallback CLI),
+    the inner's stdout is passed straight through to our own stdout.
     """
     pid = _podman_container_pid(container)
     script = Path(__file__).resolve()
@@ -490,13 +501,70 @@ def _reexec_inside_container_netns(state_dir: Path, container: str, emit: str) -
         str(script),
         str(state_dir),
         container,
-        f"--emit={emit}",
+        "--emit=json",  # inner always emits JSON; outer wraps if needed
     ]
     env = {**os.environ, _NSENTER_ENV: "1"}
+
+    stdout = subprocess.PIPE if emit == "dbus" else None
+    proc = subprocess.Popen(cmd, env=env, stdout=stdout, text=True, bufsize=1)  # noqa: S603
+
+    # Forward SIGTERM/SIGINT to the inner so poststop → reader.pid → SIGTERM
+    # tears the whole pipeline down together.
+    def _on_stop(_signum: int, _frame: object) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+
+    signal.signal(signal.SIGTERM, _on_stop)
+    signal.signal(signal.SIGINT, _on_stop)
+
     try:
-        subprocess.run(cmd, env=env, check=True)  # noqa: S603
-    except subprocess.CalledProcessError as exc:
-        raise SystemExit(exc.returncode) from exc
+        if emit == "dbus":
+            _bridge_json_to_dbus(proc)
+        else:
+            proc.wait()
+    finally:
+        with contextlib.suppress(ProcessLookupError, subprocess.TimeoutExpired):
+            proc.terminate()
+            proc.wait(timeout=2)
+
+    if proc.returncode not in (0, None):
+        raise SystemExit(proc.returncode)
+
+
+def _bridge_json_to_dbus(proc: subprocess.Popen) -> None:
+    """Read inner's JSON lines and forward each to the host session bus."""
+    emitter = DbusEmitter()
+    assert proc.stdout is not None
+    for raw_line in proc.stdout:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            _log.warning("dropping malformed JSON from inner reader: %s", line)
+            continue
+        _forward_event(event, emitter)
+
+
+def _forward_event(event: dict, emitter: EventEmitter) -> None:
+    """Dispatch one parsed JSON event to the matching ``EventEmitter`` method."""
+    kind = event.get("type")
+    if kind == "pending":
+        emitter.connection_blocked(
+            BlockedEvent(
+                container=event["container"],
+                request_id=event["id"],
+                dest=event["dest"],
+                port=event["port"],
+                proto=event["proto"],
+                domain=event.get("domain", ""),
+            )
+        )
+    elif kind == "container_started":
+        emitter.container_started(event["container"])
+    elif kind == "container_exited":
+        emitter.container_exited(event["container"], reason=event.get("reason", ""))
 
 
 def _podman_container_pid(container: str) -> str:

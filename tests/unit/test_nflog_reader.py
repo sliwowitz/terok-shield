@@ -336,3 +336,106 @@ class _FakeSocket:
 
     def close(self) -> None:
         """No-op — present so ``ReaderSession.run``'s finally block can call it."""
+
+
+# ── Outer bridge: JSON → EventEmitter dispatch ───────────────────────
+
+
+class TestForwardEvent:
+    """``_forward_event`` maps the inner's JSON dialect onto the emitter protocol."""
+
+    def test_pending_dispatches_connection_blocked(self) -> None:
+        emitter = _RecordingEmitter()
+        reader._forward_event(
+            {
+                "type": "pending",
+                "container": "abc123def456",
+                "id": "abc123def456:7",
+                "dest": "1.2.3.4",
+                "port": 443,
+                "proto": 6,
+                "domain": "example.com",
+            },
+            emitter,
+        )
+        assert emitter.calls == [
+            (
+                "blocked",
+                reader.BlockedEvent(
+                    container="abc123def456",
+                    request_id="abc123def456:7",
+                    dest="1.2.3.4",
+                    port=443,
+                    proto=6,
+                    domain="example.com",
+                ),
+            )
+        ]
+
+    def test_container_started_and_exited_pass_through(self) -> None:
+        emitter = _RecordingEmitter()
+        reader._forward_event({"type": "container_started", "container": "x"}, emitter)
+        reader._forward_event(
+            {"type": "container_exited", "container": "x", "reason": "poststop"}, emitter
+        )
+        kinds = [k for k, _ in emitter.calls]
+        assert kinds == ["started", "exited"]
+
+    def test_missing_domain_defaults_to_empty_string(self) -> None:
+        emitter = _RecordingEmitter()
+        reader._forward_event(
+            {
+                "type": "pending",
+                "container": "c",
+                "id": "c:1",
+                "dest": "9.9.9.9",
+                "port": 80,
+                "proto": 6,
+            },
+            emitter,
+        )
+        assert emitter.calls[0][1].domain == ""
+
+    def test_unknown_type_is_ignored(self) -> None:
+        """Future event kinds the outer doesn't understand must not crash the bridge."""
+        emitter = _RecordingEmitter()
+        reader._forward_event({"type": "something-new", "whatever": 1}, emitter)
+        assert emitter.calls == []
+
+
+class TestBridgeJsonToDbus:
+    """``_bridge_json_to_dbus`` streams lines from the inner subprocess stdout."""
+
+    def test_forwards_each_valid_line(self) -> None:
+        lines = [
+            json.dumps({"type": "container_started", "container": "c"}) + "\n",
+            json.dumps(
+                {
+                    "type": "pending",
+                    "container": "c",
+                    "id": "c:1",
+                    "dest": "1.1.1.1",
+                    "port": 443,
+                    "proto": 6,
+                    "domain": "one.one",
+                }
+            )
+            + "\n",
+        ]
+        proc = mock.MagicMock(stdout=iter(lines))
+        emitter = _RecordingEmitter()
+        with mock.patch.object(reader, "DbusEmitter", return_value=emitter):
+            reader._bridge_json_to_dbus(proc)
+        assert [k for k, _ in emitter.calls] == ["started", "blocked"]
+
+    def test_skips_blank_and_malformed_lines(self) -> None:
+        lines = [
+            "\n",
+            "not-json\n",
+            json.dumps({"type": "container_started", "container": "c"}) + "\n",
+        ]
+        proc = mock.MagicMock(stdout=iter(lines))
+        emitter = _RecordingEmitter()
+        with mock.patch.object(reader, "DbusEmitter", return_value=emitter):
+            reader._bridge_json_to_dbus(proc)
+        assert [k for k, _ in emitter.calls] == ["started"]

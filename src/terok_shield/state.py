@@ -35,7 +35,7 @@ Bundle layout::
 
 from pathlib import Path
 
-BUNDLE_VERSION = 6
+BUNDLE_VERSION = 7
 """Integer version of the state bundle layout.
 
 Bumped whenever the file layout changes in a backwards-incompatible way.
@@ -46,6 +46,9 @@ changes even if the file layout itself is unchanged, so that
 ``terok setup`` rewrites the script instead of short-circuiting.
 
 Version history:
+    7 — bridge hook captures reader stdout+stderr into ``reader.log``
+        under the state dir; reader splits into host-userns outer and
+        container-netns inner.  File layout adds ``reader.log``.
     6 — hook-argv dispatch protocol: bridge hook adds ``--bridge`` flag
         between ``args[0]`` and the stage; file layout unchanged.
     5 — add the optional bridge hook pair and ``reader.pid`` lifecycle file.

@@ -39,7 +39,7 @@ def _oci_json(state_dir: str, container_id: str = _CONTAINER_ID) -> str:
             "pid": 42,
             "annotations": {
                 "terok.shield.state_dir": state_dir,
-                "terok.shield.version": "6",
+                "terok.shield.version": "7",
             },
         }
     )
@@ -100,7 +100,7 @@ class TestBridgeDispatch:
                 "pid": 42,
                 "annotations": {
                     "terok.shield.state_dir": str(tmp_path),
-                    "terok.shield.version": "6",
+                    "terok.shield.version": "7",
                 },
             }
         )
