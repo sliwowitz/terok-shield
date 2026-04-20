@@ -325,19 +325,32 @@ def _spawn_reader(sd: Path, container_id: str) -> None:
     if _reader_alive(pid_file):
         return  # idempotent respawn
     env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": bus}
+    # Keep the reader's stderr capturable — a silent /dev/null here means any
+    # startup crash (nsenter failure, missing binary, NFLOG bind denial) leaves
+    # the operator with a live pid file and nothing to diagnose from.
+    err_log = sd / "reader.log"
+    try:
+        err_fh = err_log.open("ab")
+    except OSError as exc:
+        _log(f"terok-shield bridge hook: cannot open reader.log: {exc}")
+        return
     try:
         proc = subprocess.Popen(  # nosec B603
             ["/usr/bin/python3", str(reader), str(sd), container_id, "--emit=dbus"],
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=err_fh,
+            stderr=err_fh,
             start_new_session=True,
             close_fds=True,
         )
     except OSError as exc:
+        err_fh.close()
         _log(f"terok-shield bridge hook: reader spawn failed: {exc}")
         return
+    finally:
+        # Popen dup'd the fd; the parent's copy is safe to close.
+        err_fh.close()
     pid_file.write_text(f"{proc.pid}\n")
 
 
