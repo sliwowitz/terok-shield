@@ -222,7 +222,7 @@ class HookMode:
         block that then recovers on retry.
         """
         if tier == DnsTier.DNSMASQ:
-            domains, raw_ips = _split_domains_ips(entries)
+            domains, _raw_ips = _split_domains_ips(entries)
             state.profile_domains_path(sd).write_text("\n".join(domains) + "\n" if domains else "")
             self._dns.resolve_and_cache(entries, state.profile_allowed_path(sd))
         else:

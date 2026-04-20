@@ -323,7 +323,8 @@ class SocketEmitter:
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(str(self._path))
-        except (OSError, ConnectionError):
+        except OSError:
+            # ConnectionError subclasses OSError — covered by the single catch.
             if not self._warned_unreachable:
                 _log.warning("hub event socket unreachable at %s", self._path)
                 self._warned_unreachable = True
@@ -339,7 +340,8 @@ class SocketEmitter:
         line = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
         try:
             self._sock.sendall(line)
-        except (OSError, ConnectionError) as exc:
+        except OSError as exc:
+            # ConnectionError subclasses OSError — covered by the single catch.
             _log.warning("hub event socket send failed: %s", exc)
             self.close()
 

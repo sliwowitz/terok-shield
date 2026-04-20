@@ -93,7 +93,12 @@ def main() -> int:
 
     try:
         if is_bridge:
-            return _bridge_main(oci, sd, stage, log_path)
+            _bridge_main(oci, sd, stage, log_path)
+            # The bridge path is soft-fail by contract: every failure mode
+            # logs and returns normally.  Container start must never be
+            # blocked by a missing reader / unreachable session bus / Popen
+            # error — clearance degrades to "no events", nothing else.
+            return 0
         return _nft_main(oci, sd, stage, log_path)
     except Exception as exc:  # noqa: BLE001
         _log(f"terok-shield hook: {exc}", log_path)
@@ -143,28 +148,33 @@ def _nft_main(oci: dict, sd: Path, stage: str, log_path: Path) -> int:
     return 0
 
 
-def _bridge_main(oci: dict, sd: Path, stage: str, log_path: Path) -> int:
+def _bridge_main(oci: dict, sd: Path, stage: str, log_path: Path) -> None:
     """Spawn or reap the per-container NFLOG reader for the clearance flow.
 
     Soft-fails on every error path: a missing reader script, an unreachable
-    session bus, or a failed Popen all log and return 0 so the container
-    still starts.  The clearance UI degrades gracefully to the pre-bridge
-    behaviour (no events, no desktop notifications) in those cases.
+    session bus, or a failed Popen all log and return normally so the
+    container still starts.  The clearance UI degrades gracefully to the
+    pre-bridge behaviour (no events, no desktop notifications) in those
+    cases.
+
+    Returns ``None`` — caller (``main``) supplies the ``0`` exit code
+    unconditionally for the bridge path.  A different return value per
+    outcome would suggest container start is contingent on this function
+    succeeding; it isn't.
     """
     if stage == "poststop":
         _reap_reader(sd)
-        return 0
+        return
     if stage != "createRuntime":
         _log(f"terok-shield bridge hook: unknown stage {stage!r}", log_path)
-        return 0  # unknown stage is a no-op for the optional bridge path
+        return  # unknown stage is a no-op for the optional bridge path
 
     container_id = str(oci.get("id") or "")[:12]
     if not container_id:
         _log("terok-shield bridge hook: missing container id — skipping reader", log_path)
-        return 0
+        return
 
     _spawn_reader(sd, container_id)
-    return 0
 
 
 # ── OCI state parsing ──────────────────────────────────
@@ -334,8 +344,12 @@ def _spawn_reader(sd: Path, container_id: str) -> None:
     except OSError as exc:
         _log(f"terok-shield bridge hook: cannot open reader.log: {exc}")
         return
+    # nosec B603, NOSONAR S6350 — argv is literal + paths we constructed
+    # from validated OCI annotations (shield's own pre_start wrote them) and
+    # the 12-char container id we already pulled out of the OCI state
+    # earlier in this hook.  No shell involvement, no untrusted tokens.
     try:
-        proc = subprocess.Popen(  # nosec B603
+        proc = subprocess.Popen(  # noqa: S603
             ["/usr/bin/python3", str(reader), str(sd), container_id, "--emit=socket"],
             env=env,
             stdin=subprocess.DEVNULL,
@@ -509,8 +523,12 @@ def _nsenter(pid: str, *cmd: str, stdin: str | None = None) -> None:
     else:
         # In NS_INIT (shell): enter NS_ROOTLESS first via podman unshare.
         ns_cmd = [_find_podman(), "unshare", _find_nsenter(), "-n", "-t", pid, "--", *cmd]
+    # nosec B603, NOSONAR S6350 — ns_cmd is built from _find_*() resolved
+    # binary paths and the container PID (already validated as a bare
+    # integer-like string when the hook parsed OCI state).  No shell
+    # involvement, no untrusted tokens.
     try:
-        result = subprocess.run(  # nosec B603
+        result = subprocess.run(  # noqa: S603
             ns_cmd,
             input=stdin,
             text=True,

@@ -114,20 +114,28 @@ class ClearanceSession:
                 readable, _, _ = select.select([reader_fd, stdin_fd], [], [], 0.5)
             except (OSError, ValueError):
                 return
-            if reader_fd in readable:
-                reader_buf, eof = _read_into_buffer(reader_fd, reader_buf)
-                for line in _drain_lines(reader_buf):
-                    self._handle_reader_event(line)
-                reader_buf = _tail_partial(reader_buf)
-                if eof:
-                    return
-            if stdin_fd in readable:
-                stdin_buf, stdin_eof = _read_into_buffer(stdin_fd, stdin_buf)
-                for line in _drain_lines(stdin_buf):
-                    self._handle_operator_input(line.strip())
-                stdin_buf = _tail_partial(stdin_buf)
-                if stdin_eof:
-                    return
+            reader_buf, reader_eof = self._drain_reader(reader_fd, reader_buf, readable)
+            stdin_buf, stdin_eof = self._drain_stdin(stdin_fd, stdin_buf, readable)
+            if reader_eof or stdin_eof:
+                return
+
+    def _drain_reader(self, reader_fd: int, buf: str, readable: list[int]) -> tuple[str, bool]:
+        """Dispatch any reader-side events sitting in the pipe; carry over partials."""
+        if reader_fd not in readable:
+            return buf, False
+        buf, eof = _read_into_buffer(reader_fd, buf)
+        for line in _drain_lines(buf):
+            self._handle_reader_event(line)
+        return _tail_partial(buf), eof
+
+    def _drain_stdin(self, stdin_fd: int, buf: str, readable: list[int]) -> tuple[str, bool]:
+        """Dispatch any operator keystrokes sitting on stdin; carry over partials."""
+        if stdin_fd not in readable:
+            return buf, False
+        buf, eof = _read_into_buffer(stdin_fd, buf)
+        for line in _drain_lines(buf):
+            self._handle_operator_input(line.strip())
+        return _tail_partial(buf), eof
 
     def _handle_reader_event(self, line: str) -> None:
         """Enqueue a pending event and prompt if it's the head of the queue."""
