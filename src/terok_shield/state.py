@@ -35,7 +35,7 @@ Bundle layout::
 
 from pathlib import Path
 
-BUNDLE_VERSION = 8
+BUNDLE_VERSION = 9
 """Integer version of the state bundle layout.
 
 Bumped whenever the file layout changes in a backwards-incompatible way.
@@ -46,6 +46,10 @@ changes even if the file layout itself is unchanged, so that
 ``terok setup`` rewrites the script instead of short-circuiting.
 
 Version history:
+    9 — pre_start on dnsmasq tier seeds profile.allowed with resolved
+        domains so the initial allow set has permanent entries before
+        dnsmasq starts.  Reader swaps lifetime-dedup for a 30 s rolling
+        window so dismissed notifications can re-surface.
     8 — reader emits JSON over a unix socket to the host-userns hub
         (``--emit=socket``) instead of ``dbus-send`` from NS_ROOTLESS;
         hook spawn line and reader script both need refreshing.

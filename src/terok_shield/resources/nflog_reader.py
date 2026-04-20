@@ -41,6 +41,7 @@ import signal
 import socket
 import struct
 import subprocess  # nosec B404 — dbus-send is a trusted host binary
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -145,11 +146,24 @@ def _events_socket_path() -> Path:
 class ReaderSession:
     """Orchestrates the container's block-event stream for the clearance flow.
 
-    Owns the NFLOG socket, the dedup set, the domain cache, and the signal
-    handler.  Lives for the container's lifetime: emits ``ContainerStarted``
-    on open, streams ``ConnectionBlocked`` for each unique-destination block,
-    and emits ``ContainerExited`` on SIGTERM or NFLOG close.
+    Owns the NFLOG socket, a rolling dedup window, the domain cache, and the
+    signal handler.  Lives for the container's lifetime: emits
+    ``ContainerStarted`` on open, streams ``ConnectionBlocked`` for each
+    unique-destination block within a dedup window, and emits
+    ``ContainerExited`` on SIGTERM or NFLOG close.
+
+    The dedup window rate-limits retries within a single application's
+    attempt (TCP SYN retransmits, wget's own retries, etc.) without
+    suppressing legitimate re-attempts after the operator has actually seen
+    and dismissed the first notification.  Notification-level dedup
+    (replacing still-visible notifications) belongs to the notifier.
     """
+
+    #: Seconds for which a dest stays muted after one emission.  Short enough
+    #: that the operator can re-trigger a block and get a fresh notification
+    #: when the previous one auto-dismissed; long enough that a single wget
+    #: retry burst doesn't produce a pile of duplicate signals.
+    _DEDUP_WINDOW_S = 30.0
 
     def __init__(self, *, state_dir: Path, container: str, emitter: EventEmitter) -> None:
         """Prepare the session; the socket is opened in :meth:`run`."""
@@ -157,7 +171,7 @@ class ReaderSession:
         self._container = container
         self._emitter = emitter
         self._domain_cache = _DomainCache(state_dir)
-        self._seen: set[str] = set()
+        self._last_emit: dict[str, float] = {}
         self._next_id = 1
         self._stop_requested = False
 
@@ -177,7 +191,7 @@ class ReaderSession:
             self._emitter.container_exited(self._container, reason=self._exit_reason())
 
     def _loop(self, sock: socket.socket) -> None:
-        """Read NFLOG messages, dedupe by dest IP, emit one signal per novelty."""
+        """Read NFLOG messages, dedupe per rolling window, emit one signal per hit."""
         self._domain_cache.refresh()
         while not self._stop_requested:
             try:
@@ -186,10 +200,12 @@ class ReaderSession:
                 return
             if sock not in readable:
                 continue
+            now = time.monotonic()
             for event in _drain(sock):
-                if event.dest in self._seen:
+                last = self._last_emit.get(event.dest)
+                if last is not None and now - last < self._DEDUP_WINDOW_S:
                     continue
-                self._seen.add(event.dest)
+                self._last_emit[event.dest] = now
                 self._emit_connection_blocked(event)
 
     def _emit_connection_blocked(self, event: _RawBlockEvent) -> None:

@@ -208,13 +208,23 @@ class HookMode:
         return args
 
     def _resolve_and_write_allowlists(self, sd: Path, tier: DnsTier, entries: list[str]) -> None:
-        """Resolve profile entries and write allowlist files for the detected tier."""
+        """Resolve profile entries and write allowlist files for the detected tier.
+
+        On the ``dnsmasq`` tier we still pre-resolve every domain in addition
+        to writing it into ``profile.domains``.  The pre-resolved IPs go into
+        ``profile.allowed`` as permanent (``timeout 0``) set members, so the
+        initial allow set is usable from the container's first packet — while
+        dnsmasq continues to add more IPs on-demand as new A/AAAA records come
+        back.  Without the pre-resolution, the first connection for an
+        allowlisted domain races dnsmasq's first ``--nftset`` add, and a
+        low-TTL record can slip out of the set between the ``reply`` and the
+        application's ``connect()``, producing an intermittent first-hit
+        block that then recovers on retry.
+        """
         if tier == DnsTier.DNSMASQ:
-            # dnsmasq handles domain→IP resolution at runtime via --nftset.
-            # Split entries: write domains for dnsmasq config, resolve only raw IPs.
             domains, raw_ips = _split_domains_ips(entries)
             state.profile_domains_path(sd).write_text("\n".join(domains) + "\n" if domains else "")
-            self._dns.resolve_and_cache(raw_ips, state.profile_allowed_path(sd))
+            self._dns.resolve_and_cache(entries, state.profile_allowed_path(sd))
         else:
             # dig/getent tier: resolve everything to IPs at pre-start time.
             self._dns.resolve_and_cache(entries, state.profile_allowed_path(sd))
