@@ -890,6 +890,57 @@ def test_build_config_state_dir_override_and_default_container(
     )
 
 
+def test_build_config_prefers_podman_annotation(
+    force_hook_mode: None,
+    tmp_path: Path,
+) -> None:
+    """When a container is given and it carries the state_dir annotation, use it.
+
+    Covers the bottom-up resolution path: the hub (or any other external
+    consumer) knows only the container name, but terok-sandbox wrote the
+    per-task state_dir into the ``terok.shield.state_dir`` annotation at
+    pre_start — so shield can recover it via ``podman inspect`` rather
+    than guessing with the legacy ``<state-root>/containers/<name>``
+    layout, which never matches terok's ``tasks/<name>/<id>/shield``.
+    """
+    annotated = tmp_path / "sandbox-live" / "tasks" / "t" / "abc" / "shield"
+    annotated.mkdir(parents=True)
+    with mock.patch(
+        "terok_shield.cli.main.resolve_container_state_dir", return_value=annotated
+    ) as resolver:
+        config = _build_config("my-ctr")
+    resolver.assert_called_once_with("my-ctr")
+    assert config.state_dir == annotated
+
+
+def test_build_config_falls_back_when_annotation_missing(
+    force_hook_mode: None,
+    state_root: Path,
+) -> None:
+    """Without an annotation (old containers, non-terok demos), keep the legacy nesting."""
+    with (
+        mock.patch("terok_shield.cli.main.resolve_container_state_dir", return_value=None),
+        mock.patch("terok_shield.cli.main._resolve_state_root", return_value=state_root),
+    ):
+        config = _build_config("my-ctr")
+    assert config.state_dir == state_root.resolve() / "containers" / "my-ctr"
+
+
+def test_build_config_state_dir_override_wins_over_annotation(
+    force_hook_mode: None,
+    state_root: Path,
+) -> None:
+    """Explicit --state-dir takes precedence — the operator said so on purpose."""
+    with mock.patch(
+        "terok_shield.cli.main.resolve_container_state_dir",
+        return_value=Path("/ignored/annotated/path"),
+    ) as resolver:
+        config = _build_config("my-ctr", state_dir_override=state_root)
+    # override short-circuits the annotation lookup entirely.
+    resolver.assert_not_called()
+    assert config.state_dir == state_root.resolve() / "containers" / "my-ctr"
+
+
 def test_build_config_rejects_unknown_mode(
     isolated_roots: tuple[Path, Path],
     write_config: Callable[[str], Path],

@@ -23,6 +23,7 @@ from typing import Any
 
 from .. import ExecError, Shield, ShieldConfig, ShieldMode
 from ..config import ShieldFileConfig
+from ..container import resolve_state_dir as resolve_container_state_dir
 from ..validation import validate_container_name
 from .registry import COMMANDS, ArgDef, CommandDef
 
@@ -421,17 +422,10 @@ def _build_config(
     # Resolve mode
     mode = _auto_detect_mode() if file_cfg.mode == "auto" else ShieldMode.HOOK
 
-    # State dir
-    if state_dir_override:
-        state_root = state_dir_override.resolve()
-    else:
-        state_root = _resolve_state_root().resolve()
-
     if container:
         validate_container_name(container)
-        state_dir = state_root / "containers" / container
-    else:
-        state_dir = state_root / "containers" / "_default"
+
+    state_dir = _resolve_state_dir(container, state_dir_override)
 
     # Profiles dir
     profiles_dir = _resolve_config_root() / "profiles"
@@ -444,6 +438,43 @@ def _build_config(
         audit_enabled=file_cfg.audit.enabled,
         profiles_dir=profiles_dir,
     )
+
+
+def _resolve_state_dir(container: str | None, state_dir_override: Path | None) -> Path:
+    """Return the per-container state directory, preferring the podman annotation.
+
+    Resolution order, first hit wins:
+
+    1. ``--state-dir`` flag, if the caller explicitly pointed the CLI at
+       a state root.  The root is still nested under
+       ``containers/<name>`` for compatibility with old standalone
+       demos.  A caller that explicitly asked for a custom root is
+       assumed to know what layout lives there.
+    2. ``podman inspect`` of *container*'s ``terok.shield.state_dir``
+       annotation.  This is the path shield's own ``pre_start()``
+       writes and the OCI hook reads — the single source of truth for
+       terok-sandbox-managed containers.  Keeps standalone shield CLI
+       calls (after the hub or a TUI verdict) operating on the same
+       state the container was launched with, even though shield has
+       no way to walk terok's task tree.
+    3. Legacy default: ``<state-root>/containers/<name>`` under
+       ``TEROK_SHIELD_STATE_DIR`` / ``$XDG_STATE_HOME``.  Covers
+       containers launched without an annotation (tests, ad-hoc demos).
+    """
+    if state_dir_override is not None:
+        state_root = state_dir_override.resolve()
+        return _nest_container(state_root, container)
+    if container:
+        annotated = resolve_container_state_dir(container)
+        if annotated is not None:
+            return annotated
+    state_root = _resolve_state_root().resolve()
+    return _nest_container(state_root, container)
+
+
+def _nest_container(state_root: Path, container: str | None) -> Path:
+    """Derive a per-container state dir from a state root (legacy nesting)."""
+    return state_root / "containers" / (container or "_default")
 
 
 def _load_config_file() -> ShieldFileConfig:
