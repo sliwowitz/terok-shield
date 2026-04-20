@@ -913,17 +913,24 @@ def test_build_config_prefers_podman_annotation(
     assert config.state_dir == annotated
 
 
-def test_build_config_falls_back_when_annotation_missing(
+def test_build_config_errors_when_annotation_missing(
     force_hook_mode: None,
     state_root: Path,
 ) -> None:
-    """Without an annotation (old containers, non-terok demos), keep the legacy nesting."""
+    """Without an annotation, fail loudly — don't silently target a state dir that can't exist.
+
+    Shielded containers must go through ``shield.pre_start()`` (directly
+    or via sandbox), which writes the annotation.  If it's absent, the
+    container either wasn't shielded or was launched by a third party
+    that forgot to carry the annotation through — guessing a layout in
+    either case writes to / operates on the wrong state.
+    """
     with (
         mock.patch("terok_shield.cli.main.resolve_container_state_dir", return_value=None),
         mock.patch("terok_shield.cli.main._resolve_state_root", return_value=state_root),
+        pytest.raises(SystemExit, match="no 'terok.shield.state_dir' annotation"),
     ):
-        config = _build_config("my-ctr")
-    assert config.state_dir == state_root.resolve() / "containers" / "my-ctr"
+        _build_config("my-ctr")
 
 
 def test_build_config_state_dir_override_wins_over_annotation(
@@ -991,15 +998,22 @@ def test_build_config_rejects_container_path_traversal(
         _build_config(FORBIDDEN_TRAVERSAL, state_dir_override=state_root)
 
 
-def test_build_config_uses_resolved_state_root_when_not_overridden(
+def test_build_config_uses_resolved_state_root_when_no_container(
     force_hook_mode: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without --state-dir, _build_config() resolves the state root from the environment."""
+    """Commands without a container (install-hooks, setup) keep the env-based state root.
+
+    When a container *is* given, shield refuses to guess — it requires
+    either ``--state-dir`` or a ``terok.shield.state_dir`` annotation.
+    But commands that aren't per-container still resolve the state root
+    from ``TEROK_SHIELD_STATE_DIR`` and use its ``containers/_default``
+    slot for generic bookkeeping.
+    """
     monkeypatch.setenv("TEROK_SHIELD_STATE_DIR", str(FAKE_STATE_DIR))
     monkeypatch.setenv("TEROK_SHIELD_CONFIG_DIR", str(NONEXISTENT_DIR / "config"))
-    config = _build_config("ctr")
-    assert config.state_dir == FAKE_STATE_DIR / "containers" / "ctr"
+    config = _build_config()
+    assert config.state_dir == FAKE_STATE_DIR / "containers" / "_default"
 
 
 # ── setup command tests ──────────────────────────────────
