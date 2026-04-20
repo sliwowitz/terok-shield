@@ -24,6 +24,8 @@ import pytest
 
 from terok_shield.resources import hook_entrypoint
 
+from ..testfs import HOOK_ENTRYPOINT_PATH
+
 _CONTAINER_ID = "c" * 64
 _SHORT_ID = _CONTAINER_ID[:12]
 
@@ -55,9 +57,7 @@ def _run_bridge(payload: str, *, stage: str) -> int:
     """
     with (
         mock.patch.object(hook_entrypoint.sys, "stdin", io.StringIO(payload)),
-        mock.patch.object(
-            hook_entrypoint.sys, "argv", ["/opt/terok-shield-hook", "--bridge", stage]
-        ),
+        mock.patch.object(hook_entrypoint.sys, "argv", [HOOK_ENTRYPOINT_PATH, "--bridge", stage]),
     ):
         return hook_entrypoint.main()
 

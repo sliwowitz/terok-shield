@@ -21,7 +21,8 @@ import pytest
 
 from terok_shield.resources import nflog_reader as reader
 
-from ..testnet import TEST_DOMAIN, TEST_IP1
+from ..testfs import DNSMASQ_LOG_FILENAME, READER_EVENTS_SOCK_FILENAME
+from ..testnet import TEST_DOMAIN, TEST_IP1, TEST_IP99
 
 # ── Packet-format helpers (pure constructors for fixtures) ────────────
 
@@ -139,7 +140,7 @@ class TestParseMessages:
 
     def test_mixed_batch_returns_only_blocked(self) -> None:
         blocked = _nflog_message("BLOCKED", _ipv4_tcp_packet(dest=TEST_IP1, port=80))
-        allowed = _nflog_message("ALLOWED", _ipv4_tcp_packet(dest="192.0.2.99", port=443))
+        allowed = _nflog_message("ALLOWED", _ipv4_tcp_packet(dest=TEST_IP99, port=443))
         events = reader._parse_messages(blocked + allowed)
         assert len(events) == 1
         assert events[0].dest == TEST_IP1
@@ -169,7 +170,7 @@ class TestDomainCache:
     """``_DomainCache`` reverses dnsmasq replies back to a domain."""
 
     def test_lookup_returns_domain_after_refresh(self, tmp_path: Path) -> None:
-        log = tmp_path / "dnsmasq.log"
+        log = tmp_path / DNSMASQ_LOG_FILENAME
         log.write_text(f"reply {TEST_DOMAIN} is {TEST_IP1}\n")
         cache = reader._DomainCache(tmp_path)
         cache.refresh()
@@ -224,7 +225,7 @@ class TestSocketEmitter:
     """``SocketEmitter`` streams JSON lines to the hub's unix socket."""
 
     def test_connection_blocked_sends_pending_line(self, tmp_path: Path) -> None:
-        path = tmp_path / "events.sock"
+        path = tmp_path / READER_EVENTS_SOCK_FILENAME
         fake_sock = mock.MagicMock()
         emitter = reader.SocketEmitter(path)
         with mock.patch.object(reader.socket, "socket", return_value=fake_sock):
@@ -247,7 +248,7 @@ class TestSocketEmitter:
         assert payload["domain"] == TEST_DOMAIN
 
     def test_connects_lazily_and_reuses_socket(self, tmp_path: Path) -> None:
-        path = tmp_path / "events.sock"
+        path = tmp_path / READER_EVENTS_SOCK_FILENAME
         fake_sock = mock.MagicMock()
         emitter = reader.SocketEmitter(path)
         with mock.patch.object(reader.socket, "socket", return_value=fake_sock) as make_sock:
@@ -257,7 +258,7 @@ class TestSocketEmitter:
         assert fake_sock.sendall.call_count == 2
 
     def test_reconnects_after_send_failure(self, tmp_path: Path) -> None:
-        path = tmp_path / "events.sock"
+        path = tmp_path / READER_EVENTS_SOCK_FILENAME
         first = mock.MagicMock()
         first.sendall.side_effect = ConnectionResetError("peer gone")
         second = mock.MagicMock()
@@ -270,7 +271,7 @@ class TestSocketEmitter:
 
     def test_hub_unreachable_is_non_fatal(self, tmp_path: Path) -> None:
         """If the hub socket isn't there, sends are silently dropped after one warning."""
-        path = tmp_path / "events.sock"
+        path = tmp_path / READER_EVENTS_SOCK_FILENAME
         fake_sock = mock.MagicMock()
         fake_sock.connect.side_effect = FileNotFoundError(path)
         emitter = reader.SocketEmitter(path)
@@ -280,7 +281,7 @@ class TestSocketEmitter:
         assert fake_sock.sendall.call_count == 0
 
     def test_close_disconnects(self, tmp_path: Path) -> None:
-        path = tmp_path / "events.sock"
+        path = tmp_path / READER_EVENTS_SOCK_FILENAME
         fake_sock = mock.MagicMock()
         emitter = reader.SocketEmitter(path)
         with mock.patch.object(reader.socket, "socket", return_value=fake_sock):
