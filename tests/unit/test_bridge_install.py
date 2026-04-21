@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest import mock
 
 from terok_shield.hooks.install import (
     install_bridge_hooks,
@@ -14,6 +15,7 @@ from terok_shield.hooks.install import (
     uninstall_bridge_hooks,
 )
 from terok_shield.hooks.reader_install import install_reader_resource
+from terok_shield.paths import reader_script_path
 
 from ..testfs import BIN_DIR_NAME, HOOK_ENTRYPOINT_NAME, HOOKS_DIR_NAME
 
@@ -140,3 +142,31 @@ class TestInstallReaderResource:
         content = dest.read_text()
         assert "import terok_shield" not in content
         assert "from terok_shield" not in content
+
+    def test_default_dest_uses_reader_script_path(self, tmp_path: Path) -> None:
+        """``install_reader_resource()`` with no args picks the canonical XDG path."""
+        env = {"XDG_DATA_HOME": str(tmp_path), "HOME": str(tmp_path)}
+        with mock.patch.dict("os.environ", env, clear=False):
+            installed = install_reader_resource()
+        assert installed == tmp_path / "terok-shield" / "nflog-reader.py"
+        assert installed.is_file()
+
+
+# ── reader_script_path ────────────────────────────────────────────────
+
+
+class TestReaderScriptPath:
+    """``reader_script_path`` resolves the canonical on-disk reader location."""
+
+    def test_respects_xdg_data_home(self, tmp_path: Path) -> None:
+        with mock.patch.dict("os.environ", {"XDG_DATA_HOME": str(tmp_path)}, clear=False):
+            assert reader_script_path() == tmp_path / "terok-shield" / "nflog-reader.py"
+
+    def test_falls_back_to_home_local_share(self, tmp_path: Path) -> None:
+        env = {"HOME": str(tmp_path)}
+        with mock.patch.dict("os.environ", env, clear=False):
+            import os as _os
+
+            _os.environ.pop("XDG_DATA_HOME", None)
+            expected = tmp_path / ".local" / "share" / "terok-shield" / "nflog-reader.py"
+            assert reader_script_path() == expected

@@ -318,7 +318,7 @@ def _is_our_dnsmasq(pid_int: int, conf_path: Path) -> bool:
     except OSError:
         return False
     args = raw.rstrip(b"\x00").split(b"\x00")
-    if not args:
+    if not args:  # pragma: no cover — bytes.split() never returns an empty list
         return False
     exe = args[0]
     return (exe == b"dnsmasq" or exe.endswith(b"/dnsmasq")) and conf_arg in args
