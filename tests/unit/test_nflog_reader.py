@@ -143,6 +143,25 @@ class TestSelectEmitter:
         assert isinstance(reader._select_emitter("socket"), reader.SocketEmitter)
 
 
+class TestIsNoiseDest:
+    """``_is_noise_dest`` filters IPv6 link-local multicast only."""
+
+    def test_ff02_address_is_noise(self) -> None:
+        assert reader._is_noise_dest(IPV6_MCAST_ALL_ROUTERS) is True
+        assert reader._is_noise_dest(IPV6_MCAST_MLDV2) is True
+
+    def test_regular_ipv6_is_not_noise(self) -> None:
+        """A public IPv6 destination must surface normally."""
+        assert reader._is_noise_dest("2001:db8::1") is False
+
+    def test_ipv4_is_not_noise(self) -> None:
+        assert reader._is_noise_dest(TEST_IP1) is False
+
+    def test_non_address_string_is_not_noise(self) -> None:
+        """Unparseable input maps to False so malformed data falls through to emit."""
+        assert reader._is_noise_dest("not-an-ip") is False
+
+
 class TestEventsSocketPath:
     """``_events_socket_path`` honours XDG, falls back to /run/user/<uid>."""
 
