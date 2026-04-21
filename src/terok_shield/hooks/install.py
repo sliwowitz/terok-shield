@@ -18,6 +18,12 @@ from pathlib import Path
 from ..config import ANNOTATION_KEY
 
 _ENTRYPOINT_NAME = "terok-shield-hook"
+_BRIDGE_HOOK_NAME = "terok-shield-bridge-hook"
+# The entrypoint dispatches to the bridge branch when this token is the first
+# positional argv after the script path.  WORKAROUND(shebang-argv0-stripped):
+# shebang scripts lose the exec-supplied argv[0], so we cannot dispatch by the
+# conventional ``args[0]`` program name alone — see hook_entrypoint.py header.
+_BRIDGE_DISPATCH_FLAG = "--bridge"
 _HOOK_STAGES = ("createRuntime", "poststop")
 
 
@@ -39,6 +45,34 @@ def install_hooks(*, hook_entrypoint: Path, hooks_dir: Path) -> None:
     hook_entrypoint.parent.mkdir(parents=True, exist_ok=True)
     hooks_dir.mkdir(parents=True, exist_ok=True)
     _write_hook_files(hook_entrypoint, hooks_dir)
+
+
+def install_bridge_hooks(*, hook_entrypoint: Path, hooks_dir: Path) -> None:
+    """Register the bridge hook pair that spawns and reaps the NFLOG reader.
+
+    Reuses the shared entrypoint script (no extra binary on disk) —
+    dispatch to the reader spawn/reap branch rides on a ``--bridge``
+    positional flag in ``args`` (see ``_BRIDGE_DISPATCH_FLAG`` for why
+    the seemingly-more-natural ``args[0]`` program name can't be used).
+    Users who install without this (``terok setup --no-dbus-bridge``) only
+    see the nft hook pair in their hooks directory.
+
+    Args:
+        hook_entrypoint: The already-installed shared entrypoint script path.
+        hooks_dir: Directory for hook JSON descriptors.
+    """
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    _write_bridge_hook_files(hook_entrypoint, hooks_dir)
+
+
+def uninstall_bridge_hooks(*, hooks_dir: Path) -> None:
+    """Remove bridge hook JSON files, leaving the nft hook pair intact.
+
+    Args:
+        hooks_dir: Directory the hook JSON files live in.
+    """
+    for stage in _HOOK_STAGES:
+        (hooks_dir / f"terok-shield-bridge-{stage}.json").unlink(missing_ok=True)
 
 
 def setup_global_hooks(target_dir: Path, *, use_sudo: bool = False) -> None:
@@ -108,8 +142,16 @@ def _write_hook_files(
     hook_entrypoint.chmod(0o755)
     ref_path = str(json_entrypoint_path or hook_entrypoint)
     for stage in _HOOK_STAGES:
-        hook_json = _generate_hook_json(ref_path, stage)
+        hook_json = _generate_hook_json(ref_path, stage, _ENTRYPOINT_NAME, bridge=False)
         (hooks_dir / f"terok-shield-{stage}.json").write_text(hook_json)
+
+
+def _write_bridge_hook_files(hook_entrypoint: Path, hooks_dir: Path) -> None:
+    """Write the bridge-hook JSON pair that references the shared entrypoint."""
+    ref_path = str(hook_entrypoint)
+    for stage in _HOOK_STAGES:
+        hook_json = _generate_hook_json(ref_path, stage, _BRIDGE_HOOK_NAME, bridge=True)
+        (hooks_dir / f"terok-shield-bridge-{stage}.json").write_text(hook_json)
 
 
 # ── Generators ──────────────────────────────────────────
@@ -124,16 +166,26 @@ def _generate_entrypoint() -> str:
     return (Path(__file__).parent.parent / "resources" / "hook_entrypoint.py").read_text()
 
 
-def _generate_hook_json(entrypoint: str, stage: str) -> str:
+def _generate_hook_json(entrypoint: str, stage: str, hook_name: str, *, bridge: bool) -> str:
     """Build an OCI hook JSON descriptor for a given lifecycle stage.
+
+    *hook_name* is cosmetic (the kernel's shebang loader discards the
+    exec-supplied ``argv[0]``) but is kept so ``ps`` still shows a
+    recognizable name.  *bridge* is what actually drives dispatch in the
+    entrypoint: bridge hooks prepend the ``--bridge`` flag, which the
+    shebang loader preserves as ``sys.argv[1]``.
 
     Args:
         entrypoint: Absolute path to the hook entrypoint script.
         stage: OCI hook stage (``createRuntime`` or ``poststop``).
+        hook_name: Cosmetic program name placed at ``args[0]``.
+        bridge: When True, prepend ``--bridge`` so the entrypoint
+            dispatches to the reader spawn/reap branch.
     """
+    args = [hook_name, _BRIDGE_DISPATCH_FLAG, stage] if bridge else [hook_name, stage]
     hook = {
         "version": "1.0.0",
-        "hook": {"path": entrypoint, "args": ["terok-shield-hook", stage]},
+        "hook": {"path": entrypoint, "args": args},
         "when": {"annotations": {ANNOTATION_KEY: ".*"}},
         "stages": [stage],
     }

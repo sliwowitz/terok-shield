@@ -20,6 +20,7 @@ directly.  When the hook is run from a normal shell (NS_INIT, uid != 0),
 first — mirroring ``SubprocessRunner.nft_via_nsenter()`` in ``run.py``.
 """
 
+import contextlib
 import json
 import os
 import pwd
@@ -27,19 +28,46 @@ import shutil
 import signal
 import subprocess  # nosec B404
 import sys
+import time
 from pathlib import Path
 
 # These constants are intentionally duplicated from src/terok_shield/state.py
 # so this script stays stdlib-only (no terok_shield imports).  Keep in sync:
-#   _BUNDLE_VERSION  ↔  state.BUNDLE_VERSION
-#   "ruleset.nft"    ↔  state.ruleset_path()
-#   "dnsmasq.conf"   ↔  state.dnsmasq_conf_path()
-#   "dnsmasq.pid"    ↔  state.dnsmasq_pid_path()
-#   "container.id"   ↔  state.container_id_path()
+#   _BUNDLE_VERSION       ↔  state.BUNDLE_VERSION
+#   _RULESET_NAME         ↔  state.ruleset_path()
+#   _DNSMASQ_CONF_NAME    ↔  state.dnsmasq_conf_path()
+#   _DNSMASQ_PID_NAME     ↔  state.dnsmasq_pid_path()
+#   _CONTAINER_ID_NAME    ↔  state.container_id_path()
+#   _READER_PID_NAME      ↔  state.reader_pid_path()
+# (``reader.log`` is bridge-local — no state.py counterpart.)
 _ANN_STATE_DIR = "terok.shield.state_dir"
 _ANN_VERSION = "terok.shield.version"
-_BUNDLE_VERSION = 4
+_BUNDLE_VERSION = 9
 _TABLE = "inet terok_shield"
+_RULESET_NAME = "ruleset.nft"
+_DNSMASQ_CONF_NAME = "dnsmasq.conf"
+_DNSMASQ_PID_NAME = "dnsmasq.pid"
+_CONTAINER_ID_NAME = "container.id"
+_READER_PID_NAME = "reader.pid"
+_READER_LOG_NAME = "reader.log"
+
+# ── Bridge-hook dispatch ──────────────────────────────
+# Dispatch between the nft + dnsmasq pair and the optional bridge pair
+# happens via an explicit ``--bridge`` token in the hook JSON ``args``
+# (``args[1]`` in the JSON, ``sys.argv[1]`` after shebang rewriting).
+# WORKAROUND(shebang-argv0-stripped): the kernel's shebang loader
+# (``fs/binfmt_script.c``) substitutes the original ``argv[0]`` with the
+# script path before ``env`` re-execs Python — so ``args[0]`` from the
+# hook JSON (the conventional program name) is *not* visible to the
+# entrypoint.  Dispatching by ``sys.argv[0].name`` would route both hook
+# kinds to the same branch.  Remove the workaround if the entrypoint is
+# ever compiled to a real binary (shebangs no longer apply).
+_BRIDGE_DISPATCH_FLAG = "--bridge"
+
+# SIGTERM→SIGKILL grace: how long to wait for the reader to exit cleanly
+# after poststop sends SIGTERM.  10 × 0.2s poll intervals = 2s total.
+_REAP_POLL_INTERVAL_S = 0.2
+_REAP_POLL_TICKS = 10
 
 # WORKAROUND(selinux-nft-stdin): nft runs as iptables_t (SELinux domain),
 # which cannot read files in data_home_t (~/.local/share/…).  Piping the
@@ -53,54 +81,57 @@ _TABLE = "inet terok_shield"
 
 
 def main() -> int:
-    """OCI hook entry point: dispatch to createRuntime or poststop handler."""
+    """OCI hook entry point: dispatch by explicit role flag and stage."""
     _bootstrap_env()
-    stage = sys.argv[1] if len(sys.argv) > 1 else "createRuntime"
+    is_bridge, stage = _parse_dispatch(sys.argv[1:])
     try:
         oci = json.load(sys.stdin)
     except ValueError as exc:
         _log(f"terok-shield hook: bad OCI state: {exc}")
         return 1
 
-    if not isinstance(oci, dict):
-        _log("terok-shield hook: OCI state must be a JSON object")
-        return 1
-
-    ann = oci.get("annotations", {})
-    if not isinstance(ann, dict):
-        _log("terok-shield hook: annotations must be a JSON object")
-        return 1
-
-    sd_str = ann.get(_ANN_STATE_DIR, "")
-    if not sd_str:
-        _log("terok-shield hook: missing state_dir annotation")
-        return 1
-    try:
-        _p = Path(sd_str)
-        if not _p.is_absolute():
-            raise ValueError(f"state_dir must be absolute: {sd_str!r}")
-        sd = _p.resolve()
-    except (TypeError, ValueError, OSError) as exc:
-        _log(f"terok-shield hook: invalid state_dir: {exc}")
+    sd = _state_dir_from_oci(oci)
+    if sd is None:
         return 1
 
     # All subsequent errors go to <state_dir>/hook-error.log so they survive
     # even when the OCI runtime does not forward the hook's stderr.
     log_path = sd / "hook-error.log"
 
-    # poststop cleanup must run regardless of bundle-version — a container that was
-    # started before a terok-shield upgrade still needs its dnsmasq reaped on stop.
     try:
-        if stage == "poststop":
-            _poststop(sd)
+        if is_bridge:
+            _bridge_main(oci, sd, stage, log_path)
+            # The bridge path is soft-fail by contract: every failure mode
+            # logs and returns normally.  Container start must never be
+            # blocked by a missing reader / unreachable session bus / Popen
+            # error — clearance degrades to "no events", nothing else.
             return 0
-        if stage != "createRuntime":
-            _log(f"terok-shield hook: unknown stage {stage!r}", log_path)
-            return 1
+        return _nft_main(oci, sd, stage, log_path)
     except Exception as exc:  # noqa: BLE001
         _log(f"terok-shield hook: {exc}", log_path)
         return 1
 
+
+def _parse_dispatch(argv_tail: list[str]) -> tuple[bool, str]:
+    """Split the post-script argv into a bridge-flag and a stage name."""
+    is_bridge = bool(argv_tail) and argv_tail[0] == _BRIDGE_DISPATCH_FLAG
+    remaining = argv_tail[1:] if is_bridge else argv_tail
+    stage = remaining[0] if remaining else "createRuntime"
+    return is_bridge, stage
+
+
+def _nft_main(oci: dict, sd: Path, stage: str, log_path: Path) -> int:
+    """Apply the nft ruleset and (optionally) dnsmasq at the right stage."""
+    # poststop cleanup must run regardless of bundle-version — a container that was
+    # started before a terok-shield upgrade still needs its dnsmasq reaped on stop.
+    if stage == "poststop":
+        _poststop(sd)
+        return 0
+    if stage != "createRuntime":
+        _log(f"terok-shield hook: unknown stage {stage!r}", log_path)
+        return 1
+
+    ann = oci.get("annotations") or {}
     ver = ann.get(_ANN_VERSION, "")
     if not ver or str(ver) != str(_BUNDLE_VERSION):
         _log(
@@ -108,23 +139,79 @@ def main() -> int:
             log_path,
         )
         return 1
-    try:
-        pid = str(oci.get("pid") or "")
-        if not pid:
-            _log("terok-shield hook: missing pid in OCI state", log_path)
-            return 1
 
-        # Persist container ID for D-Bus bridge bus name derivation.
-        # The OCI state includes "id" (full 64-char hex); store the short form.
-        container_id = str(oci.get("id") or "")
-        if container_id:
-            (sd / "container.id").write_text(container_id[:12] + "\n")
-
-        _createruntime(pid, sd)
-    except Exception as exc:  # noqa: BLE001
-        _log(f"terok-shield hook: {exc}", log_path)
+    pid = str(oci.get("pid") or "")
+    if not pid:
+        _log("terok-shield hook: missing pid in OCI state", log_path)
         return 1
+
+    # Persist container ID for D-Bus bridge bus-name derivation.
+    # The OCI state includes "id" (full 64-char hex); store the short form.
+    container_id = str(oci.get("id") or "")
+    if container_id:
+        (sd / _CONTAINER_ID_NAME).write_text(container_id[:12] + "\n")
+
+    _createruntime(pid, sd)
     return 0
+
+
+def _bridge_main(oci: dict, sd: Path, stage: str, log_path: Path) -> None:
+    """Spawn or reap the per-container NFLOG reader for the clearance flow.
+
+    Soft-fails on every error path: a missing reader script, an unreachable
+    session bus, or a failed Popen all log and return normally so the
+    container still starts.  The clearance UI degrades gracefully to the
+    pre-bridge behaviour (no events, no desktop notifications) in those
+    cases.
+
+    Returns ``None`` — caller (``main``) supplies the ``0`` exit code
+    unconditionally for the bridge path.  A different return value per
+    outcome would suggest container start is contingent on this function
+    succeeding; it isn't.
+    """
+    if stage == "poststop":
+        _reap_reader(sd)
+        return
+    if stage != "createRuntime":
+        _log(f"terok-shield bridge hook: unknown stage {stage!r}", log_path)
+        return  # unknown stage is a no-op for the optional bridge path
+
+    container_id = str(oci.get("id") or "")[:12]
+    if not container_id:
+        _log("terok-shield bridge hook: missing container id — skipping reader", log_path)
+        return
+
+    _spawn_reader(sd, container_id)
+
+
+# ── OCI state parsing ──────────────────────────────────
+
+
+def _state_dir_from_oci(oci: object) -> Path | None:
+    """Extract the ``terok.shield.state_dir`` annotation as an absolute Path.
+
+    Returns ``None`` (and logs) on any validation failure so callers can
+    early-exit without hand-written boilerplate.
+    """
+    if not isinstance(oci, dict):
+        _log("terok-shield hook: OCI state must be a JSON object")
+        return None
+    ann = oci.get("annotations") or {}
+    if not isinstance(ann, dict):
+        _log("terok-shield hook: annotations must be a JSON object")
+        return None
+    sd_str = ann.get(_ANN_STATE_DIR, "")
+    if not sd_str:
+        _log("terok-shield hook: missing state_dir annotation")
+        return None
+    try:
+        path = Path(sd_str)
+        if not path.is_absolute():
+            raise ValueError(f"state_dir must be absolute: {sd_str!r}")
+        return path.resolve()
+    except (TypeError, ValueError, OSError) as exc:
+        _log(f"terok-shield hook: invalid state_dir: {exc}")
+        return None
 
 
 # ── Stage handlers ─────────────────────────────────────
@@ -145,7 +232,7 @@ def _createruntime(pid: str, sd: Path) -> None:
     except OSError:
         raise RuntimeError(f"network namespace file missing for pid {pid}: {ns_net}")
 
-    ruleset = sd / "ruleset.nft"
+    ruleset = sd / _RULESET_NAME
     if not ruleset.exists():
         raise RuntimeError(f"ruleset.nft not found: {ruleset}")
     nft = _find_nft()
@@ -170,11 +257,18 @@ def _start_container_dnsmasq(pid: str, sd: Path) -> None:
     clears stale PID file, then verifies the new PID file and process
     identity after start.
     """
-    dnsmasq_conf = sd / "dnsmasq.conf"
+    dnsmasq_conf = sd / _DNSMASQ_CONF_NAME
     if not dnsmasq_conf.exists():
         return
 
-    pid_file = sd / "dnsmasq.pid"
+    pid_file = sd / _DNSMASQ_PID_NAME
+    # Idempotent: if a dnsmasq is already running against our conf (because the
+    # hook fired twice — restart, re-dispatch, sibling hook re-entry, etc.),
+    # don't try to bind port 53 again.  Verifying pid + conf-arg avoids hitting
+    # an unrelated process that happens to hold the recycled PID.
+    if _our_dnsmasq_alive(pid_file, dnsmasq_conf):
+        return
+
     # Remove stale PID file so the post-launch check is not fooled
     # by a leftover from a previous run (mirrors dnsmasq.launch()).
     try:
@@ -205,8 +299,8 @@ def _poststop(sd: Path) -> None:
     to avoid hitting an unrelated process when the original dnsmasq PID is
     recycled after container stop.
     """
-    pid_file = sd / "dnsmasq.pid"
-    conf_path = sd / "dnsmasq.conf"
+    pid_file = sd / _DNSMASQ_PID_NAME
+    conf_path = sd / _DNSMASQ_CONF_NAME
     if not pid_file.exists():
         return
     try:
@@ -223,6 +317,198 @@ def _poststop(sd: Path) -> None:
         os.kill(pid_int, signal.SIGTERM)
     except OSError:
         pass
+
+
+# ── Reader lifecycle (spawn / reap per container) ──────
+
+
+def _spawn_reader(sd: Path, container_id: str) -> None:
+    """Start the NFLOG reader for *container_id* as a detached child.
+
+    No-op when the reader script is missing (``--no-dbus-bridge`` installs)
+    or the operator's session bus is unreachable (headless host).  Safe to
+    call repeatedly — a second call while the prior reader is still alive
+    is treated as a no-op via the ``reader.pid`` liveness check.
+    """
+    reader = _reader_script_path()
+    if not reader.exists():
+        _log(f"terok-shield bridge hook: nflog-reader missing at {reader} — rerun `terok setup`")
+        return
+    bus = _session_bus_address()
+    if bus is None:
+        _log("terok-shield bridge hook: no session bus reachable — skipping reader")
+        return
+    pid_file = sd / _READER_PID_NAME
+    if _reader_alive(pid_file):
+        return  # idempotent respawn
+    env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": bus}
+    # Keep the reader's stderr capturable — a silent /dev/null here means any
+    # startup crash (nsenter failure, missing binary, NFLOG bind denial) leaves
+    # the operator with a live pid file and nothing to diagnose from.
+    err_log = sd / _READER_LOG_NAME
+    try:
+        err_fh = err_log.open("ab")
+    except OSError as exc:
+        _log(f"terok-shield bridge hook: cannot open reader.log: {exc}")
+        return
+    # argv is a fixed literal plus paths we constructed from validated OCI
+    # annotations (shield's own pre_start wrote them) and the 12-char
+    # container id we already pulled out of the OCI state earlier in this
+    # hook.  No shell involvement, no untrusted tokens.
+    try:
+        proc = subprocess.Popen(  # noqa: S603  # nosec B603  # NOSONAR(pythonsecurity:S6350)
+            ["/usr/bin/python3", str(reader), str(sd), container_id, "--emit=socket"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=err_fh,
+            stderr=err_fh,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        err_fh.close()
+        _log(f"terok-shield bridge hook: reader spawn failed: {exc}")
+        return
+    finally:
+        # Popen dup'd the fd; the parent's copy is safe to close.
+        err_fh.close()
+    # Guard the pid-file write so a state-dir ENOSPC / EPERM doesn't escape
+    # as an exception that fails container start — bridge is opt-out; soft-
+    # fail everywhere.  If the write fails after the child already started,
+    # stop it ourselves so we don't leak a reader nobody tracks.
+    try:
+        pid_file.write_text(f"{proc.pid}\n")
+    except OSError as exc:
+        _log(f"terok-shield bridge hook: failed to write reader.pid: {exc}")
+        with contextlib.suppress(ProcessLookupError, OSError):
+            # Signaling our own direct child from the same hook invocation —
+            # proc.pid was just returned by Popen, no race window, no PID
+            # recycle risk.
+            os.kill(proc.pid, signal.SIGTERM)  # NOSONAR(python:S4828)
+
+
+def _reap_reader(sd: Path) -> None:
+    """SIGTERM the NFLOG reader at poststop, SIGKILL if it lingers past 2 s.
+
+    Validates the PID against the expected reader cmdline before sending
+    signals — mirrors the ``_is_our_dnsmasq`` pattern elsewhere in this
+    file.  A recycled / stale PID with the same number would otherwise get
+    SIGTERMed here, potentially killing an unrelated user process.  If the
+    PID doesn't match we unlink ``reader.pid`` and return quietly: nothing
+    to reap.
+    """
+    pid_file = sd / _READER_PID_NAME
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        pid_file.unlink(missing_ok=True)
+        return
+    if not _is_our_reader(pid, sd):
+        pid_file.unlink(missing_ok=True)
+        return
+    try:
+        # PID validated by `_is_our_reader` cmdline check above — this is the
+        # reader we spawned, not a random recycled PID.
+        os.kill(pid, signal.SIGTERM)  # NOSONAR(python:S4828)
+    except ProcessLookupError:
+        pid_file.unlink(missing_ok=True)
+        return
+    except OSError as exc:
+        _log(f"terok-shield bridge hook: reader SIGTERM failed: {exc}")
+        pid_file.unlink(missing_ok=True)
+        return
+
+    for _ in range(_REAP_POLL_TICKS):
+        time.sleep(_REAP_POLL_INTERVAL_S)
+        if not _pid_exists(pid):
+            break
+    else:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            # Reader we identified above didn't exit within the grace window;
+            # force-kill the same validated PID.
+            os.kill(pid, signal.SIGKILL)  # NOSONAR(python:S4828)
+    pid_file.unlink(missing_ok=True)
+
+
+def _reader_alive(pid_file: Path) -> bool:
+    """Return True only when ``reader.pid`` names a *live reader* process.
+
+    Existence of the PID isn't enough — a recycled PID number would fool a
+    pure ``_pid_exists`` check, and we'd skip spawning a fresh reader while
+    that unrelated process happily runs.  Use the cmdline identity guard.
+    """
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    if not _pid_exists(pid):
+        return False
+    return _is_our_reader(pid, pid_file.parent)
+
+
+def _is_our_reader(pid_int: int, sd: Path) -> bool:
+    """Return True if ``pid_int`` is the NFLOG reader we spawned for ``sd``.
+
+    Reads ``/proc/{pid}/cmdline`` and compares to the invocation shape from
+    ``_spawn_reader``.  Two signatures are accepted:
+
+    * the outer Popen shape — ``python3 <reader.py> <sd> <container> --emit=socket``
+    * the nsenter-exec'd self we produce when the reader re-enters its own
+      namespaces (argv mutated but sd still encoded in an arg)
+
+    Missing / unreadable cmdline maps to ``False``.  Lenient on argv[0]
+    (accept any python binary path) to tolerate different distros and
+    venv layouts.
+    """
+    try:
+        raw = Path(f"/proc/{pid_int}/cmdline").read_bytes()
+    except OSError:
+        return False
+    args = raw.rstrip(b"\x00").split(b"\x00")
+    if len(args) < 4:
+        return False
+    script_bytes = str(_reader_script_path()).encode()
+    sd_bytes = str(sd).encode()
+    return args[0].endswith(b"python3") and args[1] == script_bytes and sd_bytes in args[2:]
+
+
+def _pid_exists(pid: int) -> bool:
+    """Ask the kernel whether *pid* is still a running process."""
+    try:
+        # Signal 0 is an existence probe — it never delivers a signal, only
+        # triggers the kernel's PID-validity / permission check.
+        os.kill(pid, 0)  # NOSONAR(python:S4828)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # EPERM means the process exists but we don't own it — treat as alive.
+        return True
+    return True
+
+
+def _reader_script_path() -> Path:
+    """Return the on-disk path ``terok setup`` places the reader script at."""
+    data_home = os.environ.get("XDG_DATA_HOME") or f"{os.environ.get('HOME', '')}/.local/share"
+    return Path(data_home) / "terok-shield" / "nflog-reader.py"
+
+
+def _session_bus_address() -> str | None:
+    """Locate the operator's D-Bus session bus, or return ``None`` for headless.
+
+    Probes the *host* UID's runtime dir rather than the namespaced ``os.getuid()``:
+    the hook runs in ``NS_ROOTLESS`` where our UID is 0 but the real session
+    bus lives at ``/run/user/<host-uid>/bus``.
+    """
+    addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+    if addr:
+        return addr
+    uid = _outer_host_uid()
+    path = Path(f"/run/user/{uid}/bus")
+    if path.exists():
+        return f"unix:path={path}"
+    return None
 
 
 # ── Namespace execution ────────────────────────────────
@@ -253,8 +539,11 @@ def _nsenter(pid: str, *cmd: str, stdin: str | None = None) -> None:
     else:
         # In NS_INIT (shell): enter NS_ROOTLESS first via podman unshare.
         ns_cmd = [_find_podman(), "unshare", _find_nsenter(), "-n", "-t", pid, "--", *cmd]
+    # ns_cmd is built from _find_*() resolved binary paths and the container
+    # PID (already validated as a bare integer-like string when the hook
+    # parsed OCI state).  No shell involvement, no untrusted tokens.
     try:
-        result = subprocess.run(  # nosec B603
+        result = subprocess.run(  # noqa: S603  # nosec B603  # NOSONAR(pythonsecurity:S6350)
             ns_cmd,
             input=stdin,
             text=True,
@@ -273,6 +562,15 @@ def _nsenter(pid: str, *cmd: str, stdin: str | None = None) -> None:
 
 
 # ── Process identity ───────────────────────────────────
+
+
+def _our_dnsmasq_alive(pid_file: Path, conf_path: Path) -> bool:
+    """Return True when ``pid_file`` names a live dnsmasq using ``conf_path``."""
+    try:
+        pid_int = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return _is_our_dnsmasq(pid_int, conf_path)
 
 
 def _is_our_dnsmasq(pid_int: int, conf_path: Path) -> bool:
@@ -306,10 +604,17 @@ def _bootstrap_env() -> None:
     ``/etc/subuid``, ``~/.config/containers/``, and the rootless podman socket
     via these variables.  Without them it exits 1 silently.
 
+    Under rootless podman, the hook runs inside ``NS_ROOTLESS`` — ``os.getuid()``
+    is ``0`` (mapped from the invoking operator's host UID), so naively
+    resolving resources as if that were actually root points at ``/root`` /
+    ``/run/user/0`` instead of the operator's real home / session.
+    ``_outer_host_uid()`` parses ``/proc/self/uid_map`` to recover the host UID
+    and the resolution uses that throughout.
+
     Only sets variables that are absent; never overrides values the runtime did
     pass through.
     """
-    uid = os.getuid()
+    uid = _outer_host_uid()
 
     if not os.environ.get("HOME"):
         try:
@@ -323,6 +628,38 @@ def _bootstrap_env() -> None:
 
     if not os.environ.get("PATH"):
         os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _outer_host_uid() -> int:
+    """Return the invoking operator's host UID, even from inside ``NS_ROOTLESS``.
+
+    Parses ``/proc/self/uid_map`` to find the outer-side UID that the current
+    in-namespace UID maps to.  Each map line has the shape
+    ``<inner_start> <outer_start> <length>`` — we pick the mapping whose inner
+    range covers ``os.getuid()`` and project through it.
+
+    Falls back to ``os.getuid()`` on any parse trouble (init userns, no
+    uid_map, unreadable, unexpected format) — that path is valid for non-
+    rootless contexts where there's no userns layer to see through.
+    """
+    my_uid = os.getuid()
+    try:
+        raw = Path("/proc/self/uid_map").read_text()
+    except OSError:
+        return my_uid
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            inner_start = int(parts[0])
+            outer_start = int(parts[1])
+            length = int(parts[2])
+        except ValueError:
+            continue
+        if inner_start <= my_uid < inner_start + length:
+            return outer_start + (my_uid - inner_start)
+    return my_uid
 
 
 # ── Binary finders ─────────────────────────────────────

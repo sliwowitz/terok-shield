@@ -890,6 +890,64 @@ def test_build_config_state_dir_override_and_default_container(
     )
 
 
+def test_build_config_prefers_podman_annotation(
+    force_hook_mode: None,
+    tmp_path: Path,
+) -> None:
+    """When a container is given and it carries the state_dir annotation, use it.
+
+    Covers the bottom-up resolution path: the hub (or any other external
+    consumer) knows only the container name, but terok-sandbox wrote the
+    per-task state_dir into the ``terok.shield.state_dir`` annotation at
+    pre_start — so shield can recover it via ``podman inspect`` rather
+    than guessing with the legacy ``<state-root>/containers/<name>``
+    layout, which never matches terok's ``tasks/<name>/<id>/shield``.
+    """
+    annotated = tmp_path / "sandbox-live" / "tasks" / "t" / "abc" / "shield"
+    annotated.mkdir(parents=True)
+    with mock.patch(
+        "terok_shield.cli.main.resolve_container_state_dir", return_value=annotated
+    ) as resolver:
+        config = _build_config("my-ctr")
+    resolver.assert_called_once_with("my-ctr")
+    assert config.state_dir == annotated
+
+
+def test_build_config_errors_when_annotation_missing(
+    force_hook_mode: None,
+    state_root: Path,
+) -> None:
+    """Without an annotation, fail loudly — don't silently target a state dir that can't exist.
+
+    Shielded containers must go through ``shield.pre_start()`` (directly
+    or via sandbox), which writes the annotation.  If it's absent, the
+    container either wasn't shielded or was launched by a third party
+    that forgot to carry the annotation through — guessing a layout in
+    either case writes to / operates on the wrong state.
+    """
+    with (
+        mock.patch("terok_shield.cli.main.resolve_container_state_dir", return_value=None),
+        mock.patch("terok_shield.cli.main._resolve_state_root", return_value=state_root),
+        pytest.raises(SystemExit, match="no 'terok.shield.state_dir' annotation"),
+    ):
+        _build_config("my-ctr")
+
+
+def test_build_config_state_dir_override_wins_over_annotation(
+    force_hook_mode: None,
+    state_root: Path,
+) -> None:
+    """Explicit --state-dir takes precedence — the operator said so on purpose."""
+    with mock.patch(
+        "terok_shield.cli.main.resolve_container_state_dir",
+        return_value=Path("/ignored/annotated/path"),
+    ) as resolver:
+        config = _build_config("my-ctr", state_dir_override=state_root)
+    # override short-circuits the annotation lookup entirely.
+    resolver.assert_not_called()
+    assert config.state_dir == state_root.resolve() / "containers" / "my-ctr"
+
+
 def test_build_config_rejects_unknown_mode(
     isolated_roots: tuple[Path, Path],
     write_config: Callable[[str], Path],
@@ -940,15 +998,22 @@ def test_build_config_rejects_container_path_traversal(
         _build_config(FORBIDDEN_TRAVERSAL, state_dir_override=state_root)
 
 
-def test_build_config_uses_resolved_state_root_when_not_overridden(
+def test_build_config_uses_resolved_state_root_when_no_container(
     force_hook_mode: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without --state-dir, _build_config() resolves the state root from the environment."""
+    """Commands without a container (install-hooks, setup) keep the env-based state root.
+
+    When a container *is* given, shield refuses to guess — it requires
+    either ``--state-dir`` or a ``terok.shield.state_dir`` annotation.
+    But commands that aren't per-container still resolve the state root
+    from ``TEROK_SHIELD_STATE_DIR`` and use its ``containers/_default``
+    slot for generic bookkeeping.
+    """
     monkeypatch.setenv("TEROK_SHIELD_STATE_DIR", str(FAKE_STATE_DIR))
     monkeypatch.setenv("TEROK_SHIELD_CONFIG_DIR", str(NONEXISTENT_DIR / "config"))
-    config = _build_config("ctr")
-    assert config.state_dir == FAKE_STATE_DIR / "containers" / "ctr"
+    config = _build_config()
+    assert config.state_dir == FAKE_STATE_DIR / "containers" / "_default"
 
 
 # ── setup command tests ──────────────────────────────────
@@ -1097,8 +1162,8 @@ class TestSetupInteractive:
         assert kwargs.get("use_sudo") is True
 
 
-def test_interactive_command_routes_to_handler(cli_dispatch: CliDispatchHarness) -> None:
-    """interactive subcommand dispatches to _handle_interactive via the registry."""
-    with mock.patch("terok_shield.cli.interactive.run_interactive") as mock_run:
-        main(["interactive", _CONTAINER])
+def test_simple_clearance_command_routes_to_handler(cli_dispatch: CliDispatchHarness) -> None:
+    """simple-clearance subcommand dispatches to the terminal fallback handler."""
+    with mock.patch("terok_shield.cli.simple_clearance.run_simple_clearance") as mock_run:
+        main(["simple-clearance", _CONTAINER])
     mock_run.assert_called_once()

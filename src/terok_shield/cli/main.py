@@ -23,6 +23,7 @@ from typing import Any
 
 from .. import ExecError, Shield, ShieldConfig, ShieldMode
 from ..config import ShieldFileConfig
+from ..container import resolve_state_dir as resolve_container_state_dir
 from ..validation import validate_container_name
 from .registry import COMMANDS, ArgDef, CommandDef
 
@@ -421,17 +422,10 @@ def _build_config(
     # Resolve mode
     mode = _auto_detect_mode() if file_cfg.mode == "auto" else ShieldMode.HOOK
 
-    # State dir
-    if state_dir_override:
-        state_root = state_dir_override.resolve()
-    else:
-        state_root = _resolve_state_root().resolve()
-
     if container:
         validate_container_name(container)
-        state_dir = state_root / "containers" / container
-    else:
-        state_dir = state_root / "containers" / "_default"
+
+    state_dir = _resolve_state_dir(container, state_dir_override)
 
     # Profiles dir
     profiles_dir = _resolve_config_root() / "profiles"
@@ -444,6 +438,40 @@ def _build_config(
         audit_enabled=file_cfg.audit.enabled,
         profiles_dir=profiles_dir,
     )
+
+
+def _resolve_state_dir(container: str | None, state_dir_override: Path | None) -> Path:
+    """Return the per-container state directory.
+
+    Resolution order, first hit wins:
+
+    1. ``--state-dir`` flag.  The caller explicitly said where the
+       state root lives, so nest under ``containers/<name>`` there.
+       Used by tests and anyone driving the CLI by hand with a
+       custom layout.
+    2. ``podman inspect`` of *container*'s ``terok.shield.state_dir``
+       annotation.  This is the path shield's own ``pre_start()``
+       writes and the OCI hook reads — the single source of truth for
+       any shielded container.  If the annotation is missing the
+       container simply wasn't launched through shield, so we fail
+       loudly rather than guess a layout that won't match anything.
+    3. No container given (commands like ``install-hooks`` that aren't
+       per-container): use the default root + ``_default`` slot.
+    """
+    if state_dir_override is not None:
+        state_root = state_dir_override.resolve()
+        return state_root / "containers" / (container or "_default")
+    if container:
+        annotated = resolve_container_state_dir(container)
+        if annotated is None:
+            raise SystemExit(
+                f"container {container!r} has no 'terok.shield.state_dir' annotation — "
+                "was it launched through shield.pre_start()? "
+                "Pass --state-dir=<root> if you know where its state lives."
+            )
+        return annotated
+    state_root = _resolve_state_root().resolve()
+    return state_root / "containers" / "_default"
 
 
 def _load_config_file() -> ShieldFileConfig:
