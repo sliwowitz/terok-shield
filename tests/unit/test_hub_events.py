@@ -48,8 +48,13 @@ class _SocketRecorder:
             except OSError:
                 return
             with conn:
-                chunk = conn.recv(4096)
-                if chunk:
+                # AF_UNIX SOCK_STREAM may hand us the payload in multiple
+                # chunks under scheduler pressure — drain until EOF so the
+                # full JSON line is always available to the asserting helper.
+                while True:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
                     self.received.append(chunk)
 
 
