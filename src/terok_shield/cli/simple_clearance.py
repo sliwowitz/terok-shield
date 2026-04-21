@@ -157,12 +157,10 @@ class ClearanceSession:
             domain=str(event.get("domain", "")),
         )
         self._queue.append(pending)
-        if len(self._queue) == 1:
-            self._prompt_head()
-        else:
+        if len(self._queue) > 1:
             label = f"{pending.dest} ({pending.domain})" if pending.domain else pending.dest
             print(f"\n[BLOCKED] {label} :{pending.port} (queued)", flush=True)
-            self._prompt_head()
+        self._prompt_head()
 
     def _handle_operator_input(self, line: str) -> None:
         """Map operator keystrokes to accept/deny; apply to the head of queue."""

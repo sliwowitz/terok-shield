@@ -41,7 +41,7 @@ import shutil
 import signal
 import socket
 import struct
-import subprocess  # nosec B404 — dbus-send is a trusted host binary
+import subprocess  # nosec B404 — podman/nsenter re-exec for container netns
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime

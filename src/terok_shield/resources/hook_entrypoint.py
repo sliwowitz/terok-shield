@@ -33,16 +33,23 @@ from pathlib import Path
 
 # These constants are intentionally duplicated from src/terok_shield/state.py
 # so this script stays stdlib-only (no terok_shield imports).  Keep in sync:
-#   _BUNDLE_VERSION  ↔  state.BUNDLE_VERSION
-#   "ruleset.nft"    ↔  state.ruleset_path()
-#   "dnsmasq.conf"   ↔  state.dnsmasq_conf_path()
-#   "dnsmasq.pid"    ↔  state.dnsmasq_pid_path()
-#   "container.id"   ↔  state.container_id_path()
-#   "reader.pid"     ↔  state.reader_pid_path()
+#   _BUNDLE_VERSION       ↔  state.BUNDLE_VERSION
+#   _RULESET_NAME         ↔  state.ruleset_path()
+#   _DNSMASQ_CONF_NAME    ↔  state.dnsmasq_conf_path()
+#   _DNSMASQ_PID_NAME     ↔  state.dnsmasq_pid_path()
+#   _CONTAINER_ID_NAME    ↔  state.container_id_path()
+#   _READER_PID_NAME      ↔  state.reader_pid_path()
+# (``reader.log`` is bridge-local — no state.py counterpart.)
 _ANN_STATE_DIR = "terok.shield.state_dir"
 _ANN_VERSION = "terok.shield.version"
 _BUNDLE_VERSION = 9
 _TABLE = "inet terok_shield"
+_RULESET_NAME = "ruleset.nft"
+_DNSMASQ_CONF_NAME = "dnsmasq.conf"
+_DNSMASQ_PID_NAME = "dnsmasq.pid"
+_CONTAINER_ID_NAME = "container.id"
+_READER_PID_NAME = "reader.pid"
+_READER_LOG_NAME = "reader.log"
 
 # ── Bridge-hook dispatch ──────────────────────────────
 # Dispatch between the nft + dnsmasq pair and the optional bridge pair
@@ -142,7 +149,7 @@ def _nft_main(oci: dict, sd: Path, stage: str, log_path: Path) -> int:
     # The OCI state includes "id" (full 64-char hex); store the short form.
     container_id = str(oci.get("id") or "")
     if container_id:
-        (sd / "container.id").write_text(container_id[:12] + "\n")
+        (sd / _CONTAINER_ID_NAME).write_text(container_id[:12] + "\n")
 
     _createruntime(pid, sd)
     return 0
@@ -225,7 +232,7 @@ def _createruntime(pid: str, sd: Path) -> None:
     except OSError:
         raise RuntimeError(f"network namespace file missing for pid {pid}: {ns_net}")
 
-    ruleset = sd / "ruleset.nft"
+    ruleset = sd / _RULESET_NAME
     if not ruleset.exists():
         raise RuntimeError(f"ruleset.nft not found: {ruleset}")
     nft = _find_nft()
@@ -250,11 +257,11 @@ def _start_container_dnsmasq(pid: str, sd: Path) -> None:
     clears stale PID file, then verifies the new PID file and process
     identity after start.
     """
-    dnsmasq_conf = sd / "dnsmasq.conf"
+    dnsmasq_conf = sd / _DNSMASQ_CONF_NAME
     if not dnsmasq_conf.exists():
         return
 
-    pid_file = sd / "dnsmasq.pid"
+    pid_file = sd / _DNSMASQ_PID_NAME
     # Idempotent: if a dnsmasq is already running against our conf (because the
     # hook fired twice — restart, re-dispatch, sibling hook re-entry, etc.),
     # don't try to bind port 53 again.  Verifying pid + conf-arg avoids hitting
@@ -292,8 +299,8 @@ def _poststop(sd: Path) -> None:
     to avoid hitting an unrelated process when the original dnsmasq PID is
     recycled after container stop.
     """
-    pid_file = sd / "dnsmasq.pid"
-    conf_path = sd / "dnsmasq.conf"
+    pid_file = sd / _DNSMASQ_PID_NAME
+    conf_path = sd / _DNSMASQ_CONF_NAME
     if not pid_file.exists():
         return
     try:
@@ -312,7 +319,7 @@ def _poststop(sd: Path) -> None:
         pass
 
 
-# ── Reader (per-container NFLOG → D-Bus emitter) ──────
+# ── Reader lifecycle (spawn / reap per container) ──────
 
 
 def _spawn_reader(sd: Path, container_id: str) -> None:
@@ -331,14 +338,14 @@ def _spawn_reader(sd: Path, container_id: str) -> None:
     if bus is None:
         _log("terok-shield bridge hook: no session bus reachable — skipping reader")
         return
-    pid_file = sd / "reader.pid"
+    pid_file = sd / _READER_PID_NAME
     if _reader_alive(pid_file):
         return  # idempotent respawn
     env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": bus}
     # Keep the reader's stderr capturable — a silent /dev/null here means any
     # startup crash (nsenter failure, missing binary, NFLOG bind denial) leaves
     # the operator with a live pid file and nothing to diagnose from.
-    err_log = sd / "reader.log"
+    err_log = sd / _READER_LOG_NAME
     try:
         err_fh = err_log.open("ab")
     except OSError as exc:
@@ -390,7 +397,7 @@ def _reap_reader(sd: Path) -> None:
     PID doesn't match we unlink ``reader.pid`` and return quietly: nothing
     to reap.
     """
-    pid_file = sd / "reader.pid"
+    pid_file = sd / _READER_PID_NAME
     if not pid_file.exists():
         return
     try:
