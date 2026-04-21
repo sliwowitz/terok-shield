@@ -49,9 +49,15 @@ depends_on = [
     "terok_shield.nft.constants",
 ]
 
-# Per-container state bundle layout — zero internal deps
+# Per-container state bundle layout — imports host-wide path constants
 [[modules]]
 path = "terok_shield.state"
+layer = "foundation"
+depends_on = ["terok_shield.paths"]
+
+# Host-wide filesystem paths (reader script, hook entrypoint filename)
+[[modules]]
+path = "terok_shield.paths"
 layer = "foundation"
 depends_on = []
 
@@ -113,6 +119,12 @@ depends_on = []
 # Hook file generation and installation — no same-layer deps
 [[modules]]
 path = "terok_shield.hooks.install"
+layer = "core"
+depends_on = []
+
+# NFLOG reader resource installer
+[[modules]]
+path = "terok_shield.hooks.reader_install"
 layer = "core"
 depends_on = []
 

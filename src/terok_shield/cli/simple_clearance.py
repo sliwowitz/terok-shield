@@ -102,6 +102,36 @@ class ClearanceSession:
         finally:
             self._shutdown_reader(reader)
 
+    def _spawn_reader(self) -> subprocess.Popen:
+        """Start the NFLOG reader subprocess in JSON mode."""
+        if not _READER_SCRIPT.exists():
+            print(f"Error: NFLOG reader script missing at {_READER_SCRIPT}", file=sys.stderr)
+            raise SystemExit(1)
+        return subprocess.Popen(  # nosec B603
+            [
+                sys.executable,
+                str(_READER_SCRIPT),
+                str(self._state_dir),
+                self._container,
+                "--emit=json",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=None,
+            text=True,
+            bufsize=1,
+        )
+
+    def _shutdown_reader(self, reader: subprocess.Popen) -> None:
+        """Terminate the reader cleanly on loop exit."""
+        if reader.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                reader.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                reader.wait(timeout=2)
+        if reader.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                reader.kill()
+
     def _event_loop(self, reader: subprocess.Popen) -> None:  # pragma: no cover
         """Read reader JSON lines on stdout and operator verdicts on stdin.
 
@@ -199,36 +229,6 @@ class ClearanceSession:
         head = self._queue[0]
         label = f"{head.dest} ({head.domain})" if head.domain else head.dest
         print(f"[BLOCKED] {label} :{head.port} \u2014 allow/deny? ", end="", flush=True)
-
-    def _spawn_reader(self) -> subprocess.Popen:
-        """Start the NFLOG reader subprocess in JSON mode."""
-        if not _READER_SCRIPT.exists():
-            print(f"Error: NFLOG reader script missing at {_READER_SCRIPT}", file=sys.stderr)
-            raise SystemExit(1)
-        return subprocess.Popen(  # nosec B603
-            [
-                sys.executable,
-                str(_READER_SCRIPT),
-                str(self._state_dir),
-                self._container,
-                "--emit=json",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=None,
-            text=True,
-            bufsize=1,
-        )
-
-    def _shutdown_reader(self, reader: subprocess.Popen) -> None:
-        """Terminate the reader cleanly on loop exit."""
-        if reader.poll() is None:
-            with contextlib.suppress(ProcessLookupError):
-                reader.terminate()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                reader.wait(timeout=2)
-        if reader.poll() is None:
-            with contextlib.suppress(ProcessLookupError):
-                reader.kill()
 
     def _install_signal_handlers(self) -> None:
         """Arrange a clean exit on SIGINT / SIGTERM."""

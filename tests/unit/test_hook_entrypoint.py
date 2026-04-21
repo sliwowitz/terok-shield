@@ -460,6 +460,13 @@ def test_is_our_dnsmasq_returns_false_when_conf_path_substring(tmp_path: Path) -
         assert hook_entrypoint._is_our_dnsmasq(1234, conf) is False
 
 
+def test_is_our_dnsmasq_returns_false_when_cmdline_is_empty(tmp_path: Path) -> None:
+    """_is_our_dnsmasq() returns False when /proc/{pid}/cmdline is empty."""
+    conf = tmp_path / "dnsmasq.conf"
+    with mock.patch.object(hook_entrypoint.Path, "read_bytes", return_value=b""):
+        assert hook_entrypoint._is_our_dnsmasq(1234, conf) is False
+
+
 # ── _poststop ─────────────────────────────────────────────────────────────────
 
 

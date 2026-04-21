@@ -141,6 +141,76 @@ def _events_socket_path() -> Path:
     return Path(xdg) / "terok-shield-events.sock"
 
 
+# ── nsenter re-exec ───────────────────────────────────────────────────
+#
+# ``main()``'s first branch hands off here.  Grouping the three helpers
+# with ``main`` keeps the whole re-exec stanza on one page; the reader
+# loop below doesn't need any of them.
+
+
+def _reexec_inside_container_netns(
+    state_dir: Path, container: str, emit: str
+) -> None:  # pragma: no cover — real subprocess re-exec
+    """Re-enter this script inside the container's netns so NFLOG is reachable.
+
+    When we're already in ``NS_ROOTLESS`` (uid 0 inside the rootless userns
+    — the normal hook execution context), plain ``nsenter -n`` is enough.
+    When we're in the initial userns (a manual CLI run), prepend
+    ``podman unshare`` to cross into ``NS_ROOTLESS`` first and pick up
+    ``CAP_SYS_ADMIN`` over the container-owning userns.
+    """
+    pid = _podman_container_pid(container)
+    script = Path(__file__).resolve()
+    podman = _resolve_binary("podman")
+    nsenter = _resolve_binary("nsenter")
+    python3 = _resolve_binary("python3")
+    tail = [
+        python3,
+        str(script),
+        str(state_dir),
+        container,
+        f"--emit={emit}",
+    ]
+    cmd = (
+        [nsenter, "-t", pid, "-n", *tail]
+        if os.geteuid() == 0
+        else [podman, "unshare", nsenter, "-t", pid, "-n", *tail]
+    )
+    env = {**os.environ, _NSENTER_ENV: "1"}
+    try:
+        # argv is built from our own resolved binary paths and integer-like
+        # container PIDs; no shell involvement.
+        subprocess.run(cmd, env=env, check=True)  # noqa: S603  # nosec B603
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(exc.returncode) from exc
+
+
+def _podman_container_pid(container: str) -> str:  # pragma: no cover — real podman subprocess
+    """Resolve a container's host PID so nsenter can target its network namespace."""
+    podman = _resolve_binary("podman")
+    # argv is a fixed literal plus the caller-supplied container name; no
+    # shell involvement.
+    result = subprocess.run(  # noqa: S603  # nosec B603
+        [podman, "inspect", "--format", "{{.State.Pid}}", container],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _resolve_binary(name: str) -> str:
+    """Return the absolute path to *name* or fall back to ``/usr/bin/<name>``.
+
+    Turns a partial executable name into a full path so Sonar's "starting a
+    process with a partial executable path" rule is satisfied — and so the
+    subprocess actually resolves the binary against a known PATH rather than
+    whatever the caller's env happened to have.  Fallback to ``/usr/bin/<name>``
+    keeps the reader working on minimal images where PATH isn't inherited.
+    """
+    return shutil.which(name) or f"/usr/bin/{name}"
+
+
 # ── Session ───────────────────────────────────────────────────────────
 
 
@@ -549,72 +619,6 @@ class _DomainCache:
         self._mapping = {
             m.group(2): m.group(1).lower().rstrip(".") for m in _REPLY_RE.finditer(text)
         }
-
-
-# ── nsenter re-exec ───────────────────────────────────────────────────
-
-
-def _reexec_inside_container_netns(
-    state_dir: Path, container: str, emit: str
-) -> None:  # pragma: no cover — real subprocess re-exec
-    """Re-enter this script inside the container's netns so NFLOG is reachable.
-
-    When we're already in ``NS_ROOTLESS`` (uid 0 inside the rootless userns
-    — the normal hook execution context), plain ``nsenter -n`` is enough.
-    When we're in the initial userns (a manual CLI run), prepend
-    ``podman unshare`` to cross into ``NS_ROOTLESS`` first and pick up
-    ``CAP_SYS_ADMIN`` over the container-owning userns.
-    """
-    pid = _podman_container_pid(container)
-    script = Path(__file__).resolve()
-    podman = _resolve_binary("podman")
-    nsenter = _resolve_binary("nsenter")
-    python3 = _resolve_binary("python3")
-    tail = [
-        python3,
-        str(script),
-        str(state_dir),
-        container,
-        f"--emit={emit}",
-    ]
-    cmd = (
-        [nsenter, "-t", pid, "-n", *tail]
-        if os.geteuid() == 0
-        else [podman, "unshare", nsenter, "-t", pid, "-n", *tail]
-    )
-    env = {**os.environ, _NSENTER_ENV: "1"}
-    try:
-        # argv is built from our own resolved binary paths and integer-like
-        # container PIDs; no shell involvement.
-        subprocess.run(cmd, env=env, check=True)  # noqa: S603  # nosec B603
-    except subprocess.CalledProcessError as exc:
-        raise SystemExit(exc.returncode) from exc
-
-
-def _podman_container_pid(container: str) -> str:  # pragma: no cover — real podman subprocess
-    """Resolve a container's host PID so nsenter can target its network namespace."""
-    podman = _resolve_binary("podman")
-    # argv is a fixed literal plus the caller-supplied container name; no
-    # shell involvement.
-    result = subprocess.run(  # noqa: S603  # nosec B603
-        [podman, "inspect", "--format", "{{.State.Pid}}", container],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def _resolve_binary(name: str) -> str:
-    """Return the absolute path to *name* or fall back to ``/usr/bin/<name>``.
-
-    Turns a partial executable name into a full path so Sonar's "starting a
-    process with a partial executable path" rule is satisfied — and so the
-    subprocess actually resolves the binary against a known PATH rather than
-    whatever the caller's env happened to have.  Fallback to ``/usr/bin/<name>``
-    keeps the reader working on minimal images where PATH isn't inherited.
-    """
-    return shutil.which(name) or f"/usr/bin/{name}"
 
 
 # ── Utility helpers ───────────────────────────────────────────────────
