@@ -186,37 +186,11 @@ def _bridge_main(oci: dict, sd: Path, stage: str, log_path: Path) -> None:
     _spawn_reader(sd, container_id)
 
 
-# ── OCI state parsing ──────────────────────────────────
-
-
-def _state_dir_from_oci(oci: object) -> Path | None:
-    """Extract the ``terok.shield.state_dir`` annotation as an absolute Path.
-
-    Returns ``None`` (and logs) on any validation failure so callers can
-    early-exit without hand-written boilerplate.
-    """
-    if not isinstance(oci, dict):
-        _log("terok-shield hook: OCI state must be a JSON object")
-        return None
-    ann = oci.get("annotations") or {}
-    if not isinstance(ann, dict):
-        _log("terok-shield hook: annotations must be a JSON object")
-        return None
-    sd_str = ann.get(_ANN_STATE_DIR, "")
-    if not sd_str:
-        _log("terok-shield hook: missing state_dir annotation")
-        return None
-    try:
-        path = Path(sd_str)
-        if not path.is_absolute():
-            raise ValueError(f"state_dir must be absolute: {sd_str!r}")
-        return path.resolve()
-    except (TypeError, ValueError, OSError) as exc:
-        _log(f"terok-shield hook: invalid state_dir: {exc}")
-        return None
-
-
-# ── Stage handlers ─────────────────────────────────────
+# ── Nft hook: ruleset + dnsmasq ────────────────────────
+#
+# Everything below this banner is exclusive to the nft+dnsmasq path.
+# A reader tracing ``_nft_main`` stays in contiguous territory until the
+# next banner.
 
 
 def _createruntime(pid: str, sd: Path) -> None:
@@ -321,7 +295,40 @@ def _poststop(sd: Path) -> None:
         pass
 
 
-# ── Reader lifecycle (spawn / reap per container) ──────
+def _our_dnsmasq_alive(pid_file: Path, conf_path: Path) -> bool:
+    """Return True when ``pid_file`` names a live dnsmasq using ``conf_path``."""
+    try:
+        pid_int = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return _is_our_dnsmasq(pid_int, conf_path)
+
+
+def _is_our_dnsmasq(pid_int: int, conf_path: Path) -> bool:
+    """Return True if pid_int is a dnsmasq process using our conf file.
+
+    Parses ``/proc/{pid}/cmdline`` as a NUL-separated argv vector.
+    Requires argv[0] to be the dnsmasq binary (exact name or absolute path)
+    and ``--conf-file=<our-conf>`` to be present as a separate argument.
+    Mirrors ``terok_shield.dnsmasq._is_our_dnsmasq()`` without any imports.
+    """
+    conf_arg = b"--conf-file=" + str(conf_path).encode()
+    try:
+        raw = Path(f"/proc/{pid_int}/cmdline").read_bytes()
+    except OSError:
+        return False
+    args = raw.rstrip(b"\x00").split(b"\x00")
+    if not args:
+        return False
+    exe = args[0]
+    return (exe == b"dnsmasq" or exe.endswith(b"/dnsmasq")) and conf_arg in args
+
+
+# ── Bridge hook: reader lifecycle ──────────────────────
+#
+# Everything below this banner is exclusive to the bridge path.
+# A reader tracing ``_bridge_main`` stays in contiguous territory until the
+# next banner.
 
 
 def _spawn_reader(sd: Path, container_id: str) -> None:
@@ -476,20 +483,6 @@ def _is_our_reader(pid_int: int, sd: Path) -> bool:
     return args[0].endswith(b"python3") and args[1] == script_bytes and sd_bytes in args[2:]
 
 
-def _pid_exists(pid: int) -> bool:
-    """Ask the kernel whether *pid* is still a running process."""
-    try:
-        # Signal 0 is an existence probe — it never delivers a signal, only
-        # triggers the kernel's PID-validity / permission check.
-        os.kill(pid, 0)  # NOSONAR(python:S4828)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        # EPERM means the process exists but we don't own it — treat as alive.
-        return True
-    return True
-
-
 def _reader_script_path() -> Path:
     """Return the on-disk path ``terok setup`` places the reader script at."""
     data_home = os.environ.get("XDG_DATA_HOME") or f"{os.environ.get('HOME', '')}/.local/share"
@@ -513,7 +506,37 @@ def _session_bus_address() -> str | None:
     return None
 
 
-# ── Namespace execution ────────────────────────────────
+# ── Shared infrastructure ──────────────────────────────
+#
+# OCI state parsing, namespace execution, PID checks, environment
+# bootstrap.  Used by both hook kinds.
+
+
+def _state_dir_from_oci(oci: object) -> Path | None:
+    """Extract the ``terok.shield.state_dir`` annotation as an absolute Path.
+
+    Returns ``None`` (and logs) on any validation failure so callers can
+    early-exit without hand-written boilerplate.
+    """
+    if not isinstance(oci, dict):
+        _log("terok-shield hook: OCI state must be a JSON object")
+        return None
+    ann = oci.get("annotations") or {}
+    if not isinstance(ann, dict):
+        _log("terok-shield hook: annotations must be a JSON object")
+        return None
+    sd_str = ann.get(_ANN_STATE_DIR, "")
+    if not sd_str:
+        _log("terok-shield hook: missing state_dir annotation")
+        return None
+    try:
+        path = Path(sd_str)
+        if not path.is_absolute():
+            raise ValueError(f"state_dir must be absolute: {sd_str!r}")
+        return path.resolve()
+    except (TypeError, ValueError, OSError) as exc:
+        _log(f"terok-shield hook: invalid state_dir: {exc}")
+        return None
 
 
 def _nsenter(pid: str, *cmd: str, stdin: str | None = None) -> None:
@@ -563,39 +586,18 @@ def _nsenter(pid: str, *cmd: str, stdin: str | None = None) -> None:
         )
 
 
-# ── Process identity ───────────────────────────────────
-
-
-def _our_dnsmasq_alive(pid_file: Path, conf_path: Path) -> bool:
-    """Return True when ``pid_file`` names a live dnsmasq using ``conf_path``."""
+def _pid_exists(pid: int) -> bool:
+    """Ask the kernel whether *pid* is still a running process."""
     try:
-        pid_int = int(pid_file.read_text().strip())
-    except (OSError, ValueError):
+        # Signal 0 is an existence probe — it never delivers a signal, only
+        # triggers the kernel's PID-validity / permission check.
+        os.kill(pid, 0)  # NOSONAR(python:S4828)
+    except ProcessLookupError:
         return False
-    return _is_our_dnsmasq(pid_int, conf_path)
-
-
-def _is_our_dnsmasq(pid_int: int, conf_path: Path) -> bool:
-    """Return True if pid_int is a dnsmasq process using our conf file.
-
-    Parses ``/proc/{pid}/cmdline`` as a NUL-separated argv vector.
-    Requires argv[0] to be the dnsmasq binary (exact name or absolute path)
-    and ``--conf-file=<our-conf>`` to be present as a separate argument.
-    Mirrors ``terok_shield.dnsmasq._is_our_dnsmasq()`` without any imports.
-    """
-    conf_arg = b"--conf-file=" + str(conf_path).encode()
-    try:
-        raw = Path(f"/proc/{pid_int}/cmdline").read_bytes()
     except OSError:
-        return False
-    args = raw.rstrip(b"\x00").split(b"\x00")
-    if not args:
-        return False
-    exe = args[0]
-    return (exe == b"dnsmasq" or exe.endswith(b"/dnsmasq")) and conf_arg in args
-
-
-# ── Environment bootstrap ─────────────────────────────
+        # EPERM means the process exists but we don't own it — treat as alive.
+        return True
+    return True
 
 
 def _bootstrap_env() -> None:
