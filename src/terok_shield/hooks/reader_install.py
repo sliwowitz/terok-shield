@@ -36,6 +36,9 @@ def install_reader_resource(dest: Path | None = None) -> Path:
     """
     if dest is None:
         dest = reader_script_path()
+    # Normalise before touching disk so the Returns-absolute contract holds
+    # even when a caller hands in ``Path("~/share/…")`` or ``Path("./x")``.
+    dest = dest.expanduser().resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
     source = importlib_resources.files(_READER_PACKAGE).joinpath(_READER_RESOURCE)
     dest.write_bytes(source.read_bytes())
