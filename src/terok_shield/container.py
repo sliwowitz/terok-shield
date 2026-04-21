@@ -115,4 +115,8 @@ def _extract_state_dir(records: object) -> Path | None:
             raw,
         )
         return None
-    return path
+    try:
+        return path.resolve()
+    except OSError as exc:
+        _log.warning("failed to resolve state_dir annotation %r: %s", raw, exc)
+        return None
