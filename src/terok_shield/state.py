@@ -14,7 +14,7 @@ Bundle layout::
     ├── hooks/
     │   ├── terok-shield-createRuntime.json
     │   └── terok-shield-poststop.json
-    ├── terok-shield-hook              # entrypoint script (stdlib-only Python)
+    ├── {HOOK_ENTRYPOINT_NAME}         # entrypoint script (stdlib-only Python)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
     ├── dns.tier                       # active DNS tier (dig/getent/dnsmasq)
@@ -34,6 +34,8 @@ Bundle layout::
 # WAYPOINT: HookMode (hooks.mode)
 
 from pathlib import Path
+
+from .paths import HOOK_ENTRYPOINT_NAME
 
 BUNDLE_VERSION = 9
 """Integer version of the state bundle layout.
@@ -73,7 +75,7 @@ def hooks_dir(state_dir: Path) -> Path:
 
 def hook_entrypoint(state_dir: Path) -> Path:
     """Return the path to the hook entrypoint script."""
-    return state_dir / "terok-shield-hook"
+    return state_dir / HOOK_ENTRYPOINT_NAME
 
 
 def hook_json_path(state_dir: Path, stage: str) -> Path:

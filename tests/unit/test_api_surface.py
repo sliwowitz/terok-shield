@@ -34,6 +34,7 @@ EXPECTED_ALL = [
     "DnsTier",
     "EnvironmentCheck",
     "ExecError",
+    "HOOK_ENTRYPOINT_NAME",
     "NftNotFoundError",
     "ProfileLoader",
     "RulesetBuilder",
@@ -46,6 +47,7 @@ EXPECTED_ALL = [
     "SubprocessRunner",
     "USER_HOOKS_DIR",
     "ensure_containers_conf_hooks_dir",
+    "reader_script_path",
     "setup_global_hooks",
     "system_hooks_dir",
 ]

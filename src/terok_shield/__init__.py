@@ -35,6 +35,7 @@ from .config import (
     ShieldState,
     detect_dns_tier,
 )
+from .paths import HOOK_ENTRYPOINT_NAME, reader_script_path
 from .podman_info import (
     USER_HOOKS_DIR,
     ensure_containers_conf_hooks_dir,
@@ -418,6 +419,7 @@ __all__ = [
     "DnsTier",
     "EnvironmentCheck",
     "ExecError",
+    "HOOK_ENTRYPOINT_NAME",
     "NftNotFoundError",
     "ProfileLoader",
     "RulesetBuilder",
@@ -430,6 +432,7 @@ __all__ = [
     "SubprocessRunner",
     "USER_HOOKS_DIR",
     "ensure_containers_conf_hooks_dir",
+    "reader_script_path",
     "setup_global_hooks",
     "system_hooks_dir",
 ]

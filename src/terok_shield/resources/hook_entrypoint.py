@@ -31,14 +31,16 @@ import sys
 import time
 from pathlib import Path
 
-# These constants are intentionally duplicated from src/terok_shield/state.py
-# so this script stays stdlib-only (no terok_shield imports).  Keep in sync:
+# These constants are intentionally duplicated from the terok_shield
+# package so this script stays stdlib-only (no terok_shield imports).
+# Keep in sync:
 #   _BUNDLE_VERSION       ↔  state.BUNDLE_VERSION
 #   _RULESET_NAME         ↔  state.ruleset_path()
 #   _DNSMASQ_CONF_NAME    ↔  state.dnsmasq_conf_path()
 #   _DNSMASQ_PID_NAME     ↔  state.dnsmasq_pid_path()
 #   _CONTAINER_ID_NAME    ↔  state.container_id_path()
 #   _READER_PID_NAME      ↔  state.reader_pid_path()
+#   _reader_script_path() ↔  paths.reader_script_path()
 # (``reader.log`` is bridge-local — no state.py counterpart.)
 _ANN_STATE_DIR = "terok.shield.state_dir"
 _ANN_VERSION = "terok.shield.version"
