@@ -486,3 +486,63 @@ class TestOuterHostUid:
             hook_entrypoint.Path, "read_text", side_effect=OSError("no such file")
         ):
             assert hook_entrypoint._outer_host_uid() == 777
+
+    def test_malformed_uid_map_line_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Lines with the wrong shape or non-integer tokens are skipped, not fatal."""
+        monkeypatch.setattr(hook_entrypoint.os, "getuid", lambda: 1000)
+        with mock.patch.object(
+            hook_entrypoint.Path,
+            "read_text",
+            # Line 1: only 2 parts → len(parts) != 3 continue
+            # Line 2: 3 parts but non-integer → ValueError continue
+            # Line 3: valid identity map that covers uid 1000
+            return_value="two tokens\nbogus value here\n         0          0 4294967295\n",
+        ):
+            assert hook_entrypoint._outer_host_uid() == 1000
+
+
+class TestIsOurReaderShortCmdline:
+    """Short ``/proc/{pid}/cmdline`` payload must be treated as a mismatch."""
+
+    def test_short_cmdline_returns_false(self, tmp_path: Path) -> None:
+        """Cmdline with fewer than four argv entries can't be our reader."""
+        with mock.patch.object(
+            hook_entrypoint.Path, "read_bytes", return_value=b"/usr/bin/python3\x00"
+        ):
+            assert hook_entrypoint._is_our_reader(4321, tmp_path) is False
+
+
+class TestPidExists:
+    """``_pid_exists`` wraps ``os.kill(pid, 0)`` with the kernel's own semantics."""
+
+    def test_alive_process_returns_true(self) -> None:
+        with mock.patch.object(hook_entrypoint.os, "kill"):
+            assert hook_entrypoint._pid_exists(4321) is True
+
+    def test_dead_process_returns_false(self) -> None:
+        with mock.patch.object(hook_entrypoint.os, "kill", side_effect=ProcessLookupError):
+            assert hook_entrypoint._pid_exists(4321) is False
+
+    def test_permission_denied_counts_as_alive(self) -> None:
+        """EPERM means the PID is valid but owned by someone else — still alive."""
+        with mock.patch.object(hook_entrypoint.os, "kill", side_effect=PermissionError("EPERM")):
+            assert hook_entrypoint._pid_exists(4321) is True
+
+
+class TestReaderScriptPath:
+    """``_reader_script_path`` honours XDG, falls back under HOME."""
+
+    def test_xdg_data_home_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        assert hook_entrypoint._reader_script_path() == (
+            tmp_path / "terok-shield" / "nflog-reader.py"
+        )
+
+    def test_falls_back_to_home_local_share(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert hook_entrypoint._reader_script_path() == (
+            tmp_path / ".local" / "share" / "terok-shield" / "nflog-reader.py"
+        )

@@ -344,12 +344,12 @@ def _spawn_reader(sd: Path, container_id: str) -> None:
     except OSError as exc:
         _log(f"terok-shield bridge hook: cannot open reader.log: {exc}")
         return
-    # nosec B603, NOSONAR S6350 — argv is literal + paths we constructed
-    # from validated OCI annotations (shield's own pre_start wrote them) and
-    # the 12-char container id we already pulled out of the OCI state
-    # earlier in this hook.  No shell involvement, no untrusted tokens.
+    # argv is a fixed literal plus paths we constructed from validated OCI
+    # annotations (shield's own pre_start wrote them) and the 12-char
+    # container id we already pulled out of the OCI state earlier in this
+    # hook.  No shell involvement, no untrusted tokens.
     try:
-        proc = subprocess.Popen(  # noqa: S603
+        proc = subprocess.Popen(  # noqa: S603  # nosec B603  # NOSONAR(pythonsecurity:S6350)
             ["/usr/bin/python3", str(reader), str(sd), container_id, "--emit=socket"],
             env=env,
             stdin=subprocess.DEVNULL,
@@ -374,7 +374,10 @@ def _spawn_reader(sd: Path, container_id: str) -> None:
     except OSError as exc:
         _log(f"terok-shield bridge hook: failed to write reader.pid: {exc}")
         with contextlib.suppress(ProcessLookupError, OSError):
-            os.kill(proc.pid, signal.SIGTERM)
+            # Signaling our own direct child from the same hook invocation —
+            # proc.pid was just returned by Popen, no race window, no PID
+            # recycle risk.
+            os.kill(proc.pid, signal.SIGTERM)  # NOSONAR(python:S4828)
 
 
 def _reap_reader(sd: Path) -> None:
@@ -399,7 +402,9 @@ def _reap_reader(sd: Path) -> None:
         pid_file.unlink(missing_ok=True)
         return
     try:
-        os.kill(pid, signal.SIGTERM)
+        # PID validated by `_is_our_reader` cmdline check above — this is the
+        # reader we spawned, not a random recycled PID.
+        os.kill(pid, signal.SIGTERM)  # NOSONAR(python:S4828)
     except ProcessLookupError:
         pid_file.unlink(missing_ok=True)
         return
@@ -414,7 +419,9 @@ def _reap_reader(sd: Path) -> None:
             break
     else:
         with contextlib.suppress(ProcessLookupError, OSError):
-            os.kill(pid, signal.SIGKILL)
+            # Reader we identified above didn't exit within the grace window;
+            # force-kill the same validated PID.
+            os.kill(pid, signal.SIGKILL)  # NOSONAR(python:S4828)
     pid_file.unlink(missing_ok=True)
 
 
@@ -463,7 +470,9 @@ def _is_our_reader(pid_int: int, sd: Path) -> bool:
 def _pid_exists(pid: int) -> bool:
     """Ask the kernel whether *pid* is still a running process."""
     try:
-        os.kill(pid, 0)
+        # Signal 0 is an existence probe — it never delivers a signal, only
+        # triggers the kernel's PID-validity / permission check.
+        os.kill(pid, 0)  # NOSONAR(python:S4828)
     except ProcessLookupError:
         return False
     except OSError:
@@ -523,12 +532,11 @@ def _nsenter(pid: str, *cmd: str, stdin: str | None = None) -> None:
     else:
         # In NS_INIT (shell): enter NS_ROOTLESS first via podman unshare.
         ns_cmd = [_find_podman(), "unshare", _find_nsenter(), "-n", "-t", pid, "--", *cmd]
-    # nosec B603, NOSONAR S6350 — ns_cmd is built from _find_*() resolved
-    # binary paths and the container PID (already validated as a bare
-    # integer-like string when the hook parsed OCI state).  No shell
-    # involvement, no untrusted tokens.
+    # ns_cmd is built from _find_*() resolved binary paths and the container
+    # PID (already validated as a bare integer-like string when the hook
+    # parsed OCI state).  No shell involvement, no untrusted tokens.
     try:
-        result = subprocess.run(  # noqa: S603
+        result = subprocess.run(  # noqa: S603  # nosec B603  # NOSONAR(pythonsecurity:S6350)
             ns_cmd,
             input=stdin,
             text=True,

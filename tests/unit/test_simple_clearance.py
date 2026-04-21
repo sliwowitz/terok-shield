@@ -177,6 +177,15 @@ class TestHandleOperatorInput:
             session._handle_operator_input("a")
         assert len(session._queue) == 1
 
+    def test_accept_on_empty_queue_is_silent_noop(self, tmp_path: Path) -> None:
+        """``a``/``d`` with nothing queued is a no-op, not a crash."""
+        session = _session(tmp_path)
+        assert session._queue == []
+        with mock.patch.object(simple_clearance.subprocess, "run") as m_run:
+            session._handle_operator_input("a")
+        m_run.assert_not_called()
+        assert session._queue == []
+
 
 # ── Buffer helpers ────────────────────────────────────────────────────
 
@@ -345,3 +354,23 @@ class TestReadIntoBuffer:
         with mock.patch.object(simple_clearance.os, "read", side_effect=OSError):
             buf, eof = simple_clearance._read_into_buffer(fd=3, buf="head")
         assert (buf, eof) == ("head", False)
+
+
+class TestSetNonblocking:
+    """``_set_nonblocking`` flips O_NONBLOCK on a real file descriptor."""
+
+    def test_flips_o_nonblock_on_real_fd(self) -> None:
+        """Take a pipe read-end, flip the flag, and verify via F_GETFL."""
+        import fcntl
+        import os
+
+        r, w = os.pipe()
+        try:
+            before = fcntl.fcntl(r, fcntl.F_GETFL)
+            assert not (before & os.O_NONBLOCK)
+            simple_clearance._set_nonblocking(r)
+            after = fcntl.fcntl(r, fcntl.F_GETFL)
+            assert after & os.O_NONBLOCK
+        finally:
+            os.close(r)
+            os.close(w)

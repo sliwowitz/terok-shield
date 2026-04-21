@@ -101,6 +101,94 @@ class TestExtractIpDest:
     def test_unknown_version_returns_empty_tuple(self) -> None:
         assert reader._extract_ip_dest(b"\x50" + b"\x00" * 40) == ("", 0, 0)
 
+    def test_ipv4_with_invalid_ihl_returns_empty_tuple(self) -> None:
+        """IHL < 5 (<20 bytes of header) is malformed — must not decode anything."""
+        bad = bytearray(b"\x00" * 40)
+        bad[0] = 0x40  # version 4, IHL 0
+        assert reader._extract_ip_dest(bytes(bad)) == ("", 0, 0)
+
+
+class TestParseMessagesBoundary:
+    """``_parse_messages`` must give up on short / malformed netlink headers."""
+
+    def test_short_nlmsg_len_breaks_loop(self) -> None:
+        """nl_len smaller than the header stops parsing without crashing."""
+        bad = reader._NLMSG_HDR.pack(8, 0, 0, 0, 0)  # nl_len < header size
+        assert reader._parse_messages(bad) == []
+
+
+class TestParseAttrsBoundary:
+    """``_parse_attrs`` must bail on a too-small TLV length field."""
+
+    def test_short_nfa_len_breaks_loop(self) -> None:
+        """nfa_len smaller than its own header → parser stops, returns what it has."""
+        bad = reader._NFA_HDR.pack(2, 0)  # nfa_len < header size
+        assert reader._parse_attrs(bad) == {}
+
+
+class TestSelectEmitter:
+    """``_select_emitter`` picks the right emitter for ``--emit``."""
+
+    def test_json_mode_returns_json_emitter(self) -> None:
+        assert isinstance(reader._select_emitter("json"), reader.JsonEmitter)
+
+    def test_default_mode_returns_socket_emitter(self) -> None:
+        assert isinstance(reader._select_emitter("socket"), reader.SocketEmitter)
+
+
+class TestEventsSocketPath:
+    """``_events_socket_path`` honours XDG, falls back to /run/user/<uid>."""
+
+    def test_xdg_runtime_dir_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        assert reader._events_socket_path() == tmp_path / "terok-shield-events.sock"
+
+    def test_xdg_missing_falls_back_to_run_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        path = reader._events_socket_path()
+        assert str(path).startswith("/run/user/")
+        assert path.name == "terok-shield-events.sock"
+
+
+class TestResolveBinary:
+    """``_resolve_binary`` returns an absolute path or the /usr/bin fallback."""
+
+    def test_which_hit_returns_absolute_path(self) -> None:
+        with mock.patch.object(reader.shutil, "which", return_value="/opt/custom/bin/podman"):
+            assert reader._resolve_binary("podman") == "/opt/custom/bin/podman"
+
+    def test_which_miss_returns_usr_bin_fallback(self) -> None:
+        with mock.patch.object(reader.shutil, "which", return_value=None):
+            assert reader._resolve_binary("podman") == "/usr/bin/podman"
+
+
+class TestOnStopSignal:
+    """SIGTERM handler flips the stop flag so the select loop exits next tick."""
+
+    def test_flips_stop_requested(self, tmp_path: Path) -> None:
+        session = reader.ReaderSession(
+            state_dir=tmp_path,
+            container="c1",
+            emitter=_RecordingEmitter(),
+        )
+        assert session._stop_requested is False
+        session._on_stop_signal(15, None)
+        assert session._stop_requested is True
+
+
+class TestSocketEmitterContainerExited:
+    """Ensure ``container_exited`` publishes a well-formed JSON frame with reason."""
+
+    def test_emits_exited_payload(self, tmp_path: Path) -> None:
+        path = tmp_path / READER_EVENTS_SOCK_FILENAME
+        fake_sock = mock.MagicMock()
+        emitter = reader.SocketEmitter(path)
+        with mock.patch.object(reader.socket, "socket", return_value=fake_sock):
+            emitter.container_exited("c1", reason="poststop")
+        sent = fake_sock.sendall.call_args[0][0]
+        payload = json.loads(sent)
+        assert payload == {"type": "container_exited", "container": "c1", "reason": "poststop"}
+
 
 class TestAttrsToEvent:
     """``_attrs_to_event`` must keep only BLOCKED-prefixed packets."""
@@ -356,6 +444,20 @@ class TestReaderSession:
         ):
             session.run()
 
+        kinds = [kind for kind, _ in recorder.calls]
+        assert kinds[0] == "started"
+        assert kinds[-1] == "exited"
+
+    def test_select_oserror_exits_cleanly(self, tmp_path: Path) -> None:
+        """If the NFLOG socket closes mid-loop, ``select.select`` raises — we return."""
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        with (
+            mock.patch.object(reader, "_open_nflog_socket", return_value=_FakeSocket()),
+            mock.patch.object(reader.select, "select", side_effect=OSError("bad fd")),
+        ):
+            session.run()
+        # No blocked events emitted, but the container_started/exited bracket still runs.
         kinds = [kind for kind, _ in recorder.calls]
         assert kinds[0] == "started"
         assert kinds[-1] == "exited"

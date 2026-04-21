@@ -584,9 +584,9 @@ def _reexec_inside_container_netns(
     )
     env = {**os.environ, _NSENTER_ENV: "1"}
     try:
-        # nosec B603 — argv is constructed from our own resolved binary
-        # paths and integer-like container PIDs; no shell involvement.
-        subprocess.run(cmd, env=env, check=True)  # noqa: S603
+        # argv is built from our own resolved binary paths and integer-like
+        # container PIDs; no shell involvement.
+        subprocess.run(cmd, env=env, check=True)  # noqa: S603  # nosec B603
     except subprocess.CalledProcessError as exc:
         raise SystemExit(exc.returncode) from exc
 
@@ -594,9 +594,9 @@ def _reexec_inside_container_netns(
 def _podman_container_pid(container: str) -> str:  # pragma: no cover — real podman subprocess
     """Resolve a container's host PID so nsenter can target its network namespace."""
     podman = _resolve_binary("podman")
-    # nosec B603 — argv is a fixed literal plus the caller-supplied container
-    # name; no shell involvement.
-    result = subprocess.run(  # noqa: S603
+    # argv is a fixed literal plus the caller-supplied container name; no
+    # shell involvement.
+    result = subprocess.run(  # noqa: S603  # nosec B603
         [podman, "inspect", "--format", "{{.State.Pid}}", container],
         check=True,
         capture_output=True,
@@ -645,5 +645,5 @@ def _print_json(payload: dict) -> None:
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover — script entry point
     main()
