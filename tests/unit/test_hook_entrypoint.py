@@ -23,7 +23,7 @@ from terok_shield.resources import hook_entrypoint
 def _oci_json(
     pid: int = 42,
     state_dir: str = "/tmp/sd",
-    version: int = 4,
+    version: int = 9,
     container_id: str = "abc123def456789abcdef0123456789abcdef0123456789abcdef0123456789a",
 ) -> str:
     """Return a minimal OCI state JSON for hook_entrypoint.main()."""
@@ -68,7 +68,7 @@ def test_bootstrap_env_sets_missing_var(
     with (
         mock.patch.dict("os.environ", env, clear=True),
         mock.patch("terok_shield.resources.hook_entrypoint.pwd.getpwuid", return_value=fake_entry),
-        mock.patch("terok_shield.resources.hook_entrypoint.os.getuid", return_value=1000),
+        mock.patch("terok_shield.resources.hook_entrypoint._outer_host_uid", return_value=1000),
     ):
         hook_entrypoint._bootstrap_env()
         if expected_key == "PATH":
@@ -99,7 +99,9 @@ def test_bootstrap_env_falls_back_when_getpwuid_raises() -> None:
             "terok_shield.resources.hook_entrypoint.pwd.getpwuid",
             side_effect=KeyError("uid not found"),
         ):
-            with mock.patch("terok_shield.resources.hook_entrypoint.os.getuid", return_value=1234):
+            with mock.patch(
+                "terok_shield.resources.hook_entrypoint._outer_host_uid", return_value=1234
+            ):
                 hook_entrypoint._bootstrap_env()
         assert os.environ["HOME"] == "/home/1234"
 
@@ -401,6 +403,36 @@ def test_createruntime_raises_when_dnsmasq_identity_check_fails(tmp_path: Path) 
             hook_entrypoint._createruntime("1", sd)
 
 
+def test_createruntime_is_idempotent_when_dnsmasq_already_alive(tmp_path: Path) -> None:
+    """_createruntime() skips relaunch when our dnsmasq is already running.
+
+    Second-fire scenarios — a hook replayed by the runtime, a sibling hook
+    re-dispatching into the nft branch, a retry after crun restart — must
+    never end with dnsmasq colliding on 127.0.0.1:53.
+    """
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "ruleset.nft").write_text("table inet terok_shield {}")
+    (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
+    pid_file = sd / "dnsmasq.pid"
+    pid_file.write_text("4242\n")  # prior run left a live process
+
+    def _record_nsenter(*args: object, **kwargs: object) -> None:
+        _record_nsenter.calls.append(args)
+
+    _record_nsenter.calls = []
+    with (
+        mock.patch("terok_shield.resources.hook_entrypoint._nsenter", side_effect=_record_nsenter),
+        mock.patch("terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=True),
+    ):
+        hook_entrypoint._createruntime("1", sd)
+
+    # Ruleset apply still runs (nft is itself idempotent); dnsmasq launch is skipped.
+    assert len(_record_nsenter.calls) == 1
+    assert "dnsmasq" not in str(_record_nsenter.calls[0])
+    assert pid_file.read_text().strip() == "4242"  # untouched
+
+
 # ── _is_our_dnsmasq ───────────────────────────────────────────────────────────
 
 
@@ -536,7 +568,7 @@ def _run_main(json_str: str, *, stage: str = "createRuntime") -> int:
             id="annotations-not-dict",
         ),
         pytest.param(
-            json.dumps({"pid": 42, "annotations": {"terok.shield.version": "4"}}),
+            json.dumps({"pid": 42, "annotations": {"terok.shield.version": "9"}}),
             id="state-dir-missing",
         ),
         pytest.param(
@@ -565,7 +597,7 @@ def test_main_returns_1_when_pid_missing_for_createruntime(tmp_path: Path) -> No
             "pid": 0,
             "annotations": {
                 "terok.shield.state_dir": str(tmp_path),
-                "terok.shield.version": "4",
+                "terok.shield.version": "9",
             },
         }
     )
@@ -667,7 +699,7 @@ def test_main_returns_1_for_relative_state_dir() -> None:
             "pid": 42,
             "annotations": {
                 "terok.shield.state_dir": "relative/path",
-                "terok.shield.version": "4",
+                "terok.shield.version": "9",
             },
         }
     )

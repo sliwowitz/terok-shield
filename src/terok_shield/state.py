@@ -35,11 +35,31 @@ Bundle layout::
 
 from pathlib import Path
 
-BUNDLE_VERSION = 4
+BUNDLE_VERSION = 9
 """Integer version of the state bundle layout.
 
 Bumped whenever the file layout changes in a backwards-incompatible way.
-The OCI hook hard-fails if the annotation version does not match.
+The OCI hook hard-fails if the annotation version does not match.  The
+same constant is the signal ``check_environment()`` uses to detect a
+stale on-disk entrypoint — bump it whenever the entrypoint *protocol*
+changes even if the file layout itself is unchanged, so that
+``terok setup`` rewrites the script instead of short-circuiting.
+
+Version history:
+    9 — pre_start on dnsmasq tier seeds profile.allowed with resolved
+        domains so the initial allow set has permanent entries before
+        dnsmasq starts.  Reader swaps lifetime-dedup for a 30 s rolling
+        window so dismissed notifications can re-surface.
+    8 — reader emits JSON over a unix socket to the host-userns hub
+        (``--emit=socket``) instead of ``dbus-send`` from NS_ROOTLESS;
+        hook spawn line and reader script both need refreshing.
+    7 — bridge hook captures reader stdout+stderr into ``reader.log``
+        under the state dir; reader splits into host-userns outer and
+        container-netns inner.  File layout adds ``reader.log``.
+    6 — hook-argv dispatch protocol: bridge hook adds ``--bridge`` flag
+        between ``args[0]`` and the stage; file layout unchanged.
+    5 — add the optional bridge hook pair and ``reader.pid`` lifecycle file.
+    4 — previous stable shape (nft + dnsmasq only).
 """
 
 
@@ -149,6 +169,11 @@ def resolv_conf_path(state_dir: Path) -> Path:
 def container_id_path(state_dir: Path) -> Path:
     """Return the path to the persisted podman container ID file."""
     return state_dir / "container.id"
+
+
+def reader_pid_path(state_dir: Path) -> Path:
+    """Return the path where the bridge hook tracks the live NFLOG reader PID."""
+    return state_dir / "reader.pid"
 
 
 def audit_path(state_dir: Path) -> Path:

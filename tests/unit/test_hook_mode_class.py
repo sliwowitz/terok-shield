@@ -1020,13 +1020,20 @@ class TestPreStartDnsTierBranches:
         assert "--dns" not in args
 
     @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
-    def test_pre_start_dnsmasq_tier_splits_domains_and_ips(
+    def test_pre_start_dnsmasq_tier_seeds_domains_and_ips(
         self,
         _has_hooks: mock.Mock,
         monkeypatch: pytest.MonkeyPatch,
         make_hook_mode: HookModeHarnessFactory,
     ) -> None:
-        """When tier is DNSMASQ, pre_start splits entries: domains to file, IPs to cache."""
+        """DNSMASQ tier: write domains to profile.domains AND pre-resolve them for profile.allowed.
+
+        Pre-resolving the domains at pre_start is what keeps the initial allow
+        set populated with permanent IPs before dnsmasq starts servicing
+        container traffic — without it, the first connection for an
+        allowlisted domain hits the default-deny before dnsmasq's first
+        ``--nftset`` add lands.
+        """
         _set_euid(monkeypatch, 0)
         harness = make_hook_mode()
         harness.runner.run.side_effect = lambda cmd, **_kw: (
@@ -1037,12 +1044,14 @@ class TestPreStartDnsTierBranches:
 
         args = harness.mode.pre_start("test", ["dev-standard"])
 
-        # dnsmasq tier: resolve_and_cache called with raw IPs only
+        # dnsmasq tier: resolve_and_cache called with BOTH domains and raw IPs so
+        # the initial allow_v4/v6 sets have permanent seed entries.
         harness.dns.resolve_and_cache.assert_called_once()
         call_entries = harness.dns.resolve_and_cache.call_args[0][0]
         assert TEST_IP1 in call_entries
-        assert TEST_DOMAIN not in call_entries
-        # Domains written to profile.domains
+        assert TEST_DOMAIN in call_entries
+        # Domains also written to profile.domains so dnsmasq's --nftset can
+        # add on-demand as new A/AAAA records come back.
         sd = harness.config.state_dir.resolve()
         domains_content = state.profile_domains_path(sd).read_text()
         assert TEST_DOMAIN in domains_content

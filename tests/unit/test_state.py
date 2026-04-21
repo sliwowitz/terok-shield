@@ -27,9 +27,10 @@ from terok_shield.state import (
     profile_domains_path,
     read_denied_ips,
     read_effective_ips,
+    reader_pid_path,
 )
 
-from ..testfs import FAKE_STATE_DIR
+from ..testfs import FAKE_STATE_DIR, READER_PID_FILENAME
 from ..testnet import TEST_IP1, TEST_IP2, TEST_IP3
 
 
@@ -59,6 +60,7 @@ def test_bundle_version_is_positive_int() -> None:
         pytest.param(live_domains_path, FAKE_STATE_DIR / "live.domains", id="live-domains"),
         pytest.param(denied_domains_path, FAKE_STATE_DIR / "denied.domains", id="denied-domains"),
         pytest.param(container_id_path, FAKE_STATE_DIR / "container.id", id="container-id"),
+        pytest.param(reader_pid_path, FAKE_STATE_DIR / READER_PID_FILENAME, id="reader-pid"),
     ],
 )
 def test_path_derivation_functions(
