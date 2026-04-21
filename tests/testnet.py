@@ -111,6 +111,10 @@ IPV6_ULA = "fd00::1"  # Unique Local Address (RFC 4193, fc00::/7)
 IPV6_ULA_CIDR = "fc00::/7"  # Unique Local Address CIDR (RFC 4193)
 IPV6_LINK_LOCAL = "fe80::1"  # Link-local address (RFC 4291, fe80::/10)
 
+# ── IPv6 link-local multicast (used to test clearance-noise filtering) ──
+IPV6_MCAST_ALL_ROUTERS = "ff02::2"  # IPv6 all-routers link-local multicast
+IPV6_MCAST_MLDV2 = "ff02::16"  # MLDv2-capable routers link-local multicast
+
 # ── Expected private ranges (test-owned, independent from implementation) ──
 # These duplicate the implementation constants intentionally so tests catch
 # accidental removal of a range from the production code.

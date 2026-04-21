@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -213,6 +214,21 @@ def _resolve_binary(name: str) -> str:
 
 # ── Session ───────────────────────────────────────────────────────────
 
+#: IPv6 link-local multicast — MLD, router / neighbor discovery, mDNS.
+#: The kernel and systemd emit these routinely; the shield correctly
+#: blocks them but the operator has no useful decision to make, so the
+#: reader drops them before dedup / emit.  See polish backlog.
+_IPV6_LINK_LOCAL_MULTICAST = ipaddress.IPv6Network("ff02::/16")
+
+
+def _is_noise_dest(dest: str) -> bool:
+    """Return True for traffic the clearance flow should silently drop."""
+    try:
+        addr = ipaddress.ip_address(dest)
+    except ValueError:
+        return False
+    return isinstance(addr, ipaddress.IPv6Address) and addr in _IPV6_LINK_LOCAL_MULTICAST
+
 
 class ReaderSession:
     """Orchestrates the container's block-event stream for the clearance flow.
@@ -220,8 +236,15 @@ class ReaderSession:
     Owns the NFLOG socket, a rolling dedup window, the domain cache, and the
     signal handler.  Lives for the container's lifetime: emits
     ``ContainerStarted`` on open, streams ``ConnectionBlocked`` for each
-    unique-destination block within a dedup window, and emits
-    ``ContainerExited`` on SIGTERM or NFLOG close.
+    unique block within a dedup window, and emits ``ContainerExited`` on
+    SIGTERM or NFLOG close.
+
+    The dedup key is the *domain* when the reader has one cached from the
+    per-container dnsmasq log, otherwise the raw destination IP.  That means
+    a multi-A-record name like ``example.com → 1.1.1.1 + 1.0.0.1`` collapses
+    to one prompt rather than two — which matches the operator's mental
+    model ("do I allow example.com?"), not the kernel's ("two distinct
+    packets went to two IPs").
 
     The dedup window rate-limits retries within a single application's
     attempt (TCP SYN retransmits, wget's own retries, etc.) without
@@ -230,10 +253,10 @@ class ReaderSession:
     (replacing still-visible notifications) belongs to the notifier.
     """
 
-    #: Seconds for which a dest stays muted after one emission.  Short enough
-    #: that the operator can re-trigger a block and get a fresh notification
-    #: when the previous one auto-dismissed; long enough that a single wget
-    #: retry burst doesn't produce a pile of duplicate signals.
+    #: Seconds for which a dedup key stays muted after one emission.  Short
+    #: enough that the operator can re-trigger a block and get a fresh
+    #: notification when the previous one auto-dismissed; long enough that a
+    #: single wget retry burst doesn't produce a pile of duplicate signals.
     _DEDUP_WINDOW_S = 30.0
 
     def __init__(self, *, state_dir: Path, container: str, emitter: EventEmitter) -> None:
@@ -273,18 +296,30 @@ class ReaderSession:
                 continue
             now = time.monotonic()
             for event in _drain(sock):
-                last = self._last_emit.get(event.dest)
-                if last is not None and now - last < self._DEDUP_WINDOW_S:
-                    continue
-                self._last_emit[event.dest] = now
-                self._emit_connection_blocked(event)
+                self._maybe_emit(event, now)
 
-    def _emit_connection_blocked(self, event: _RawBlockEvent) -> None:
-        """Enrich an NFLOG event with domain + request-id and publish it."""
-        domain = self._domain_cache.lookup(event.dest)
+    def _maybe_emit(self, event: _RawBlockEvent, now: float) -> None:
+        """Filter noise, dedupe by domain-or-dest, emit if fresh."""
+        if _is_noise_dest(event.dest):
+            return
+        domain = self._resolve_domain(event.dest)
+        dedup_key = domain or event.dest
+        last = self._last_emit.get(dedup_key)
+        if last is not None and now - last < self._DEDUP_WINDOW_S:
+            return
+        self._last_emit[dedup_key] = now
+        self._emit_connection_blocked(event, domain)
+
+    def _resolve_domain(self, dest: str) -> str:
+        """Look *dest* up in the domain cache, refreshing once on miss."""
+        domain = self._domain_cache.lookup(dest)
         if not domain:
             self._domain_cache.refresh()
-            domain = self._domain_cache.lookup(event.dest)
+            domain = self._domain_cache.lookup(dest)
+        return domain
+
+    def _emit_connection_blocked(self, event: _RawBlockEvent, domain: str) -> None:
+        """Publish one ``ConnectionBlocked`` for *event* — caller supplies the domain."""
         request_id = f"{self._container}:{self._next_id}"
         self._next_id += 1
         self._emitter.connection_blocked(

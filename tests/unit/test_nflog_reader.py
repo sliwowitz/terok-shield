@@ -22,7 +22,14 @@ import pytest
 from terok_shield.resources import nflog_reader as reader
 
 from ..testfs import DNSMASQ_LOG_FILENAME, READER_EVENTS_SOCK_FILENAME
-from ..testnet import TEST_DOMAIN, TEST_IP1, TEST_IP99
+from ..testnet import (
+    IPV6_MCAST_ALL_ROUTERS,
+    IPV6_MCAST_MLDV2,
+    TEST_DOMAIN,
+    TEST_IP1,
+    TEST_IP2,
+    TEST_IP99,
+)
 
 # ── Packet-format helpers (pure constructors for fixtures) ────────────
 
@@ -134,6 +141,25 @@ class TestSelectEmitter:
 
     def test_default_mode_returns_socket_emitter(self) -> None:
         assert isinstance(reader._select_emitter("socket"), reader.SocketEmitter)
+
+
+class TestIsNoiseDest:
+    """``_is_noise_dest`` filters IPv6 link-local multicast only."""
+
+    def test_ff02_address_is_noise(self) -> None:
+        assert reader._is_noise_dest(IPV6_MCAST_ALL_ROUTERS) is True
+        assert reader._is_noise_dest(IPV6_MCAST_MLDV2) is True
+
+    def test_regular_ipv6_is_not_noise(self) -> None:
+        """A public IPv6 destination must surface normally."""
+        assert reader._is_noise_dest("2001:db8::1") is False
+
+    def test_ipv4_is_not_noise(self) -> None:
+        assert reader._is_noise_dest(TEST_IP1) is False
+
+    def test_non_address_string_is_not_noise(self) -> None:
+        """Unparseable input maps to False so malformed data falls through to emit."""
+        assert reader._is_noise_dest("not-an-ip") is False
 
 
 class TestEventsSocketPath:
@@ -461,6 +487,82 @@ class TestReaderSession:
         kinds = [kind for kind, _ in recorder.calls]
         assert kinds[0] == "started"
         assert kinds[-1] == "exited"
+
+    def test_ipv6_link_local_multicast_is_silently_dropped(self, tmp_path: Path) -> None:
+        """MLD / router-discovery blocks are kernel noise — the reader drops them."""
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        fake_sock = _FakeSocket()
+        noise = [
+            reader._RawBlockEvent(dest=IPV6_MCAST_ALL_ROUTERS, port=0, proto=socket.IPPROTO_ICMPV6),
+            reader._RawBlockEvent(dest=IPV6_MCAST_MLDV2, port=0, proto=socket.IPPROTO_ICMPV6),
+        ]
+
+        def fake_select(rfds: list, *_args: object, **_kwargs: object) -> tuple[list, list, list]:
+            session._stop_requested = True
+            return (list(rfds), [], [])
+
+        with (
+            mock.patch.object(reader, "_open_nflog_socket", return_value=fake_sock),
+            mock.patch.object(reader, "_drain", return_value=noise),
+            mock.patch.object(reader.select, "select", side_effect=fake_select),
+        ):
+            session.run()
+
+        blocked_events = [payload for kind, payload in recorder.calls if kind == "blocked"]
+        assert blocked_events == []
+
+    def test_multi_ip_for_one_domain_is_emitted_once(self, tmp_path: Path) -> None:
+        """Two IPs that resolve to the same domain collapse to one block event."""
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        # Seed the domain cache so both IPs map to the same name.
+        session._domain_cache._mapping = {TEST_IP1: TEST_DOMAIN, TEST_IP2: TEST_DOMAIN}
+        fake_sock = _FakeSocket()
+        events = [
+            reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP),
+            reader._RawBlockEvent(dest=TEST_IP2, port=443, proto=socket.IPPROTO_TCP),
+        ]
+
+        def fake_select(rfds: list, *_args: object, **_kwargs: object) -> tuple[list, list, list]:
+            session._stop_requested = True
+            return (list(rfds), [], [])
+
+        with (
+            mock.patch.object(reader, "_open_nflog_socket", return_value=fake_sock),
+            mock.patch.object(reader, "_drain", return_value=events),
+            mock.patch.object(reader.select, "select", side_effect=fake_select),
+        ):
+            session.run()
+
+        blocked_events = [payload for kind, payload in recorder.calls if kind == "blocked"]
+        assert len(blocked_events) == 1
+        assert blocked_events[0].domain == TEST_DOMAIN
+
+    def test_dedup_falls_back_to_dest_when_domain_unknown(self, tmp_path: Path) -> None:
+        """With no cached domain, dedup stays on raw dest IP — no regression."""
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        fake_sock = _FakeSocket()
+        # Two *distinct* IPs, no domain in cache → two emissions expected.
+        events = [
+            reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP),
+            reader._RawBlockEvent(dest=TEST_IP99, port=443, proto=socket.IPPROTO_TCP),
+        ]
+
+        def fake_select(rfds: list, *_args: object, **_kwargs: object) -> tuple[list, list, list]:
+            session._stop_requested = True
+            return (list(rfds), [], [])
+
+        with (
+            mock.patch.object(reader, "_open_nflog_socket", return_value=fake_sock),
+            mock.patch.object(reader, "_drain", return_value=events),
+            mock.patch.object(reader.select, "select", side_effect=fake_select),
+        ):
+            session.run()
+
+        blocked_events = [payload for kind, payload in recorder.calls if kind == "blocked"]
+        assert {e.dest for e in blocked_events} == {TEST_IP1, TEST_IP99}
 
 
 class _FakeSocket:
