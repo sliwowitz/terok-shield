@@ -17,13 +17,12 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
-from pathlib import Path
 
 #: Directories searched after ``PATH`` when probing daemon binaries.
 #: rootless users regularly have neither on their login PATH; probing
 #: them anyway lets the aggregator report a usable host rather than
 #: fail on a shell-configuration quirk.
-_SBIN_DIRS = ("/usr/sbin", "/sbin")
+_SBIN_DIRS: tuple[str, ...] = ("/usr/sbin", "/sbin")
 
 
 @dataclass(frozen=True)
@@ -66,14 +65,13 @@ def which_sbin_aware(name: str) -> str:
 
     Returns the absolute path of the first match or an empty string
     when the binary is not on ``PATH`` and not in ``/usr/sbin`` or
-    ``/sbin``.  Used by every probe that might need to find a daemon
-    binary rootless users don't usually have on ``PATH``.
+    ``/sbin``.  The sbin fallback reuses :func:`shutil.which` with an
+    explicit ``path=`` so executability (``os.X_OK``) is checked the
+    same way ``PATH`` resolution would — a regular non-executable file
+    in ``/usr/sbin`` shouldn't count as a hit.
     """
-    found = shutil.which(name)
-    if found:
-        return found
-    for d in _SBIN_DIRS:
-        candidate = Path(d) / name
-        if candidate.is_file():
-            return str(candidate)
+    for search_path in (None, *_SBIN_DIRS):
+        found = shutil.which(name, path=search_path)
+        if found:
+            return found
     return ""
