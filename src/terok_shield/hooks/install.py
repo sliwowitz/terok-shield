@@ -82,15 +82,30 @@ def setup_global_hooks(target_dir: Path, *, use_sudo: bool = False) -> None:
     to a temp directory first and copies via ``sudo cp`` — avoids needing
     the Python process itself to run as root.
 
+    Both the nft hook pair and the bridge hook pair are written
+    unconditionally, and the standalone NFLOG reader resource is copied
+    out of the package to its canonical on-disk path.  The bridge pair
+    soft-fails on missing clearance (no socket to deliver events to)
+    rather than blocking container starts, so installing it
+    unconditionally costs nothing on shield-only deployments and
+    removes a configuration knob.
+
     Args:
         target_dir: Global hooks directory to install into.
         use_sudo: Copy files via ``sudo`` instead of writing directly.
     """
+    # Reader resource is per-user, never under target_dir; install it
+    # before the hook JSONs so the path the JSONs reference is already
+    # populated when the first container fires.
+    from .reader_install import install_reader_resource
+
+    install_reader_resource()
     if use_sudo:
         _install_via_sudo(target_dir)
     else:
         target_dir.mkdir(parents=True, exist_ok=True)
         _write_hook_files(target_dir / _ENTRYPOINT_NAME, target_dir)
+        _write_bridge_hook_files(target_dir / _ENTRYPOINT_NAME, target_dir)
 
 
 # ── Installation mechanics ──────────────────────────────
@@ -106,6 +121,7 @@ def _install_via_sudo(target_dir: Path) -> None:
         # JSONs must reference the final entrypoint path, not the temp copy
         final_entrypoint = target_dir / _ENTRYPOINT_NAME
         _write_hook_files(tmp_path / _ENTRYPOINT_NAME, tmp_path, final_entrypoint)
+        _write_bridge_hook_files(final_entrypoint, tmp_path)
 
         subprocess.run(
             ["sudo", "mkdir", "-p", str(target_dir)],
@@ -114,6 +130,7 @@ def _install_via_sudo(target_dir: Path) -> None:
         files = [str(tmp_path / _ENTRYPOINT_NAME)]
         for stage in _HOOK_STAGES:
             files.append(str(tmp_path / f"terok-shield-{stage}.json"))
+            files.append(str(tmp_path / f"terok-shield-bridge-{stage}.json"))
         subprocess.run(
             ["sudo", "cp", *files, str(target_dir) + "/"],
             check=True,  # noqa: S603, S607

@@ -669,34 +669,50 @@ def test_pre_start_writes_ruleset_nft(
     assert "terok_shield" in content
 
 
-def test_setup_global_hooks_non_sudo(tmp_path: Path) -> None:
-    """setup_global_hooks() installs hooks without sudo."""
+def test_setup_global_hooks_non_sudo(tmp_path: Path, monkeypatch) -> None:
+    """setup_global_hooks() installs nft + bridge hooks + reader resource."""
     from terok_shield.hooks.install import setup_global_hooks
 
+    # Reader resource lands at ``$XDG_DATA_HOME/terok-shield/nflog-reader.py``;
+    # redirect it under tmp_path so the test stays hermetic.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
     target = tmp_path / "hooks.d"
     setup_global_hooks(target)
+
+    # Entrypoint + nft pair.
     assert (target / "terok-shield-hook").is_file()
     assert (target / "terok-shield-hook").stat().st_mode & 0o100
     assert (target / "terok-shield-createRuntime.json").is_file()
     assert (target / "terok-shield-poststop.json").is_file()
-    # Hook JSONs reference entrypoint in the target dir
     data = json.loads((target / "terok-shield-createRuntime.json").read_text())
     assert data["hook"]["path"] == str(target / "terok-shield-hook")
+    # Bridge pair lands too — installs are now one operation, not two.
+    assert (target / "terok-shield-bridge-createRuntime.json").is_file()
+    assert (target / "terok-shield-bridge-poststop.json").is_file()
+    bridge = json.loads((target / "terok-shield-bridge-createRuntime.json").read_text())
+    assert "--bridge" in bridge["hook"]["args"]
+    # Reader resource lands at the canonical XDG path.
+    reader = tmp_path / "share" / "terok-shield" / "nflog-reader.py"
+    assert reader.is_file()
+    assert reader.stat().st_mode & 0o100
 
 
-def test_setup_global_hooks_sudo_uses_subprocess(tmp_path: Path) -> None:
-    """setup_global_hooks(use_sudo=True) calls sudo subprocess."""
+def test_setup_global_hooks_sudo_uses_subprocess(tmp_path: Path, monkeypatch) -> None:
+    """setup_global_hooks(use_sudo=True) calls sudo subprocess for hook install."""
     from unittest import mock
 
     from terok_shield.hooks.install import setup_global_hooks
 
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
     target = tmp_path / "system-hooks"
     with mock.patch("subprocess.run") as mock_run:
         setup_global_hooks(target, use_sudo=True)
-        # Should call sudo mkdir, sudo cp, sudo chmod
+        # sudo mkdir + sudo cp + sudo chmod (reader install runs in-process).
         assert mock_run.call_count == 3
         cmds = [call.args[0] for call in mock_run.call_args_list]
         assert all(cmd[0] == "sudo" for cmd in cmds)
+    # Reader resource still lands locally (no sudo for the per-user path).
+    assert (tmp_path / "share" / "terok-shield" / "nflog-reader.py").is_file()
 
 
 @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
