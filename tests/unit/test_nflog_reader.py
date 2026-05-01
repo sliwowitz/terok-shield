@@ -21,7 +21,7 @@ import pytest
 
 from terok_shield.resources import nflog_reader as reader
 
-from ..testfs import DNSMASQ_LOG_FILENAME, READER_EVENTS_SOCK_FILENAME
+from ..testfs import AUDIT_FILENAME, DNSMASQ_LOG_FILENAME, READER_EVENTS_SOCK_FILENAME
 from ..testnet import (
     IPV6_MCAST_ALL_ROUTERS,
     IPV6_MCAST_MLDV2,
@@ -670,7 +670,7 @@ class TestAuditBlockAppend:
         raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
-        audit_path = tmp_path / "audit.jsonl"
+        audit_path = tmp_path / AUDIT_FILENAME
         assert audit_path.is_file()
         entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
         assert len(entries) == 1
@@ -693,7 +693,9 @@ class TestAuditBlockAppend:
         raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
-        entries = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+        entries = [
+            json.loads(line) for line in (tmp_path / AUDIT_FILENAME).read_text().splitlines()
+        ]
         assert entries[0]["domain"] == TEST_DOMAIN
 
     def test_audit_omits_domain_when_unresolved(self, tmp_path: Path) -> None:
@@ -703,7 +705,7 @@ class TestAuditBlockAppend:
         raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
-        entry = json.loads((tmp_path / "audit.jsonl").read_text().splitlines()[0])
+        entry = json.loads((tmp_path / AUDIT_FILENAME).read_text().splitlines()[0])
         assert "domain" not in entry
 
     def test_audit_written_before_wire_emit(self, tmp_path: Path) -> None:
@@ -727,7 +729,7 @@ class TestAuditBlockAppend:
         raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
-        audit_path = tmp_path / "audit.jsonl"
+        audit_path = tmp_path / AUDIT_FILENAME
         assert audit_path.is_file()
         assert "blocked" in audit_path.read_text()
 
@@ -735,7 +737,7 @@ class TestAuditBlockAppend:
         """Unwriteable audit log soft-fails — the wire emit must still happen."""
         recorder = _RecordingEmitter()
         # Make the audit write impossible by replacing audit.jsonl with a directory.
-        (tmp_path / "audit.jsonl").mkdir()
+        (tmp_path / AUDIT_FILENAME).mkdir()
 
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
         raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
@@ -752,8 +754,41 @@ class TestAuditBlockAppend:
         raw = reader._RawBlockEvent(dest=TEST_IP1, port=0, proto=132)  # SCTP
         session._maybe_emit(raw, now=0.0)
 
-        entry = json.loads((tmp_path / "audit.jsonl").read_text().splitlines()[0])
+        entry = json.loads((tmp_path / AUDIT_FILENAME).read_text().splitlines()[0])
         assert entry["proto"] == "132"
+
+    def test_hub_outage_does_not_flood_audit_log(self, tmp_path: Path) -> None:
+        """Repeated retries during a hub outage produce one audit line per dedup window.
+
+        Without separate audit/wire dedup tracking, a hub-down scenario
+        would re-trigger ``_emit_connection_blocked`` on every NFLOG
+        packet (because ``_last_emit`` stays unmarked while the wire
+        keeps failing) and *each* of those retries would re-write the
+        same ``"blocked"`` line — flooding the forensic log during the
+        very window where it's least helpful.  ``_last_audit`` is the
+        knob that prevents that without giving up wire-side retries.
+        """
+
+        class _AlwaysFailingEmitter:
+            def container_started(self, container: str) -> None: ...
+            def container_exited(self, container: str, *, reason: str) -> None: ...
+            def close(self) -> None: ...
+
+            def connection_blocked(self, event: reader.BlockedEvent) -> bool:
+                return False
+
+        emitter = _AlwaysFailingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=emitter)
+        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        # Five NFLOG packets within the same dedup window — TCP retries.
+        for t in (0.0, 1.0, 2.0, 5.0, 10.0):
+            session._maybe_emit(raw, now=t)
+
+        lines = (tmp_path / AUDIT_FILENAME).read_text().splitlines()
+        assert len(lines) == 1, (
+            "audit-log dedup window must collapse retry storms to one entry; "
+            f"got {len(lines)} entries"
+        )
 
 
 class _FakeSocket:

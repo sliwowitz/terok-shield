@@ -270,7 +270,20 @@ class ReaderSession:
         self._container = container
         self._emitter = emitter
         self._domain_cache = _DomainCache(state_dir)
+        # Two independent dedup windows, both keyed on (domain or dest):
+        #
+        # * ``_last_emit`` rate-limits *wire* delivery — only updated when
+        #   the hub accepts the event, so a hub-down period leaves the
+        #   key un-marked and the next NFLOG packet retries the emit.
+        # * ``_last_audit`` rate-limits *audit-log* writes — updated when
+        #   the JSONL append succeeds, so a hub outage doesn't flood
+        #   ``audit.jsonl`` with one entry per TCP-retransmit.
+        #
+        # Splitting them is what keeps the audit-volume bound honest
+        # ("one entry per (container, dest) per ``_DEDUP_WINDOW_S``")
+        # without giving up the wire's retry-on-failure semantics.
         self._last_emit: dict[str, float] = {}
+        self._last_audit: dict[str, float] = {}
         self._next_id = 1
         self._stop_requested = False
 
@@ -306,21 +319,38 @@ class ReaderSession:
     def _maybe_emit(self, event: _RawBlockEvent, now: float) -> None:
         """Filter noise, dedupe by domain-or-dest, emit if fresh.
 
-        The dedup key is only mutated once the emit actually reaches
-        the hub.  Marking before the emit would poison the 30-s window
-        when the write fails (hub restarted, socket unreachable, …),
-        silently suppressing retries even though the operator never
-        saw a popup for the first attempt.
+        The wire dedup key (``_last_emit``) is only mutated once the
+        emit actually reaches the hub.  Marking before the emit would
+        poison the 30-s window when the write fails (hub restarted,
+        socket unreachable, …), silently suppressing retries even
+        though the operator never saw a popup for the first attempt.
+
+        Audit dedup is independent (``_last_audit``): it's marked
+        whenever the JSONL append succeeds, regardless of whether the
+        wire emit lands.  Without this split, a hub outage would
+        re-trigger ``_emit_connection_blocked`` every NFLOG packet
+        (because ``_last_emit`` stays unmarked), and *each* of those
+        retries would currently re-write the same ``"blocked"`` line
+        to ``audit.jsonl`` — flooding the forensic log during the
+        very window where it's least helpful.
         """
         if _is_noise_dest(event.dest):
             return
         domain = self._resolve_domain(event.dest)
         dedup_key = domain or event.dest
-        last = self._last_emit.get(dedup_key)
-        if last is not None and now - last < self._DEDUP_WINDOW_S:
+        last_emit = self._last_emit.get(dedup_key)
+        last_audit = self._last_audit.get(dedup_key)
+        emit_fresh = last_emit is None or (now - last_emit) >= self._DEDUP_WINDOW_S
+        audit_fresh = last_audit is None or (now - last_audit) >= self._DEDUP_WINDOW_S
+        if not emit_fresh and not audit_fresh:
             return
-        if self._emit_connection_blocked(event, domain):
-            self._last_emit[dedup_key] = now
+        if audit_fresh and self._append_audit_block(event, domain):
+            self._last_audit[dedup_key] = now
+        if emit_fresh:
+            request_id = f"{self._container}:{self._next_id}"
+            self._next_id += 1
+            if self._emit_connection_blocked(event, domain, request_id):
+                self._last_emit[dedup_key] = now
 
     def _resolve_domain(self, dest: str) -> str:
         """Look *dest* up in the domain cache, refreshing once on miss."""
@@ -330,24 +360,18 @@ class ReaderSession:
             domain = self._domain_cache.lookup(dest)
         return domain
 
-    def _emit_connection_blocked(self, event: _RawBlockEvent, domain: str) -> bool:
+    def _emit_connection_blocked(self, event: _RawBlockEvent, domain: str, request_id: str) -> bool:
         """Publish one ``ConnectionBlocked`` for *event* — caller supplies the domain.
 
-        Audits the block to ``state_dir/audit.jsonl`` *before* the wire
-        emit so a hub-down or socket-rejected event is still recorded
-        forensically.  Auditing should be terminal-end, not best-effort
-        — the per-container forensic log is the single ground-truth
-        timeline of what shield decided and what the operator
-        subsequently said about it (verdict entries are written by the
-        host-side ``terok-shield allow|deny`` path).
+        Audit-vs-wire dedup is split: ``_maybe_emit`` decides
+        independently whether each side should fire and tracks them
+        in separate windows (``_last_audit`` / ``_last_emit``).  This
+        method handles only the wire half.
 
         Returns ``True`` when the emitter accepted the event; ``False``
         when it was dropped (socket emitter: hub unreachable).  Callers
-        use the result to decide whether to mark the dedup window.
+        use the result to decide whether to mark the wire dedup window.
         """
-        request_id = f"{self._container}:{self._next_id}"
-        self._next_id += 1
-        self._append_audit_block(event, domain)
         return self._emitter.connection_blocked(
             BlockedEvent(
                 container=self._container,
@@ -359,7 +383,7 @@ class ReaderSession:
             )
         )
 
-    def _append_audit_block(self, event: _RawBlockEvent, domain: str) -> None:
+    def _append_audit_block(self, event: _RawBlockEvent, domain: str) -> bool:
         """Write one ``"action": "blocked"`` entry to ``state_dir/audit.jsonl``.
 
         Inlined (rather than importing ``terok_shield.audit.AuditLogger``)
@@ -370,9 +394,13 @@ class ReaderSession:
         for short JSON lines (atomic up to PIPE_BUF on Linux), so the
         timeline interleaves cleanly without locks.
 
-        Soft-fail on every error: an unwriteable audit log must not
-        break the wire emit, since the wire is the operator's
-        immediate signal and the audit is the long-term record.
+        Returns ``True`` on a successful append, ``False`` on any
+        ``OSError``.  Soft-fail behaviour is preserved (callers do
+        nothing on a ``False`` return), but the failure is logged at
+        ``WARNING`` so a sudden silence in ``audit.jsonl`` doesn't
+        disappear into DEBUG noise on a host where the default log
+        level is INFO — see ``terok_shield.audit.AuditLogger``'s
+        host-side path for the same posture.
         """
         entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -390,7 +418,9 @@ class ReaderSession:
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
         except OSError as exc:
-            _log.debug("audit append failed (%s): %s", path, exc)
+            _log.warning("audit append failed (%s): %s", path, exc)
+            return False
+        return True
 
     def _install_signal_handlers(self) -> None:
         """Arrange a clean shutdown on SIGTERM / SIGINT."""
