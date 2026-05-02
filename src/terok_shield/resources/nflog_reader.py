@@ -97,16 +97,21 @@ _NFULNL_CFG_CMD = struct.Struct("=BBH")
 _NFA_HDR = struct.Struct("=HH")
 
 
+Dossier = dict[str, str]
+"""Orchestrator-supplied identity bundle resolved at emit time.
+
+Keys are the orchestrator's contract — terok publishes ``project``,
+``task``, ``name``, etc. under the ``dossier.*`` OCI annotation
+namespace, but the reader treats the dict as opaque payload and
+forwards whatever keys it sees.  An empty dossier is the
+shield-only-deployment shape; the consumer renders the bare
+container short-id in that case.
+"""
+
+
 @dataclass(frozen=True)
 class BlockedEvent:
-    """A packet the kernel dropped at the interactive-deny rule — one per unique dest IP.
-
-    ``dossier`` carries the orchestrator-supplied identity bundle resolved at
-    emit time — ``container_name``, ``project``, ``task`` etc.  Empty for
-    shield-only deployments where no orchestrator publishes ``dossier.*``
-    annotations; the consumer (clearance UI) renders the bare container
-    field in that case.
-    """
+    """A packet the kernel dropped at the interactive-deny rule — one per unique dest IP."""
 
     container: str
     request_id: str
@@ -114,7 +119,7 @@ class BlockedEvent:
     port: int
     proto: int
     domain: str
-    dossier: dict[str, str] = field(default_factory=dict)
+    dossier: Dossier = field(default_factory=dict)
 
 
 # ── Entry point ───────────────────────────────────────────────────────
@@ -294,7 +299,7 @@ class ReaderSession:
         state_dir: Path,
         container: str,
         emitter: EventEmitter,
-        static_dossier: dict[str, str] | None = None,
+        static_dossier: Dossier | None = None,
     ) -> None:
         """Prepare the session; the socket is opened in [`run`][terok_shield.resources.nflog_reader.ReaderSession.run].
 
@@ -315,7 +320,7 @@ class ReaderSession:
         # Precomputed static floor — meta_path stripped, since it never
         # leaks onto the wire.  Recomputing the comprehension on every
         # emit would be tiny but is on the per-NFLOG-packet hot path.
-        self._static_dossier_floor: dict[str, str] = {
+        self._static_dossier_floor: Dossier = {
             k: v for k, v in self._static_dossier.items() if k != _META_PATH_KEY
         }
         self._domain_cache = _DomainCache(state_dir)
@@ -420,7 +425,7 @@ class ReaderSession:
         event: _RawBlockEvent,
         domain: str,
         request_id: str,
-        dossier: dict[str, str],
+        dossier: Dossier,
     ) -> bool:
         """Publish one ``ConnectionBlocked`` for *event* — caller supplies the domain.
 
@@ -445,7 +450,7 @@ class ReaderSession:
             )
         )
 
-    def _resolve_dossier(self) -> dict[str, str]:
+    def _resolve_dossier(self) -> Dossier:
         """Build the per-emit dossier from static annotations + the meta-path file.
 
         The orchestrator's static ``dossier.*`` annotations (set at
@@ -483,9 +488,7 @@ class ReaderSession:
         dossier.pop(_META_PATH_KEY, None)
         return dossier
 
-    def _append_audit_block(
-        self, event: _RawBlockEvent, domain: str, dossier: dict[str, str]
-    ) -> bool:
+    def _append_audit_block(self, event: _RawBlockEvent, domain: str, dossier: Dossier) -> bool:
         """Write one ``"action": "blocked"`` entry to ``state_dir/audit.jsonl``.
 
         Inlined (rather than importing ``terok_shield.audit.AuditLogger``)
@@ -921,13 +924,14 @@ def _parse_args() -> argparse.Namespace:  # pragma: no cover — thin argparse w
     return args
 
 
-def _parse_annotations(raw: str) -> dict[str, str]:
-    """Parse a JSON string into a flat ``dict[str, str]`` — soft-fail to empty.
+def _parse_annotations(raw: str) -> Dossier:
+    """Parse a JSON-encoded ``--annotations`` argument into a ``Dossier`` — soft-fail to empty.
 
-    Malformed input or a non-string value lands at ``{}`` rather than crashing
-    the reader: the bridge hook is opt-in and a corrupt annotation block must
-    not block container start.  Non-string values are coerced via ``str()`` so
-    a numeric annotation (rare but legal in the OCI spec) still surfaces.
+    Malformed input or a non-object payload lands at ``{}`` rather than
+    crashing the reader: the bridge hook is opt-in and a corrupt
+    annotation block must not block container start.  Non-string values
+    are coerced via ``str()`` so a numeric annotation (rare but legal
+    in the OCI spec) still surfaces.
     """
     try:
         decoded = json.loads(raw) if raw else {}
