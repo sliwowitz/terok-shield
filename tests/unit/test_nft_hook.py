@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the stdlib-only OCI hook entrypoint script.
+"""Unit tests for ``nft_hook.py`` — the stdlib-only nft + dnsmasq OCI hook.
 
-The script lives at ``src/terok_shield/resources/hook_entrypoint.py`` and is
-importable as a regular Python module (``from terok_shield.resources import
-hook_entrypoint``) even though it is installed verbatim as a hook binary.
+The script lives at ``src/terok_shield/resources/nft_hook.py`` and is
+importable as a regular Python module (``from terok_shield.resources
+import nft_hook``) even though it is installed verbatim as a hook
+binary.  Shared helpers (env bootstrap, nsenter, binary finders) live
+in the sibling ``_oci_state`` ballast module and are tested via the
+same module reference.
 """
 
 import io
@@ -17,7 +20,7 @@ from unittest import mock
 
 import pytest
 
-from terok_shield.resources import hook_entrypoint
+from terok_shield.resources import _oci_state, nft_hook
 
 
 def _oci_json(
@@ -26,7 +29,7 @@ def _oci_json(
     version: int = 11,
     container_id: str = "abc123def456789abcdef0123456789abcdef0123456789abcdef0123456789a",
 ) -> str:
-    """Return a minimal OCI state JSON for hook_entrypoint.main()."""
+    """Return a minimal OCI state JSON for nft_hook.main()."""
     return json.dumps(
         {
             "id": container_id,
@@ -67,10 +70,10 @@ def test_bootstrap_env_sets_missing_var(
     )
     with (
         mock.patch.dict("os.environ", env, clear=True),
-        mock.patch("terok_shield.resources.hook_entrypoint.pwd.getpwuid", return_value=fake_entry),
-        mock.patch("terok_shield.resources.hook_entrypoint._outer_host_uid", return_value=1000),
+        mock.patch("terok_shield.resources._oci_state.pwd.getpwuid", return_value=fake_entry),
+        mock.patch("terok_shield.resources._oci_state.outer_host_uid", return_value=1000),
     ):
-        hook_entrypoint._bootstrap_env()
+        _oci_state.bootstrap_env()
         if expected_key == "PATH":
             assert expected_value in os.environ[expected_key]
         else:
@@ -85,7 +88,7 @@ def test_bootstrap_env_does_not_override_existing_vars() -> None:
         "PATH": "/custom/bin",
     }
     with mock.patch.dict("os.environ", env, clear=True):
-        hook_entrypoint._bootstrap_env()
+        _oci_state.bootstrap_env()
         assert os.environ["HOME"] == "/custom/home"
         assert os.environ["XDG_RUNTIME_DIR"] == "/custom/xdg"
         assert os.environ["PATH"] == "/custom/bin"
@@ -96,13 +99,11 @@ def test_bootstrap_env_falls_back_when_getpwuid_raises() -> None:
     env = {"XDG_RUNTIME_DIR": "/run/user/1234", "PATH": "/usr/bin"}
     with mock.patch.dict("os.environ", env, clear=True):
         with mock.patch(
-            "terok_shield.resources.hook_entrypoint.pwd.getpwuid",
+            "terok_shield.resources._oci_state.pwd.getpwuid",
             side_effect=KeyError("uid not found"),
         ):
-            with mock.patch(
-                "terok_shield.resources.hook_entrypoint._outer_host_uid", return_value=1234
-            ):
-                hook_entrypoint._bootstrap_env()
+            with mock.patch("terok_shield.resources._oci_state.outer_host_uid", return_value=1234):
+                _oci_state.bootstrap_env()
         assert os.environ["HOME"] == "/home/1234"
 
 
@@ -112,32 +113,24 @@ def test_bootstrap_env_falls_back_when_getpwuid_raises() -> None:
 @pytest.mark.parametrize(
     ("finder", "which_result", "expected"),
     [
+        pytest.param(_oci_state.find_nsenter, "/bin/nsenter", "/bin/nsenter", id="nsenter-which"),
+        pytest.param(_oci_state.find_nsenter, None, "/usr/bin/nsenter", id="nsenter-fallback"),
+        pytest.param(_oci_state.find_nft, "/usr/bin/nft", "/usr/bin/nft", id="nft-which"),
+        pytest.param(_oci_state.find_nft, None, "/usr/sbin/nft", id="nft-fallback"),
         pytest.param(
-            hook_entrypoint._find_nsenter, "/bin/nsenter", "/bin/nsenter", id="nsenter-which"
-        ),
-        pytest.param(
-            hook_entrypoint._find_nsenter, None, "/usr/bin/nsenter", id="nsenter-fallback"
-        ),
-        pytest.param(hook_entrypoint._find_nft, "/usr/bin/nft", "/usr/bin/nft", id="nft-which"),
-        pytest.param(hook_entrypoint._find_nft, None, "/usr/sbin/nft", id="nft-fallback"),
-        pytest.param(
-            hook_entrypoint._find_dnsmasq,
+            _oci_state.find_dnsmasq,
             "/usr/bin/dnsmasq",
             "/usr/bin/dnsmasq",
             id="dnsmasq-which",
         ),
-        pytest.param(
-            hook_entrypoint._find_dnsmasq, None, "/usr/sbin/dnsmasq", id="dnsmasq-fallback"
-        ),
+        pytest.param(_oci_state.find_dnsmasq, None, "/usr/sbin/dnsmasq", id="dnsmasq-fallback"),
     ],
 )
 def test_find_binary_uses_which_or_falls_back(
     finder: object, which_result: str | None, expected: str
 ) -> None:
     """Each _find_*() helper returns the which result when found, or a hard-coded fallback."""
-    with mock.patch(
-        "terok_shield.resources.hook_entrypoint.shutil.which", return_value=which_result
-    ):
+    with mock.patch("terok_shield.resources._oci_state.shutil.which", return_value=which_result):
         assert finder() == expected  # type: ignore[operator]
 
 
@@ -154,14 +147,14 @@ def test_nsenter_uses_nsenter_directly_when_uid_is_zero() -> None:
     mock_result = mock.MagicMock()
     mock_result.returncode = 0
     with mock.patch(
-        "terok_shield.resources.hook_entrypoint.subprocess.run", return_value=mock_result
+        "terok_shield.resources._oci_state.subprocess.run", return_value=mock_result
     ) as mock_run:
-        with mock.patch("terok_shield.resources.hook_entrypoint.os.getuid", return_value=0):
+        with mock.patch("terok_shield.resources._oci_state.os.getuid", return_value=0):
             with mock.patch(
-                "terok_shield.resources.hook_entrypoint._find_nsenter",
+                "terok_shield.resources._oci_state.find_nsenter",
                 return_value="/usr/bin/nsenter",
             ):
-                hook_entrypoint._nsenter("99", "nft", "-f", "/tmp/r.nft")
+                _oci_state.nsenter("99", "nft", "-f", "/tmp/r.nft")
 
     mock_run.assert_called_once_with(
         ["/usr/bin/nsenter", "-n", "-t", "99", "--", "nft", "-f", "/tmp/r.nft"],
@@ -181,18 +174,18 @@ def test_nsenter_uses_podman_unshare_when_uid_is_nonzero() -> None:
     mock_result = mock.MagicMock()
     mock_result.returncode = 0
     with mock.patch(
-        "terok_shield.resources.hook_entrypoint.subprocess.run", return_value=mock_result
+        "terok_shield.resources._oci_state.subprocess.run", return_value=mock_result
     ) as mock_run:
-        with mock.patch("terok_shield.resources.hook_entrypoint.os.getuid", return_value=1000):
+        with mock.patch("terok_shield.resources._oci_state.os.getuid", return_value=1000):
             with mock.patch(
-                "terok_shield.resources.hook_entrypoint._find_podman",
+                "terok_shield.resources._oci_state.find_podman",
                 return_value="/usr/bin/podman",
             ):
                 with mock.patch(
-                    "terok_shield.resources.hook_entrypoint._find_nsenter",
+                    "terok_shield.resources._oci_state.find_nsenter",
                     return_value="/usr/bin/nsenter",
                 ):
-                    hook_entrypoint._nsenter("99", "nft", "-f", "/tmp/r.nft")
+                    _oci_state.nsenter("99", "nft", "-f", "/tmp/r.nft")
 
     mock_run.assert_called_once_with(
         [
@@ -219,13 +212,13 @@ def test_nsenter_passes_stdin_as_text() -> None:
     mock_result = mock.MagicMock()
     mock_result.returncode = 0
     with mock.patch(
-        "terok_shield.resources.hook_entrypoint.subprocess.run", return_value=mock_result
+        "terok_shield.resources._oci_state.subprocess.run", return_value=mock_result
     ) as mock_run:
         with mock.patch(
-            "terok_shield.resources.hook_entrypoint._find_nsenter",
+            "terok_shield.resources._oci_state.find_nsenter",
             return_value="/usr/bin/nsenter",
         ):
-            hook_entrypoint._nsenter("99", "nft", "-f", "-", stdin="table inet x {}")
+            _oci_state.nsenter("99", "nft", "-f", "-", stdin="table inet x {}")
 
     _, kwargs = mock_run.call_args
     assert kwargs["input"] == "table inet x {}"
@@ -249,30 +242,28 @@ def test_nsenter_raises_on_failure_with_correct_message(
     mock_result.stderr = stderr
     mock_result.stdout = stdout
     with (
+        mock.patch("terok_shield.resources._oci_state.subprocess.run", return_value=mock_result),
         mock.patch(
-            "terok_shield.resources.hook_entrypoint.subprocess.run", return_value=mock_result
-        ),
-        mock.patch(
-            "terok_shield.resources.hook_entrypoint._find_nsenter", return_value="/usr/bin/nsenter"
+            "terok_shield.resources._oci_state.find_nsenter", return_value="/usr/bin/nsenter"
         ),
     ):
         with pytest.raises(RuntimeError, match=expected_match):
-            hook_entrypoint._nsenter("99", "nft", "-f", "/tmp/r.nft")
+            _oci_state.nsenter("99", "nft", "-f", "/tmp/r.nft")
 
 
 def test_nsenter_raises_on_timeout() -> None:
     """_nsenter() raises RuntimeError when subprocess.run exceeds the 30-second timeout."""
     with (
         mock.patch(
-            "terok_shield.resources.hook_entrypoint.subprocess.run",
+            "terok_shield.resources._oci_state.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["nft"], timeout=30),
         ),
         mock.patch(
-            "terok_shield.resources.hook_entrypoint._find_nsenter", return_value="/usr/bin/nsenter"
+            "terok_shield.resources._oci_state.find_nsenter", return_value="/usr/bin/nsenter"
         ),
     ):
         with pytest.raises(RuntimeError, match="timed out"):
-            hook_entrypoint._nsenter("99", "nft", "-f", "-")
+            _oci_state.nsenter("99", "nft", "-f", "-")
 
 
 # ── _createruntime ────────────────────────────────────────────────────────────
@@ -284,7 +275,7 @@ def test_createruntime_raises_when_namespace_files_missing(tmp_path: Path) -> No
     sd.mkdir()
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
     with pytest.raises(RuntimeError, match="network namespace file missing"):
-        hook_entrypoint._createruntime("99999999", sd)
+        nft_hook._createruntime("99999999", sd)
 
 
 def test_createruntime_treats_permission_error_as_ns_exists(tmp_path: Path) -> None:
@@ -306,13 +297,13 @@ def test_createruntime_treats_permission_error_as_ns_exists(tmp_path: Path) -> N
 
     with (
         mock.patch(
-            "terok_shield.resources.hook_entrypoint.Path.stat",
+            "terok_shield.resources._oci_state.Path.stat",
             _selective_permission_error,
         ),
-        mock.patch("terok_shield.resources.hook_entrypoint._nsenter"),
+        mock.patch("terok_shield.resources._oci_state.nsenter"),
     ):
         # Must not raise — PermissionError is treated as "namespace exists but inaccessible"
-        hook_entrypoint._createruntime("1", sd)
+        nft_hook._createruntime("1", sd)
 
 
 def test_createruntime_raises_when_ruleset_missing(tmp_path: Path) -> None:
@@ -322,7 +313,7 @@ def test_createruntime_raises_when_ruleset_missing(tmp_path: Path) -> None:
     # PID 1: stat() raises PermissionError (non-root) → treated as accessible;
     # ruleset.nft is absent, so the ruleset-missing check fires next.
     with pytest.raises(RuntimeError, match="ruleset.nft not found"):
-        hook_entrypoint._createruntime("1", sd)
+        nft_hook._createruntime("1", sd)
 
 
 def test_createruntime_applies_ruleset_via_nsenter(tmp_path: Path) -> None:
@@ -331,8 +322,8 @@ def test_createruntime_applies_ruleset_via_nsenter(tmp_path: Path) -> None:
     sd.mkdir()
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
 
-    with mock.patch("terok_shield.resources.hook_entrypoint._nsenter") as mock_ns:
-        hook_entrypoint._createruntime("1", sd)
+    with mock.patch("terok_shield.resources._oci_state.nsenter") as mock_ns:
+        nft_hook._createruntime("1", sd)
 
     assert mock_ns.call_count == 1
     args = mock_ns.call_args.args
@@ -360,11 +351,11 @@ def test_createruntime_starts_dnsmasq_when_conf_present(tmp_path: Path) -> None:
 
     with (
         mock.patch(
-            "terok_shield.resources.hook_entrypoint._nsenter", side_effect=_fake_nsenter
+            "terok_shield.resources._oci_state.nsenter", side_effect=_fake_nsenter
         ) as mock_ns,
-        mock.patch("terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
     ):
-        hook_entrypoint._createruntime("1", sd)
+        nft_hook._createruntime("1", sd)
 
     # nsenter called twice: apply ruleset + launch dnsmasq (no resolv.conf write)
     assert mock_ns.call_count == 2
@@ -379,9 +370,9 @@ def test_createruntime_raises_when_dnsmasq_pid_file_not_written(tmp_path: Path) 
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
     (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
 
-    with mock.patch("terok_shield.resources.hook_entrypoint._nsenter"):
+    with mock.patch("terok_shield.resources._oci_state.nsenter"):
         with pytest.raises(RuntimeError, match="PID file not written"):
-            hook_entrypoint._createruntime("1", sd)
+            nft_hook._createruntime("1", sd)
 
 
 def test_createruntime_raises_when_dnsmasq_identity_check_fails(tmp_path: Path) -> None:
@@ -396,11 +387,11 @@ def test_createruntime_raises_when_dnsmasq_identity_check_fails(tmp_path: Path) 
             (sd / "dnsmasq.pid").write_text("42\n")
 
     with (
-        mock.patch("terok_shield.resources.hook_entrypoint._nsenter", side_effect=_fake_nsenter),
-        mock.patch("terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=False),
+        mock.patch("terok_shield.resources._oci_state.nsenter", side_effect=_fake_nsenter),
+        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=False),
     ):
         with pytest.raises(RuntimeError, match="not the expected process"):
-            hook_entrypoint._createruntime("1", sd)
+            nft_hook._createruntime("1", sd)
 
 
 def test_createruntime_is_idempotent_when_dnsmasq_already_alive(tmp_path: Path) -> None:
@@ -422,10 +413,10 @@ def test_createruntime_is_idempotent_when_dnsmasq_already_alive(tmp_path: Path) 
 
     _record_nsenter.calls = []
     with (
-        mock.patch("terok_shield.resources.hook_entrypoint._nsenter", side_effect=_record_nsenter),
-        mock.patch("terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.nsenter", side_effect=_record_nsenter),
+        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
     ):
-        hook_entrypoint._createruntime("1", sd)
+        nft_hook._createruntime("1", sd)
 
     # Ruleset apply still runs (nft is itself idempotent); dnsmasq launch is skipped.
     assert len(_record_nsenter.calls) == 1
@@ -440,15 +431,15 @@ def test_is_our_dnsmasq_returns_true_when_cmdline_matches(tmp_path: Path) -> Non
     """_is_our_dnsmasq() returns True when argv[0]=='dnsmasq' and --conf-file= matches."""
     conf = tmp_path / "dnsmasq.conf"
     cmdline = b"dnsmasq\x00--conf-file=" + str(conf).encode() + b"\x00"
-    with mock.patch.object(hook_entrypoint.Path, "read_bytes", return_value=cmdline):
-        assert hook_entrypoint._is_our_dnsmasq(1234, conf) is True
+    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=cmdline):
+        assert nft_hook._is_our_dnsmasq(1234, conf) is True
 
 
 def test_is_our_dnsmasq_returns_false_when_cmdline_missing(tmp_path: Path) -> None:
     """_is_our_dnsmasq() returns False when /proc/{pid}/cmdline is unreadable."""
     conf = tmp_path / "dnsmasq.conf"
-    with mock.patch.object(hook_entrypoint.Path, "read_bytes", side_effect=OSError("no such file")):
-        assert hook_entrypoint._is_our_dnsmasq(9999, conf) is False
+    with mock.patch.object(_oci_state.Path, "read_bytes", side_effect=OSError("no such file")):
+        assert nft_hook._is_our_dnsmasq(9999, conf) is False
 
 
 def test_is_our_dnsmasq_returns_false_when_conf_path_substring(tmp_path: Path) -> None:
@@ -456,15 +447,15 @@ def test_is_our_dnsmasq_returns_false_when_conf_path_substring(tmp_path: Path) -
     conf = tmp_path / "dnsmasq.conf"
     longer = tmp_path / "prefixed" / conf.name
     cmdline = b"dnsmasq\x00--conf-file=" + str(longer).encode() + b"\x00"
-    with mock.patch.object(hook_entrypoint.Path, "read_bytes", return_value=cmdline):
-        assert hook_entrypoint._is_our_dnsmasq(1234, conf) is False
+    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=cmdline):
+        assert nft_hook._is_our_dnsmasq(1234, conf) is False
 
 
 def test_is_our_dnsmasq_returns_false_when_cmdline_is_empty(tmp_path: Path) -> None:
     """_is_our_dnsmasq() returns False when /proc/{pid}/cmdline is empty."""
     conf = tmp_path / "dnsmasq.conf"
-    with mock.patch.object(hook_entrypoint.Path, "read_bytes", return_value=b""):
-        assert hook_entrypoint._is_our_dnsmasq(1234, conf) is False
+    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=b""):
+        assert nft_hook._is_our_dnsmasq(1234, conf) is False
 
 
 # ── _poststop ─────────────────────────────────────────────────────────────────
@@ -477,10 +468,10 @@ def test_poststop_sends_sigterm_to_dnsmasq(tmp_path: Path) -> None:
     (sd / "dnsmasq.pid").write_text("12345\n")
 
     with (
-        mock.patch("terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.resources.hook_entrypoint.os.kill") as mock_kill,
+        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.os.kill") as mock_kill,
     ):
-        hook_entrypoint._poststop(sd)
+        nft_hook._poststop(sd)
 
     mock_kill.assert_called_once_with(12345, 15)
 
@@ -493,10 +484,10 @@ def test_poststop_skips_stale_pid(tmp_path: Path) -> None:
     pid_file.write_text("12345\n")
 
     with (
-        mock.patch("terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=False),
-        mock.patch("terok_shield.resources.hook_entrypoint.os.kill") as mock_kill,
+        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=False),
+        mock.patch("terok_shield.resources._oci_state.os.kill") as mock_kill,
     ):
-        hook_entrypoint._poststop(sd)
+        nft_hook._poststop(sd)
 
     mock_kill.assert_not_called()
     assert not pid_file.exists(), "stale PID file must be removed when identity check fails"
@@ -509,10 +500,10 @@ def test_poststop_ignores_oserror_on_stale_pid_unlink(tmp_path: Path) -> None:
     (sd / "dnsmasq.pid").write_text("12345\n")
 
     with (
-        mock.patch("terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=False),
-        mock.patch("terok_shield.resources.hook_entrypoint.Path.unlink", side_effect=OSError),
+        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=False),
+        mock.patch("terok_shield.resources._oci_state.Path.unlink", side_effect=OSError),
     ):
-        hook_entrypoint._poststop(sd)  # must not raise
+        nft_hook._poststop(sd)  # must not raise
 
 
 def test_poststop_is_noop_when_pid_file_absent(tmp_path: Path) -> None:
@@ -520,7 +511,7 @@ def test_poststop_is_noop_when_pid_file_absent(tmp_path: Path) -> None:
     sd = tmp_path / "sd"
     sd.mkdir()
     # No pid file — should not raise
-    hook_entrypoint._poststop(sd)
+    nft_hook._poststop(sd)
 
 
 def test_poststop_ignores_oserror_on_kill(tmp_path: Path) -> None:
@@ -530,13 +521,13 @@ def test_poststop_ignores_oserror_on_kill(tmp_path: Path) -> None:
     (sd / "dnsmasq.pid").write_text("99999\n")
 
     with (
-        mock.patch("terok_shield.resources.hook_entrypoint._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
         mock.patch(
-            "terok_shield.resources.hook_entrypoint.os.kill",
+            "terok_shield.resources._oci_state.os.kill",
             side_effect=OSError,
         ),
     ):
-        hook_entrypoint._poststop(sd)  # must not raise
+        nft_hook._poststop(sd)  # must not raise
 
 
 def test_poststop_ignores_invalid_pid_content(tmp_path: Path) -> None:
@@ -545,24 +536,24 @@ def test_poststop_ignores_invalid_pid_content(tmp_path: Path) -> None:
     sd.mkdir()
     (sd / "dnsmasq.pid").write_text("not-a-pid\n")
 
-    hook_entrypoint._poststop(sd)  # must not raise
+    nft_hook._poststop(sd)  # must not raise
 
 
 # ── main() ────────────────────────────────────────────────────────────────────
 
 
 def _run_main(json_str: str, *, stage: str = "createRuntime") -> int:
-    """Call hook_entrypoint.main() with mocked argv, stdin, and _log.
+    """Call nft_hook.main() with mocked argv, stdin, and _log.
 
     _log is suppressed so error paths do not write real files (its fallback
     path is /tmp/terok-hook-error.log which would escape the tmp_path sandbox).
     """
     with (
-        mock.patch("terok_shield.resources.hook_entrypoint.sys.argv", ["hook", stage]),
-        mock.patch("terok_shield.resources.hook_entrypoint.sys.stdin", io.StringIO(json_str)),
-        mock.patch("terok_shield.resources.hook_entrypoint._log"),
+        mock.patch("terok_shield.resources.nft_hook.sys.argv", ["hook", stage]),
+        mock.patch("terok_shield.resources.nft_hook.sys.stdin", io.StringIO(json_str)),
+        mock.patch("terok_shield.resources._oci_state.log"),
     ):
-        return hook_entrypoint.main()
+        return nft_hook.main()
 
 
 @pytest.mark.parametrize(
@@ -619,7 +610,7 @@ def test_main_dispatches_createruntime_and_returns_0(tmp_path: Path) -> None:
 
     oci = _oci_json(pid=42, state_dir=str(sd))
 
-    with mock.patch("terok_shield.resources.hook_entrypoint._createruntime") as mock_cr:
+    with mock.patch("terok_shield.resources.nft_hook._createruntime") as mock_cr:
         rc = _run_main(oci)
 
     assert rc == 0
@@ -633,7 +624,7 @@ def test_main_persists_container_id(tmp_path: Path) -> None:
     full_id = "abc123def456789abcdef0123456789abcdef0123456789abcdef0123456789a"
     oci = _oci_json(pid=42, state_dir=str(sd), container_id=full_id)
 
-    with mock.patch("terok_shield.resources.hook_entrypoint._createruntime"):
+    with mock.patch("terok_shield.resources.nft_hook._createruntime"):
         rc = _run_main(oci)
 
     assert rc == 0
@@ -649,7 +640,7 @@ def test_main_dispatches_poststop_and_returns_0(tmp_path: Path) -> None:
 
     oci = _oci_json(pid=0, state_dir=str(sd))
 
-    with mock.patch("terok_shield.resources.hook_entrypoint._poststop") as mock_ps:
+    with mock.patch("terok_shield.resources.nft_hook._poststop") as mock_ps:
         rc = _run_main(oci, stage="poststop")
 
     assert rc == 0
@@ -666,7 +657,7 @@ def test_main_dispatches_poststop_on_version_mismatch(tmp_path: Path) -> None:
     sd.mkdir()
     oci = _oci_json(pid=0, state_dir=str(sd), version=999)
 
-    with mock.patch("terok_shield.resources.hook_entrypoint._poststop") as mock_ps:
+    with mock.patch("terok_shield.resources.nft_hook._poststop") as mock_ps:
         rc = _run_main(oci, stage="poststop")
 
     assert rc == 0
@@ -680,7 +671,7 @@ def test_main_returns_1_on_createruntime_exception(tmp_path: Path) -> None:
     oci = _oci_json(pid=42, state_dir=str(sd))
 
     with mock.patch(
-        "terok_shield.resources.hook_entrypoint._createruntime",
+        "terok_shield.resources.nft_hook._createruntime",
         side_effect=RuntimeError("nft failed"),
     ):
         assert _run_main(oci) == 1
@@ -719,8 +710,8 @@ def test_main_returns_1_for_unknown_stage(tmp_path: Path) -> None:
     sd.mkdir()
     oci = _oci_json(pid=42, state_dir=str(sd))
     with (
-        mock.patch("terok_shield.resources.hook_entrypoint._createruntime") as mock_cr,
-        mock.patch("terok_shield.resources.hook_entrypoint._poststop") as mock_ps,
+        mock.patch("terok_shield.resources.nft_hook._createruntime") as mock_cr,
+        mock.patch("terok_shield.resources.nft_hook._poststop") as mock_ps,
     ):
         assert _run_main(oci, stage="prestart") == 1
     mock_cr.assert_not_called()
@@ -734,7 +725,7 @@ def test_main_returns_1_when_poststop_raises(tmp_path: Path) -> None:
     oci = _oci_json(pid=0, state_dir=str(sd))
 
     with mock.patch(
-        "terok_shield.resources.hook_entrypoint._poststop",
+        "terok_shield.resources.nft_hook._poststop",
         side_effect=RuntimeError("disk full"),
     ):
         assert _run_main(oci, stage="poststop") == 1

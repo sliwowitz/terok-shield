@@ -637,14 +637,23 @@ def test_install_hooks_creates_entrypoint_and_hook_jsons(tmp_path: Path) -> None
         assert stage_name in data["stages"]
 
 
-def test_generate_entrypoint_is_stdlib_only(tmp_path: Path) -> None:
-    """The entrypoint script uses /usr/bin/env python3 and has no terok_shield imports."""
-    from terok_shield.hooks.install import _generate_entrypoint
+def test_role_scripts_are_stdlib_only(tmp_path: Path) -> None:
+    """Both role scripts use ``/usr/bin/env python3`` and have no terok_shield imports.
 
-    content = _generate_entrypoint()
-    assert content.splitlines()[0] == "#!/usr/bin/env python3"
-    assert "import terok_shield" not in content
-    assert "ruleset.nft" in content
+    The shared ballast (``_oci_state.py``) is verified separately by
+    ``test_hook_isolation`` — same stdlib-only contract.
+    """
+    from terok_shield.hooks.install import _RESOURCES
+
+    for name in ("nft_hook.py", "reader_hook.py"):
+        content = (_RESOURCES / name).read_text()
+        assert content.splitlines()[0] == "#!/usr/bin/env python3", name
+        assert "import terok_shield" not in content, name
+        assert "from terok_shield" not in content, name
+    # nft_hook is the one that actually emits ``ruleset.nft`` references —
+    # keep the file-name literal grep here so a rename in state.py
+    # tripwires both this test and ``test_nft_hook_path_strings_match_state_functions``.
+    assert "ruleset.nft" in (_RESOURCES / "nft_hook.py").read_text()
 
 
 @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
@@ -670,7 +679,7 @@ def test_pre_start_writes_ruleset_nft(
 
 
 def test_setup_global_hooks_non_sudo(tmp_path: Path, monkeypatch) -> None:
-    """setup_global_hooks() installs nft + bridge hooks + reader resource."""
+    """``setup_global_hooks()`` lays down nft + reader hooks + ballast + reader resource."""
     from terok_shield.hooks.install import setup_global_hooks
 
     # Reader resource lands at ``$XDG_DATA_HOME/terok-shield/nflog-reader.py``;
@@ -679,19 +688,28 @@ def test_setup_global_hooks_non_sudo(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "hooks.d"
     setup_global_hooks(target)
 
-    # Entrypoint + nft pair.
+    # Shared ballast lands once — both role scripts import from it.
+    assert (target / "_oci_state.py").is_file()
+
+    # nft role: script + JSON pair.
     assert (target / "terok-shield-hook").is_file()
     assert (target / "terok-shield-hook").stat().st_mode & 0o100
     assert (target / "terok-shield-createRuntime.json").is_file()
     assert (target / "terok-shield-poststop.json").is_file()
-    data = json.loads((target / "terok-shield-createRuntime.json").read_text())
-    assert data["hook"]["path"] == str(target / "terok-shield-hook")
-    # Bridge pair lands too — installs are now one operation, not two.
+    nft = json.loads((target / "terok-shield-createRuntime.json").read_text())
+    assert nft["hook"]["path"] == str(target / "terok-shield-hook")
+    assert nft["hook"]["args"] == ["terok-shield-hook", "createRuntime"]
+
+    # Reader role: own script + own JSON pair (no shared ``--bridge`` flag now).
+    assert (target / "terok-shield-bridge-hook").is_file()
+    assert (target / "terok-shield-bridge-hook").stat().st_mode & 0o100
     assert (target / "terok-shield-bridge-createRuntime.json").is_file()
     assert (target / "terok-shield-bridge-poststop.json").is_file()
     bridge = json.loads((target / "terok-shield-bridge-createRuntime.json").read_text())
-    assert "--bridge" in bridge["hook"]["args"]
-    # Reader resource lands at the canonical XDG path.
+    assert bridge["hook"]["path"] == str(target / "terok-shield-bridge-hook")
+    assert bridge["hook"]["args"] == ["terok-shield-bridge-hook", "createRuntime"]
+
+    # NFLOG reader resource lands at the canonical XDG path.
     reader = tmp_path / "share" / "terok-shield" / "nflog-reader.py"
     assert reader.is_file()
     assert reader.stat().st_mode & 0o100

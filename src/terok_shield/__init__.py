@@ -130,20 +130,22 @@ class EnvironmentCheck:
 
 
 def _read_installed_hook_version(hooks_dirs: list[Path]) -> int | None:
-    """Read ``_BUNDLE_VERSION`` from the installed hook entrypoint, or ``None``.
+    """Read ``BUNDLE_VERSION`` from the installed ballast module, or ``None``.
 
-    Scans each hooks directory for the entrypoint script and extracts the
-    version from the ``_BUNDLE_VERSION = N`` line.  Returns ``None`` if
-    not found or unparseable.
+    The hooks directory contains the shared ``_oci_state.py`` ballast
+    that both role scripts import from at runtime.  ``BUNDLE_VERSION``
+    lives there as the canonical definition; reading it from a role
+    script would only see a re-import.  Returns ``None`` if the
+    ballast file is absent or unparseable.
     """
     import re
 
-    pattern = re.compile(r"^_BUNDLE_VERSION\s*=\s*(\d+)", re.MULTILINE)
+    pattern = re.compile(r"^BUNDLE_VERSION\s*=\s*(\d+)", re.MULTILINE)
     for d in hooks_dirs:
-        hook = d / "terok-shield-hook"
-        if hook.is_file():
+        ballast = d / "_oci_state.py"
+        if ballast.is_file():
             try:
-                m = pattern.search(hook.read_text())
+                m = pattern.search(ballast.read_text())
                 if m:
                     return int(m.group(1))
             except (OSError, ValueError):

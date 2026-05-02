@@ -524,10 +524,10 @@ class TestCheckEnvironment:
         make_shield: ShieldHarnessFactory,
         tmp_path: Path,
     ) -> None:
-        """Mismatched hook version → stale-hooks health status."""
+        """Mismatched ballast version → stale-hooks health status."""
         hooks_dir = tmp_path / "hooks.d"
         hooks_dir.mkdir()
-        (hooks_dir / "terok-shield-hook").write_text("_BUNDLE_VERSION = 1\n")
+        (hooks_dir / "_oci_state.py").write_text("BUNDLE_VERSION = 1\n")
         _find_dirs.return_value = [hooks_dir]
 
         harness = make_shield()
@@ -547,10 +547,10 @@ class TestCheckEnvironment:
         make_shield: ShieldHarnessFactory,
         tmp_path: Path,
     ) -> None:
-        """Hook file without _BUNDLE_VERSION line → stale-hooks (not silently ok)."""
+        """Ballast file without ``BUNDLE_VERSION`` line → stale-hooks (not silently ok)."""
         hooks_dir = tmp_path / "hooks.d"
         hooks_dir.mkdir()
-        (hooks_dir / "terok-shield-hook").write_text("#!/bin/sh\necho old hook\n")
+        (hooks_dir / "_oci_state.py").write_text("# no version here\n")
         _find_dirs.return_value = [hooks_dir]
 
         harness = make_shield()
@@ -567,12 +567,14 @@ class TestReadInstalledHookVersion:
     """Tests for the _read_installed_hook_version helper."""
 
     def test_reads_version_from_hook(self, tmp_path: Path) -> None:
-        """Extracts _BUNDLE_VERSION from the entrypoint script."""
+        """Extracts ``BUNDLE_VERSION`` from the installed ballast module."""
         from terok_shield import _read_installed_hook_version
 
         hooks_dir = tmp_path / "hooks.d"
         hooks_dir.mkdir()
-        (hooks_dir / "terok-shield-hook").write_text("_BUNDLE_VERSION = 42\n")
+        # The version lives in the shared ``_oci_state.py`` ballast that
+        # the role scripts import from at runtime.
+        (hooks_dir / "_oci_state.py").write_text("BUNDLE_VERSION = 42\n")
         assert _read_installed_hook_version([hooks_dir]) == 42
 
     def test_returns_none_when_no_hook(self, tmp_path: Path) -> None:
@@ -582,21 +584,21 @@ class TestReadInstalledHookVersion:
         assert _read_installed_hook_version([tmp_path]) is None
 
     def test_returns_none_on_oserror(self, tmp_path: Path) -> None:
-        """Returns None when the hook file cannot be read."""
+        """Returns None when the ballast file cannot be read."""
         from terok_shield import _read_installed_hook_version
 
         hooks_dir = tmp_path / "hooks.d"
         hooks_dir.mkdir()
-        hook = hooks_dir / "terok-shield-hook"
-        hook.write_text("_BUNDLE_VERSION = 5\n")
+        ballast = hooks_dir / "_oci_state.py"
+        ballast.write_text("BUNDLE_VERSION = 5\n")
         with mock.patch.object(Path, "read_text", side_effect=OSError("boom")):
             assert _read_installed_hook_version([hooks_dir]) is None
 
     def test_returns_none_on_no_match(self, tmp_path: Path) -> None:
-        """Returns None when the hook file has no _BUNDLE_VERSION line."""
+        """Returns None when the ballast file has no ``BUNDLE_VERSION`` line."""
         from terok_shield import _read_installed_hook_version
 
         hooks_dir = tmp_path / "hooks.d"
         hooks_dir.mkdir()
-        (hooks_dir / "terok-shield-hook").write_text("#!/usr/bin/env python3\nprint('hello')\n")
+        (hooks_dir / "_oci_state.py").write_text("# no version here\n")
         assert _read_installed_hook_version([hooks_dir]) is None
