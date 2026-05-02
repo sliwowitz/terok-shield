@@ -715,6 +715,39 @@ def test_setup_global_hooks_non_sudo(tmp_path: Path, monkeypatch) -> None:
     assert reader.stat().st_mode & 0o100
 
 
+def test_install_hooks_honors_custom_entrypoint_name(tmp_path: Path) -> None:
+    """``install_hooks`` writes the nft entrypoint at the requested filename.
+
+    Per-container installs and tests pin a specific
+    ``hook_entrypoint`` path; the JSON descriptors must point at the
+    very file the caller asked for, not the canonical default.  The
+    reader entrypoint and the shared ballast still use their canonical
+    names — only the nft script is renameable.
+    """
+    from terok_shield.hooks.install import install_hooks
+
+    target = tmp_path / "hooks.d"
+    custom_entrypoint = target / "my-custom-name"
+    install_hooks(hook_entrypoint=custom_entrypoint, hooks_dir=target)
+
+    # Custom-named nft script lives at the requested path.
+    assert custom_entrypoint.is_file()
+    assert custom_entrypoint.stat().st_mode & 0o100
+
+    # JSON descriptors reference that exact path, with the
+    # corresponding cosmetic argv[0].
+    nft_json = json.loads((target / "terok-shield-createRuntime.json").read_text())
+    assert nft_json["hook"]["path"] == str(custom_entrypoint)
+    assert nft_json["hook"]["args"] == ["my-custom-name", "createRuntime"]
+
+    # Sibling files keep their canonical names — only the nft script
+    # is parameterised.
+    assert (target / "_oci_state.py").is_file()
+    assert (target / "terok-shield-bridge-hook").is_file()
+    bridge_json = json.loads((target / "terok-shield-bridge-createRuntime.json").read_text())
+    assert bridge_json["hook"]["path"] == str(target / "terok-shield-bridge-hook")
+
+
 def test_setup_global_hooks_sudo_uses_subprocess(tmp_path: Path, monkeypatch) -> None:
     """setup_global_hooks(use_sudo=True) calls sudo subprocess for hook install."""
     from unittest import mock

@@ -188,7 +188,7 @@ def pid_exists(pid: int) -> bool:
     try:
         # Signal 0 is an existence probe — never delivers a signal,
         # only triggers the kernel's PID-validity / permission check.
-        os.kill(pid, 0)  # NOSONAR(python:S4828)
+        os.kill(pid, 0)  # NOSONAR
     except ProcessLookupError:
         return False
     except OSError:

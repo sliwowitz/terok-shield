@@ -37,22 +37,28 @@ _READER_PID_NAME = "reader.pid"
 _READER_LOG_NAME = "reader.log"
 
 
-def main() -> int:
-    """OCI hook entry point: spawn or reap the NFLOG reader by stage."""
+def main() -> None:
+    """OCI hook entry point: spawn or reap the NFLOG reader by stage.
+
+    Returns ``None`` unconditionally — the bridge path is soft-fail by
+    contract: container start must never be blocked by a missing
+    reader, an unreachable session bus, a corrupt OCI state JSON, or a
+    failed Popen.  ``sys.exit(None)`` (the call site below) exits 0,
+    which is exactly the OCI-hook signal we want.  (Compare
+    ``nft_hook.main()``, which *does* return ``int`` because the nft
+    path is fail-closed.)
+    """
     _oci_state.bootstrap_env()
     stage = sys.argv[1] if len(sys.argv) > 1 else "createRuntime"
     try:
         oci = json.load(sys.stdin)
     except ValueError as exc:
         _oci_state.log(f"terok-shield bridge hook: bad OCI state: {exc}")
-        # Bridge path is soft-fail by contract: container start must
-        # never be blocked by a missing reader / unreachable session
-        # bus / Popen error — clearance degrades to "no events".
-        return 0
+        return
 
     sd = _oci_state.state_dir_from_oci(oci)
     if sd is None:
-        return 0
+        return
 
     log_path = sd / "hook-error.log"
 
@@ -60,7 +66,6 @@ def main() -> int:
         _bridge_main(oci, sd, stage, log_path)
     except Exception as exc:  # noqa: BLE001
         _oci_state.log(f"terok-shield bridge hook: {exc}", log_path)
-    return 0
 
 
 def _bridge_main(oci: dict, sd: Path, stage: str, log_path: Path) -> None:
@@ -143,7 +148,7 @@ def _spawn_reader(sd: Path, container_id: str, dossier: dict[str, str] | None = 
     # argv is a fixed literal plus paths constructed from validated OCI
     # annotations and the 12-char container id; no shell involvement.
     try:
-        proc = subprocess.Popen(  # noqa: S603  # nosec B603  # NOSONAR(pythonsecurity:S6350)
+        proc = subprocess.Popen(  # noqa: S603  # nosec B603  # NOSONAR
             [
                 "/usr/bin/python3",
                 str(reader),
@@ -179,7 +184,7 @@ def _spawn_reader(sd: Path, container_id: str, dossier: dict[str, str] | None = 
             # Signaling our own direct child from the same hook
             # invocation — proc.pid was just returned by Popen, no race
             # window, no PID recycle risk.
-            os.kill(proc.pid, signal.SIGTERM)  # NOSONAR(python:S4828)
+            os.kill(proc.pid, signal.SIGTERM)  # NOSONAR
 
 
 def _reap_reader(sd: Path) -> None:
@@ -205,7 +210,7 @@ def _reap_reader(sd: Path) -> None:
         return
     try:
         # PID validated by ``_is_our_reader`` cmdline check above.
-        os.kill(pid, signal.SIGTERM)  # NOSONAR(python:S4828)
+        os.kill(pid, signal.SIGTERM)  # NOSONAR
     except ProcessLookupError:
         pid_file.unlink(missing_ok=True)
         return
@@ -222,7 +227,7 @@ def _reap_reader(sd: Path) -> None:
         with contextlib.suppress(ProcessLookupError, OSError):
             # Reader didn't exit within the grace window; force-kill
             # the same validated PID.
-            os.kill(pid, signal.SIGKILL)  # NOSONAR(python:S4828)
+            os.kill(pid, signal.SIGKILL)  # NOSONAR
     pid_file.unlink(missing_ok=True)
 
 
@@ -294,4 +299,4 @@ def _session_bus_address() -> str | None:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
+    main()  # always returns None — see ``main`` docstring

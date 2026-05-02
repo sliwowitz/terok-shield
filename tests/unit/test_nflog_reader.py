@@ -291,6 +291,29 @@ class TestResolveDossier:
         )
         assert session._resolve_dossier() == {"port": "8080", "enabled": "True"}
 
+    def test_meta_file_cannot_smuggle_meta_path_into_wire(self, tmp_path: Path) -> None:
+        """A meta JSON containing ``meta_path`` must not leak the host path on the wire.
+
+        Defensive case: a confused orchestrator (or a hand-edited
+        meta file) could write its own ``meta_path`` key.  The
+        resolver strips it after the merge so the on-disk path
+        stays internal — never reaches the wire payload or the
+        ``audit.jsonl`` row, which would otherwise expose a
+        host-side filesystem reference to whoever consumes the
+        clearance event.
+        """
+        meta = tmp_path / "task.json"
+        meta.write_text(json.dumps({"task": "abc", "meta_path": "/host/secret/path.json"}))
+        session = reader.ReaderSession(
+            state_dir=tmp_path,
+            container="c1",
+            emitter=_RecordingEmitter(),
+            static_dossier={"meta_path": str(meta)},
+        )
+        resolved = session._resolve_dossier()
+        assert "meta_path" not in resolved
+        assert resolved == {"task": "abc"}
+
 
 class TestIsNoiseDest:
     """``_is_noise_dest`` filters IPv6 link-local multicast only."""

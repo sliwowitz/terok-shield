@@ -48,10 +48,13 @@ def install_hooks(*, hook_entrypoint: Path, hooks_dir: Path) -> None:
     """Write OCI hook entrypoints, ballast, and JSON descriptors.
 
     Lays down both role scripts (nft + reader) plus the shared OCI
-    ballast in ``hooks_dir``.  ``hook_entrypoint`` names the directory
-    plus stem of the **nft** script for backwards-compatibility with
-    callers that pin a specific path; the reader and ballast are
-    placed alongside.
+    ballast in ``hooks_dir``.  ``hook_entrypoint`` names both the
+    target directory **and** the on-disk filename for the **nft**
+    script — callers that pin a non-default name (per-container
+    installs, future test scaffolding) get exactly the path they
+    asked for in the JSON descriptors.  The reader entrypoint and
+    ``_oci_state.py`` ballast land in the same parent directory under
+    their canonical names.
 
     WORKAROUND(hooks-dir-persist): currently only used for global
     hooks (user or root) because podman does not persist per-container
@@ -66,7 +69,7 @@ def install_hooks(*, hook_entrypoint: Path, hooks_dir: Path) -> None:
     """
     hook_entrypoint.parent.mkdir(parents=True, exist_ok=True)
     hooks_dir.mkdir(parents=True, exist_ok=True)
-    _write_role_files(hook_entrypoint.parent, hooks_dir)
+    _write_role_files(hook_entrypoint.parent, hooks_dir, nft_entrypoint_name=hook_entrypoint.name)
 
 
 def setup_global_hooks(target_dir: Path, *, use_sudo: bool = False) -> None:
@@ -142,7 +145,13 @@ def _install_via_sudo(target_dir: Path) -> None:
         )
 
 
-def _write_role_files(script_dir: Path, hooks_dir: Path, *, json_dir: Path | None = None) -> None:
+def _write_role_files(
+    script_dir: Path,
+    hooks_dir: Path,
+    *,
+    json_dir: Path | None = None,
+    nft_entrypoint_name: str = _NFT_ENTRYPOINT_NAME,
+) -> None:
     """Write nft + reader entrypoints, the shared ballast, and the four hook JSONs.
 
     The two role scripts and the ``_oci_state.py`` ballast all land in
@@ -155,26 +164,31 @@ def _write_role_files(script_dir: Path, hooks_dir: Path, *, json_dir: Path | Non
     in-place, or the final target when staged for ``sudo cp``).
 
     Args:
-        script_dir: Where to write ``_oci_state.py``, ``nft-hook``,
-            and ``reader-hook``.
+        script_dir: Where to write ``_oci_state.py``, the nft
+            entrypoint, and the reader entrypoint.
         hooks_dir: Where to write the four ``terok-shield*.json`` files.
         json_dir: Path to embed in hook JSONs.  Defaults to
             *script_dir*; overridden for sudo installs where the temp
             write location differs from the final install path.
+        nft_entrypoint_name: On-disk filename for the nft entrypoint.
+            Defaults to the canonical ``terok-shield-hook``; callers
+            pinning a non-default path (``install_hooks``) thread
+            their own filename through so the JSON descriptors point
+            at the script the caller asked for.
     """
     anchor = json_dir or script_dir
 
     (script_dir / _BALLAST_NAME).write_text((_RESOURCES / _BALLAST_NAME).read_text())
-    (script_dir / _NFT_ENTRYPOINT_NAME).write_text((_RESOURCES / "nft_hook.py").read_text())
+    (script_dir / nft_entrypoint_name).write_text((_RESOURCES / "nft_hook.py").read_text())
     (script_dir / _READER_ENTRYPOINT_NAME).write_text((_RESOURCES / "reader_hook.py").read_text())
-    (script_dir / _NFT_ENTRYPOINT_NAME).chmod(0o755)
+    (script_dir / nft_entrypoint_name).chmod(0o755)
     (script_dir / _READER_ENTRYPOINT_NAME).chmod(0o755)
 
-    nft_path = str(anchor / _NFT_ENTRYPOINT_NAME)
+    nft_path = str(anchor / nft_entrypoint_name)
     reader_path = str(anchor / _READER_ENTRYPOINT_NAME)
     for stage in _HOOK_STAGES:
         (hooks_dir / f"terok-shield-{stage}.json").write_text(
-            _generate_hook_json(nft_path, stage, _NFT_ENTRYPOINT_NAME)
+            _generate_hook_json(nft_path, stage, nft_entrypoint_name)
         )
         (hooks_dir / f"terok-shield-bridge-{stage}.json").write_text(
             _generate_hook_json(reader_path, stage, _READER_ENTRYPOINT_NAME)

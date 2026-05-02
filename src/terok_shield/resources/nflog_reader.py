@@ -464,6 +464,12 @@ class ReaderSession:
         if not isinstance(decoded, dict):
             return dossier
         dossier.update({str(k): str(v) for k, v in decoded.items()})
+        # Defensive drop: the meta-path file isn't supposed to redeclare
+        # ``meta_path``, but a confused orchestrator (or a hand-edited
+        # file) could.  We never want the on-disk path leaking into the
+        # wire payload or audit log — it identifies a host-side file
+        # the operator UI has no business knowing about.
+        dossier.pop("meta_path", None)
         return dossier
 
     def _append_audit_block(

@@ -46,7 +46,7 @@ def _oci_json(state_dir: str, container_id: str = _CONTAINER_ID) -> str:
     )
 
 
-def _run_bridge(payload: str, *, stage: str) -> int:
+def _run_bridge(payload: str, *, stage: str) -> None:
     """Invoke ``reader_hook.main`` with a stage in argv and OCI state on stdin.
 
     The kernel's shebang loader strips the exec-supplied ``argv[0]`` and
@@ -57,7 +57,7 @@ def _run_bridge(payload: str, *, stage: str) -> int:
         mock.patch.object(sys, "stdin", io.StringIO(payload)),
         mock.patch.object(sys, "argv", [HOOK_ENTRYPOINT_PATH, stage]),
     ):
-        return reader_hook.main()
+        reader_hook.main()
 
 
 # ── Dispatch ──────────────────────────────────────────────────────────
@@ -69,8 +69,7 @@ class TestBridgeDispatch:
     def test_createruntime_invokes_spawn_reader(self, tmp_path: Path) -> None:
         oci = _oci_json(str(tmp_path))
         with mock.patch.object(reader_hook, "_spawn_reader") as spawn:
-            rc = _run_bridge(oci, stage="createRuntime")
-        assert rc == 0
+            _run_bridge(oci, stage="createRuntime")
         spawn.assert_called_once_with(tmp_path, _SHORT_ID, {})
 
     def test_createruntime_extracts_dossier_annotations(self, tmp_path: Path) -> None:
@@ -91,8 +90,7 @@ class TestBridgeDispatch:
             }
         )
         with mock.patch.object(reader_hook, "_spawn_reader") as spawn:
-            rc = _run_bridge(oci, stage="createRuntime")
-        assert rc == 0
+            _run_bridge(oci, stage="createRuntime")
         spawn.assert_called_once_with(
             tmp_path,
             _SHORT_ID,
@@ -107,8 +105,7 @@ class TestBridgeDispatch:
     def test_poststop_invokes_reap_reader(self, tmp_path: Path) -> None:
         oci = _oci_json(str(tmp_path))
         with mock.patch.object(reader_hook, "_reap_reader") as reap:
-            rc = _run_bridge(oci, stage="poststop")
-        assert rc == 0
+            _run_bridge(oci, stage="poststop")
         reap.assert_called_once_with(tmp_path)
 
     def test_unknown_stage_is_no_op(self, tmp_path: Path) -> None:
@@ -118,8 +115,7 @@ class TestBridgeDispatch:
             mock.patch.object(reader_hook, "_spawn_reader") as spawn,
             mock.patch.object(reader_hook, "_reap_reader") as reap,
         ):
-            rc = _run_bridge(oci, stage="unknown")
-        assert rc == 0
+            _run_bridge(oci, stage="unknown")
         spawn.assert_not_called()
         reap.assert_not_called()
 
@@ -134,9 +130,45 @@ class TestBridgeDispatch:
             }
         )
         with mock.patch.object(reader_hook, "_spawn_reader") as spawn:
-            rc = _run_bridge(oci, stage="createRuntime")
-        assert rc == 0
+            _run_bridge(oci, stage="createRuntime")
         spawn.assert_not_called()
+
+
+class TestMainSoftFailBranches:
+    """``main`` must absorb every error and exit 0 — bridge is opt-out.
+
+    The contract: container start can never be blocked by a hook
+    failure on this path.  Bad OCI JSON, missing state_dir, raised
+    ``_bridge_main`` — all log and return cleanly.
+    """
+
+    def test_bad_oci_json_logs_and_returns(self) -> None:
+        """Malformed JSON on stdin → ``_oci_state.log`` once, then return."""
+        with mock.patch.object(_oci_state, "log") as logger:
+            _run_bridge("not-json", stage="createRuntime")
+        logger.assert_called_once()
+        assert "bad OCI state" in logger.call_args.args[0]
+
+    def test_missing_state_dir_annotation_returns_silently(self) -> None:
+        """OCI state with no ``state_dir`` annotation → ``state_dir_from_oci`` logs and returns."""
+        oci = json.dumps({"id": _CONTAINER_ID, "pid": 42, "annotations": {}})
+        with mock.patch.object(reader_hook, "_bridge_main") as bridge:
+            _run_bridge(oci, stage="createRuntime")
+        # state_dir resolution failed before _bridge_main got called.
+        bridge.assert_not_called()
+
+    def test_bridge_main_exception_is_swallowed(self, tmp_path: Path) -> None:
+        """A raised ``_bridge_main`` is logged into ``hook-error.log`` and absorbed."""
+        oci = _oci_json(str(tmp_path))
+        with (
+            mock.patch.object(reader_hook, "_bridge_main", side_effect=RuntimeError("kaboom")),
+            mock.patch.object(_oci_state, "log") as logger,
+        ):
+            _run_bridge(oci, stage="createRuntime")
+        # Logged with the state-dir log file as second positional arg.
+        logger.assert_called_once()
+        assert "kaboom" in logger.call_args.args[0]
+        assert logger.call_args.args[1] == tmp_path / "hook-error.log"
 
 
 # ── Session-bus resolution ────────────────────────────────────────────
