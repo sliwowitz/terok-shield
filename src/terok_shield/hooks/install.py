@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 from ..config import ANNOTATION_KEY
+from .reader_install import install_reader_resource
 
 #: File name for the shared OCI-state ballast module.  Both role
 #: scripts ``import _oci_state`` from their own directory at runtime,
@@ -39,6 +40,16 @@ _READER_ENTRYPOINT_NAME = "terok-shield-bridge-hook"
 _HOOK_STAGES = ("createRuntime", "poststop")
 
 _RESOURCES = Path(__file__).parent.parent / "resources"
+
+
+def _nft_hook_json(stage: str) -> str:
+    """Per-stage filename for the nft hook JSON descriptor."""
+    return f"terok-shield-{stage}.json"
+
+
+def _bridge_hook_json(stage: str) -> str:
+    """Per-stage filename for the reader (bridge) hook JSON descriptor."""
+    return f"terok-shield-bridge-{stage}.json"
 
 
 # ── Public API ──────────────────────────────────────────
@@ -94,8 +105,6 @@ def setup_global_hooks(target_dir: Path, *, use_sudo: bool = False) -> None:
     # Reader resource is per-user, never under target_dir; install it
     # before the hook JSONs so the path the JSONs reference is already
     # populated when the first container fires.
-    from .reader_install import install_reader_resource
-
     install_reader_resource()
     if use_sudo:
         _install_via_sudo(target_dir)
@@ -122,13 +131,11 @@ def _install_via_sudo(target_dir: Path) -> None:
             ["sudo", "mkdir", "-p", str(target_dir)],
             check=True,  # noqa: S603, S607
         )
-        files = [
-            str(tmp_path / name)
-            for name in (_BALLAST_NAME, _NFT_ENTRYPOINT_NAME, _READER_ENTRYPOINT_NAME)
+        scripts = (_BALLAST_NAME, _NFT_ENTRYPOINT_NAME, _READER_ENTRYPOINT_NAME)
+        descriptors = [
+            fn(stage) for stage in _HOOK_STAGES for fn in (_nft_hook_json, _bridge_hook_json)
         ]
-        for stage in _HOOK_STAGES:
-            files.append(str(tmp_path / f"terok-shield-{stage}.json"))
-            files.append(str(tmp_path / f"terok-shield-bridge-{stage}.json"))
+        files = [str(tmp_path / name) for name in (*scripts, *descriptors)]
         subprocess.run(
             ["sudo", "cp", *files, str(target_dir) + "/"],
             check=True,  # noqa: S603, S607
@@ -187,10 +194,10 @@ def _write_role_files(
     nft_path = str(anchor / nft_entrypoint_name)
     reader_path = str(anchor / _READER_ENTRYPOINT_NAME)
     for stage in _HOOK_STAGES:
-        (hooks_dir / f"terok-shield-{stage}.json").write_text(
+        (hooks_dir / _nft_hook_json(stage)).write_text(
             _generate_hook_json(nft_path, stage, nft_entrypoint_name)
         )
-        (hooks_dir / f"terok-shield-bridge-{stage}.json").write_text(
+        (hooks_dir / _bridge_hook_json(stage)).write_text(
             _generate_hook_json(reader_path, stage, _READER_ENTRYPOINT_NAME)
         )
 

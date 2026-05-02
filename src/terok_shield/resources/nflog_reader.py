@@ -61,6 +61,11 @@ _log = logging.getLogger("terok-shield.nflog-reader")
 NFLOG_GROUP = 100
 _BLOCKED_PREFIX_TAG = "BLOCKED"
 
+#: Reserved dossier key — the *orchestrator-side* path to the per-container
+#: meta JSON.  Read by the reader as plumbing; never appears on the wire or
+#: in the audit log.  ``_resolve_dossier`` strips it from any dict it merges.
+_META_PATH_KEY = "meta_path"
+
 # ── nsenter handshake ─────────────────────────────────────────────────
 # Re-exec sets this so the second invocation knows it's already inside
 # the container netns and skips the podman-unshare dance.
@@ -305,8 +310,14 @@ class ReaderSession:
         self._container = container
         self._emitter = emitter
         self._static_dossier = dict(static_dossier or {})
-        meta_path = self._static_dossier.get("meta_path")
+        meta_path = self._static_dossier.get(_META_PATH_KEY)
         self._meta_path: Path | None = Path(meta_path) if meta_path else None
+        # Precomputed static floor — meta_path stripped, since it never
+        # leaks onto the wire.  Recomputing the comprehension on every
+        # emit would be tiny but is on the per-NFLOG-packet hot path.
+        self._static_dossier_floor: dict[str, str] = {
+            k: v for k, v in self._static_dossier.items() if k != _META_PATH_KEY
+        }
         self._domain_cache = _DomainCache(state_dir)
         # Two independent dedup windows, both keyed on (domain or dest):
         #
@@ -450,7 +461,7 @@ class ReaderSession:
         block, so we eat parse errors quietly here and surface them once
         elsewhere if needed.
         """
-        dossier = {k: v for k, v in self._static_dossier.items() if k != "meta_path"}
+        dossier = dict(self._static_dossier_floor)
         if self._meta_path is None:
             return dossier
         try:
@@ -466,10 +477,10 @@ class ReaderSession:
         dossier.update({str(k): str(v) for k, v in decoded.items()})
         # Defensive drop: the meta-path file isn't supposed to redeclare
         # ``meta_path``, but a confused orchestrator (or a hand-edited
-        # file) could.  We never want the on-disk path leaking into the
-        # wire payload or audit log — it identifies a host-side file
-        # the operator UI has no business knowing about.
-        dossier.pop("meta_path", None)
+        # file) could.  We never want the on-disk path leaking onto the
+        # wire — it identifies a host-side file the operator UI has no
+        # business knowing about.
+        dossier.pop(_META_PATH_KEY, None)
         return dossier
 
     def _append_audit_block(
@@ -533,6 +544,37 @@ class ReaderSession:
         return "poststop" if self._stop_requested else "eof"
 
 
+# ── Wire-payload builders ─────────────────────────────────────────────
+#
+# One canonical place for the JSON shape so the two emitters can't
+# silently drift on a future field addition.
+
+
+def _started_payload(container: str) -> dict:
+    """Build the wire payload for a ``container_started`` lifecycle event."""
+    return {"type": "container_started", "container": container}
+
+
+def _exited_payload(container: str, reason: str) -> dict:
+    """Build the wire payload for a ``container_exited`` lifecycle event."""
+    return {"type": "container_exited", "container": container, "reason": reason}
+
+
+def _pending_payload(event: BlockedEvent) -> dict:
+    """Build the wire payload for a blocked-connection (``pending``) event."""
+    return {
+        "type": "pending",
+        "container": event.container,
+        "id": event.request_id,
+        "dest": event.dest,
+        "port": event.port,
+        "proto": event.proto,
+        "domain": event.domain,
+        "dossier": event.dossier,
+        "ts": datetime.now(UTC).isoformat(),
+    }
+
+
 # ── Emission strategies ───────────────────────────────────────────────
 
 
@@ -583,27 +625,15 @@ class SocketEmitter:
 
     def container_started(self, container: str) -> None:
         """Queue a ``container_started`` JSON event onto the hub socket."""
-        self._send({"type": "container_started", "container": container})
+        self._send(_started_payload(container))
 
     def container_exited(self, container: str, *, reason: str) -> None:
         """Queue a ``container_exited`` JSON event onto the hub socket."""
-        self._send({"type": "container_exited", "container": container, "reason": reason})
+        self._send(_exited_payload(container, reason))
 
     def connection_blocked(self, event: BlockedEvent) -> bool:
         """Queue a ``pending`` JSON event (block) onto the hub socket."""
-        return self._send(
-            {
-                "type": "pending",
-                "container": event.container,
-                "id": event.request_id,
-                "dest": event.dest,
-                "port": event.port,
-                "proto": event.proto,
-                "domain": event.domain,
-                "dossier": event.dossier,
-                "ts": datetime.now(UTC).isoformat(),
-            }
-        )
+        return self._send(_pending_payload(event))
 
     def close(self) -> None:
         """Disconnect from the hub socket if we're currently connected."""
@@ -663,27 +693,15 @@ class JsonEmitter:
 
     def container_started(self, container: str) -> None:
         """Emit a ``container_started`` JSON line."""
-        _print_json({"type": "container_started", "container": container})
+        _print_json(_started_payload(container))
 
     def container_exited(self, container: str, *, reason: str) -> None:
         """Emit a ``container_exited`` JSON line."""
-        _print_json({"type": "container_exited", "container": container, "reason": reason})
+        _print_json(_exited_payload(container, reason))
 
     def connection_blocked(self, event: BlockedEvent) -> bool:
         """Emit a ``pending`` JSON line carrying the full event payload."""
-        _print_json(
-            {
-                "type": "pending",
-                "container": event.container,
-                "id": event.request_id,
-                "dest": event.dest,
-                "port": event.port,
-                "proto": event.proto,
-                "domain": event.domain,
-                "dossier": event.dossier,
-                "ts": datetime.now(UTC).isoformat(),
-            }
-        )
+        _print_json(_pending_payload(event))
         # Stdout writes are effectively unfailable here; the fallback
         # CLI treats every emit as delivered.
         return True
