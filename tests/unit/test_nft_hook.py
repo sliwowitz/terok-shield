@@ -26,7 +26,7 @@ from terok_shield.resources import _oci_state, nft_hook
 def _oci_json(
     pid: int = 42,
     state_dir: str = "/tmp/sd",
-    version: int = 11,
+    version: int = 12,
     container_id: str = "abc123def456789abcdef0123456789abcdef0123456789abcdef0123456789a",
 ) -> str:
     """Return a minimal OCI state JSON for nft_hook.main()."""
@@ -634,7 +634,7 @@ def test_main_returns_1_when_pid_missing_for_createruntime(tmp_path: Path) -> No
             "pid": 0,
             "annotations": {
                 "terok.shield.state_dir": str(tmp_path),
-                "terok.shield.version": "11",
+                "terok.shield.version": "12",
             },
         }
     )
@@ -736,7 +736,7 @@ def test_main_returns_1_for_relative_state_dir() -> None:
             "pid": 42,
             "annotations": {
                 "terok.shield.state_dir": "relative/path",
-                "terok.shield.version": "11",
+                "terok.shield.version": "12",
             },
         }
     )

@@ -19,12 +19,15 @@ Keep in sync with the package-side definitions:
 * ``BUNDLE_VERSION``    ↔ ``terok_shield.state.BUNDLE_VERSION``
 * ``ANN_STATE_DIR``     ↔ ``terok_shield.config.ANNOTATION_STATE_DIR_KEY``
 * ``ANN_VERSION``       ↔ ``terok_shield.config.ANNOTATION_VERSION_KEY``
+* ``DOSSIER_FILE_NAME`` ↔ ``terok_shield.state.DOSSIER_FILE_NAME``
 """
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
+import secrets
 import shutil
 import stat
 import subprocess  # nosec B404
@@ -39,12 +42,30 @@ ANN_STATE_DIR = "terok.shield.state_dir"
 ANN_VERSION = "terok.shield.version"
 """OCI annotation carrying the bundle version this container was prepared with."""
 
-BUNDLE_VERSION = 11
+BUNDLE_VERSION = 12
 """Wire-protocol version for the hook ↔ pre_start state-bundle contract.
 
 Bumped whenever the on-disk file layout, the hook → reader argv
 shape, or the wire payload changes incompatibly.  The nft hook hard-
 fails on a version mismatch — operator must re-run ``terok setup``.
+
+v12: the createRuntime bridge hook persists the OCI-extracted dossier
+to ``state_dir/dossier.json`` so host-side ``Shield.up()`` /
+``Shield.down()`` can include the same identity bundle in their hub
+events that the per-container reader emits on blocks.  Without it the
+``shield_{up,down}`` events lacked dossier and the clearance UI fell
+back to bare container names while block popups carried the full
+``project/task · name`` triple — visible inconsistency for one
+container in one session.
+"""
+
+DOSSIER_FILE_NAME = "dossier.json"
+"""Per-container persisted-dossier file under ``state_dir``.
+
+Written by the bridge ``createRuntime`` hook from the OCI-extracted
+``dossier.*`` annotations; read by ``Shield.up()`` / ``Shield.down()``
+on the host so their hub events carry the same identity bundle as the
+reader-emitted block events.
 """
 
 #: System paths that must never appear as state_dir prefixes — even a
@@ -179,6 +200,78 @@ def _under_sensitive_prefix(path: Path) -> bool:
     """``True`` if *path* lives under one of ``_SENSITIVE_PREFIXES``."""
     s = str(path)
     return any(s == prefix or s.startswith(prefix + "/") for prefix in _SENSITIVE_PREFIXES)
+
+
+# ── Dossier persistence ──────────────────────────────────
+
+
+def persist_dossier(state_dir: Path, dossier: dict[str, str]) -> None:
+    """Write *dossier* to ``state_dir/dossier.json`` atomically, soft-fail.
+
+    The createRuntime bridge hook is the writer; the host-side ``Shield``
+    facade is the reader.  Atomic-rename + ``O_NOFOLLOW`` + ``0o600``
+    matches the ballast's other state-dir writes (audit log, reader.pid)
+    so a hostile peer can neither truncate via a planted symlink nor
+    read the bundle if it briefly appears.
+
+    Soft-fail by contract — a missing dossier file just degrades the
+    next ``shield_{up,down}`` event to a bare container name, same as
+    every pre-v12 deployment.
+    """
+    payload = json.dumps(dossier, separators=(",", ":"), sort_keys=True).encode()
+    tmp_name = f".{DOSSIER_FILE_NAME}.{secrets.token_hex(8)}"
+    try:
+        dir_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        log(f"terok-shield bridge hook: dossier persist (open dir): {exc}")
+        return
+    try:
+        try:
+            fd = os.open(
+                tmp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=dir_fd,
+            )
+        except OSError as exc:
+            log(f"terok-shield bridge hook: dossier persist (open tmp): {exc}")
+            return
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        try:
+            os.replace(tmp_name, DOSSIER_FILE_NAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError as exc:
+            log(f"terok-shield bridge hook: dossier persist (rename): {exc}")
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+    finally:
+        os.close(dir_fd)
+
+
+def read_dossier(state_dir: Path) -> dict[str, str]:
+    """Read the persisted dossier; return ``{}`` on any failure.
+
+    Counterpart to :func:`persist_dossier`.  Soft-fail: a missing /
+    malformed file means the orchestrator never published a dossier
+    for this container (or pre-v12 hook bundle), and the caller's hub
+    event degrades to a bare container name — same as before this
+    contract existed.
+    """
+    try:
+        raw = (state_dir / DOSSIER_FILE_NAME).read_bytes()
+    except OSError:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    return {str(k): str(v) for k, v in decoded.items()}
 
 
 # ── Environment bootstrap ─────────────────────────────────

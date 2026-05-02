@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 """OCI hook: spawn / reap the per-container NFLOG reader.
@@ -84,6 +85,11 @@ def _bridge_main(oci: dict, sd: Path, stage: str, log_path: Path) -> None:
 
     annotations = oci.get("annotations") or {}
     dossier = _extract_dossier(annotations if isinstance(annotations, dict) else {})
+    # Persist before spawn so a Popen failure still leaves the host-side
+    # ``Shield.up()`` / ``Shield.down()`` with the identity bundle they
+    # need for their hub events.  Spawn is the costly step; the JSON
+    # write is two syscalls and soft-fails on its own.
+    _oci_state.persist_dossier(sd, dossier)
     _spawn_reader(sd, container_id, dossier)
 
 

@@ -32,18 +32,25 @@ _SHORT_ID = _CONTAINER_ID[:12]
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _oci_json(state_dir: str, container_id: str = _CONTAINER_ID) -> str:
-    """Build the minimal OCI state JSON the bridge hook reads from stdin."""
-    return json.dumps(
-        {
-            "id": container_id,
-            "pid": 42,
-            "annotations": {
-                "terok.shield.state_dir": state_dir,
-                "terok.shield.version": "11",
-            },
-        }
-    )
+def _oci_json(
+    state_dir: str,
+    container_id: str = _CONTAINER_ID,
+    *,
+    extra_annotations: dict[str, str] | None = None,
+) -> str:
+    """Build the minimal OCI state JSON the bridge hook reads from stdin.
+
+    *extra_annotations* are merged on top of the required state-dir +
+    version pair so callers can exercise the dossier-extraction path
+    without rewriting the whole envelope.
+    """
+    annotations: dict[str, str] = {
+        "terok.shield.state_dir": state_dir,
+        "terok.shield.version": "12",
+    }
+    if extra_annotations:
+        annotations.update(extra_annotations)
+    return json.dumps({"id": container_id, "pid": 42, "annotations": annotations})
 
 
 def _run_bridge(payload: str, *, stage: str) -> None:
@@ -80,7 +87,7 @@ class TestBridgeDispatch:
                 "pid": 42,
                 "annotations": {
                     "terok.shield.state_dir": str(tmp_path),
-                    "terok.shield.version": "11",
+                    "terok.shield.version": "12",
                     "dossier.container_name": "my-task-7f3",
                     "dossier.task": "abc",
                     "dossier.project": "terok",
@@ -125,13 +132,71 @@ class TestBridgeDispatch:
                 "pid": 42,
                 "annotations": {
                     "terok.shield.state_dir": str(tmp_path),
-                    "terok.shield.version": "11",
+                    "terok.shield.version": "12",
                 },
             }
         )
         with mock.patch.object(reader_hook, "_spawn_reader") as spawn:
             _run_bridge(oci, stage="createRuntime")
         spawn.assert_not_called()
+
+    def test_createruntime_persists_dossier_for_host_side_callers(self, tmp_path: Path) -> None:
+        """The OCI-extracted dossier is persisted before spawn so ``Shield.up()``/``down()`` can attach it to their hub events.
+
+        The reader spawn path is mocked so the test is hermetic — what
+        we care about here is the durable side effect on ``state_dir``.
+        """
+        oci = _oci_json(
+            str(tmp_path),
+            extra_annotations={
+                "dossier.project": "terok",
+                "dossier.task": "abc",
+                "dossier.name": "diligent-octopus",
+            },
+        )
+        with mock.patch.object(reader_hook, "_spawn_reader"):
+            _run_bridge(oci, stage="createRuntime")
+        persisted = json.loads((tmp_path / "dossier.json").read_text())
+        assert persisted == {
+            "project": "terok",
+            "task": "abc",
+            "name": "diligent-octopus",
+        }
+
+    def test_createruntime_persists_empty_dossier_when_no_annotations(self, tmp_path: Path) -> None:
+        """A standalone container (no ``dossier.*`` annotations) still gets a ``{}`` dossier file.
+
+        Empty-dict-as-marker keeps the host-side reader's contract
+        boring — ``read_dossier`` returns ``{}`` whether the file is
+        missing *or* present-but-empty.
+        """
+        oci = _oci_json(str(tmp_path))
+        with mock.patch.object(reader_hook, "_spawn_reader"):
+            _run_bridge(oci, stage="createRuntime")
+        assert json.loads((tmp_path / "dossier.json").read_text()) == {}
+
+    def test_createruntime_persists_before_spawn(self, tmp_path: Path) -> None:
+        """Persistence runs before spawn so a Popen failure still leaves the dossier on disk.
+
+        Spawn is the costly step; a Popen-time crash (no D-Bus, no
+        reader script) must not deprive the host-side ``Shield`` of the
+        identity bundle it needs to render shield_up / shield_down.
+        """
+        oci = _oci_json(
+            str(tmp_path),
+            extra_annotations={"dossier.project": "p", "dossier.task": "t"},
+        )
+
+        def explode(*_args: object, **_kwargs: object) -> None:
+            raise OSError("Popen exploded")
+
+        with mock.patch.object(reader_hook, "_spawn_reader", side_effect=explode):
+            _run_bridge(oci, stage="createRuntime")
+        # Persistence ran before the spawn raised.
+        assert json.loads((tmp_path / "dossier.json").read_text()) == {
+            "project": "p",
+            "task": "t",
+        }
 
 
 class TestMainSoftFailBranches:
@@ -619,3 +684,126 @@ class TestReaderScriptPath:
         assert reader_hook._reader_script_path() == (
             tmp_path / ".local" / "share" / "terok-shield" / "nflog-reader.py"
         )
+
+
+class TestPersistDossier:
+    """``_oci_state.persist_dossier`` is the contract between the bridge hook and the host-side ``Shield`` facade."""
+
+    def test_round_trip(self, tmp_path: Path) -> None:
+        """Write then read recovers the identical dict (string-coerced)."""
+        payload = {"project": "terok", "task": "abc", "name": "diligent-octopus"}
+        _oci_state.persist_dossier(tmp_path, payload)
+        assert _oci_state.read_dossier(tmp_path) == payload
+
+    def test_writes_atomically_with_tmp_then_replace(self, tmp_path: Path) -> None:
+        """No ``dossier.json.*`` temp files survive a successful write."""
+        _oci_state.persist_dossier(tmp_path, {"k": "v"})
+        leftover = list(tmp_path.glob(".dossier.json.*"))
+        assert leftover == [], leftover
+
+    def test_overwrite_replaces_previous_payload(self, tmp_path: Path) -> None:
+        """Second persist call rewrites the file rather than merging."""
+        _oci_state.persist_dossier(tmp_path, {"a": "1", "b": "2"})
+        _oci_state.persist_dossier(tmp_path, {"c": "3"})
+        assert _oci_state.read_dossier(tmp_path) == {"c": "3"}
+
+    def test_file_mode_is_user_only(self, tmp_path: Path) -> None:
+        """Persisted dossier is 0o600 — same as audit log, no group/world readers."""
+        _oci_state.persist_dossier(tmp_path, {"k": "v"})
+        st = (tmp_path / "dossier.json").stat()
+        assert (st.st_mode & 0o777) == 0o600
+
+    def test_empty_dict_is_persisted_as_empty_object(self, tmp_path: Path) -> None:
+        """Standalone container path: write ``{}`` rather than skipping the file."""
+        _oci_state.persist_dossier(tmp_path, {})
+        assert (tmp_path / "dossier.json").read_text() == "{}"
+
+    def test_state_dir_open_failure_soft_fails(self, tmp_path: Path) -> None:
+        """A vanished state_dir → log + return, no exception."""
+        gone = tmp_path / "vanished"
+        with mock.patch.object(_oci_state, "log") as logger:
+            _oci_state.persist_dossier(gone, {"k": "v"})
+        logger.assert_called_once()
+        assert "open dir" in logger.call_args.args[0]
+
+    def test_tmp_open_failure_soft_fails(self, tmp_path: Path) -> None:
+        """An ``os.open`` failure on the tmp file → log + return, no exception.
+
+        Wraps the second ``os.open`` (the temp-file create) so the
+        outer dir-fd is still acquired and properly closed in the
+        ``finally`` arm.
+        """
+        original_open = _oci_state.os.open
+        seen: list[str] = []
+
+        def fail_on_tmp(*args: object, **kwargs: object):  # noqa: ANN202
+            path = args[0] if args else kwargs.get("path")
+            if isinstance(path, str) and path.startswith(".dossier.json."):
+                seen.append(path)
+                raise OSError("ENOSPC")
+            return original_open(*args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            mock.patch.object(_oci_state.os, "open", side_effect=fail_on_tmp),
+            mock.patch.object(_oci_state, "log") as logger,
+        ):
+            _oci_state.persist_dossier(tmp_path, {"k": "v"})
+        assert seen, "tmp-file open path was never attempted"
+        logger.assert_called_once()
+        assert "open tmp" in logger.call_args.args[0]
+
+    def test_replace_failure_unlinks_tmp(self, tmp_path: Path) -> None:
+        """A failing rename leaves no ``.dossier.json.*`` corpse behind.
+
+        Hostile ENOSPC / EACCES on the rename mid-write cleans up the
+        scratch file rather than letting it accrete in ``state_dir``.
+        """
+        with (
+            mock.patch.object(_oci_state.os, "replace", side_effect=OSError("EXDEV")),
+            mock.patch.object(_oci_state, "log") as logger,
+        ):
+            _oci_state.persist_dossier(tmp_path, {"k": "v"})
+        leftover = list(tmp_path.glob(".dossier.json.*"))
+        assert leftover == [], leftover
+        assert not (tmp_path / "dossier.json").exists()
+        logger.assert_called_once()
+        assert "rename" in logger.call_args.args[0]
+
+    def test_replace_failure_then_tmp_unlink_failure_swallows_silently(
+        self, tmp_path: Path
+    ) -> None:
+        """Cleanup unlink errors after a failed replace are absorbed quietly.
+
+        Defence-in-depth: if both rename and the cleanup unlink fail,
+        the writer must still return rather than propagate.
+        """
+        # Spell 'replace' to fail, AND make the cleanup unlink fail too.
+        with (
+            mock.patch.object(_oci_state.os, "replace", side_effect=OSError("EXDEV")),
+            mock.patch.object(_oci_state.os, "unlink", side_effect=OSError("ENOENT")) as unlink,
+        ):
+            _oci_state.persist_dossier(tmp_path, {"k": "v"})  # must not raise
+        unlink.assert_called_once()
+
+
+class TestReadDossier:
+    """``_oci_state.read_dossier`` soft-fails into ``{}`` on every error path."""
+
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        """No ``dossier.json`` → empty dict, no exception."""
+        assert _oci_state.read_dossier(tmp_path) == {}
+
+    def test_malformed_json_returns_empty(self, tmp_path: Path) -> None:
+        """Truncated / corrupt write must not crash the host shield CLI."""
+        (tmp_path / "dossier.json").write_text("{not json")
+        assert _oci_state.read_dossier(tmp_path) == {}
+
+    def test_non_object_payload_returns_empty(self, tmp_path: Path) -> None:
+        """A list / scalar at the top level is rejected — dossier is a dict."""
+        (tmp_path / "dossier.json").write_text("[1, 2, 3]")
+        assert _oci_state.read_dossier(tmp_path) == {}
+
+    def test_non_string_values_are_coerced(self, tmp_path: Path) -> None:
+        """Numeric or bool values from a forward-compat dossier are stringified."""
+        (tmp_path / "dossier.json").write_text('{"project": "terok", "port": 8080}')
+        assert _oci_state.read_dossier(tmp_path) == {"project": "terok", "port": "8080"}

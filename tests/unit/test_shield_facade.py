@@ -255,7 +255,9 @@ def test_down_delegates_and_logs(
     harness.audit.log_event.assert_called_once_with(
         "test-ctr", "shield_down", detail=expected_detail
     )
-    harness.hub_events.shield_down.assert_called_once_with("test-ctr", allow_all=allow_all)
+    harness.hub_events.shield_down.assert_called_once_with(
+        "test-ctr", allow_all=allow_all, dossier={}
+    )
 
 
 def test_up_delegates_and_logs(make_shield: ShieldHarnessFactory) -> None:
@@ -264,7 +266,42 @@ def test_up_delegates_and_logs(make_shield: ShieldHarnessFactory) -> None:
     harness.shield.up("test-ctr")
     harness.mode.shield_up.assert_called_once_with("test-ctr")
     harness.audit.log_event.assert_called_once_with("test-ctr", "shield_up")
-    harness.hub_events.shield_up.assert_called_once_with("test-ctr")
+    harness.hub_events.shield_up.assert_called_once_with("test-ctr", dossier={})
+
+
+def test_up_attaches_persisted_dossier_to_hub_event(
+    make_shield: ShieldHarnessFactory, state_dir: Path
+) -> None:
+    """A ``state_dir/dossier.json`` written by the bridge hook flows out via ``shield_up``.
+
+    Without this, the clearance UI rendered shield state changes with
+    a bare container slug while block popups carried the full
+    ``project/task · name`` triple — the same container, two visual
+    identities in one session.
+    """
+    state.dossier_path(state_dir).write_text(
+        '{"project": "terok", "task": "abc", "name": "diligent-octopus"}'
+    )
+    harness = make_shield()
+    harness.shield.up("test-ctr")
+    harness.hub_events.shield_up.assert_called_once_with(
+        "test-ctr",
+        dossier={"project": "terok", "task": "abc", "name": "diligent-octopus"},
+    )
+
+
+def test_down_attaches_persisted_dossier_to_hub_event(
+    make_shield: ShieldHarnessFactory, state_dir: Path
+) -> None:
+    """``Shield.down()`` carries the same identity bundle as ``up()``."""
+    state.dossier_path(state_dir).write_text('{"project": "terok", "task": "xyz"}')
+    harness = make_shield()
+    harness.shield.down("test-ctr", allow_all=True)
+    harness.hub_events.shield_down.assert_called_once_with(
+        "test-ctr",
+        allow_all=True,
+        dossier={"project": "terok", "task": "xyz"},
+    )
 
 
 def test_block_delegates_and_logs(make_shield: ShieldHarnessFactory) -> None:

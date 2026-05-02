@@ -369,7 +369,7 @@ class Shield:
             "shield_down",
             detail="allow_all=True" if allow_all else None,
         )
-        self.hub_events.shield_down(container, allow_all=allow_all)
+        self.hub_events.shield_down(container, allow_all=allow_all, dossier=self._read_dossier())
 
     def block(self, container: str) -> None:
         """Total network blackout — drop all traffic, log for forensics."""
@@ -380,7 +380,24 @@ class Shield:
         """Restore normal deny-all mode for a running container."""
         self._mode.shield_up(container)
         self.audit.log_event(container, "shield_up")
-        self.hub_events.shield_up(container)
+        self.hub_events.shield_up(container, dossier=self._read_dossier())
+
+    def _read_dossier(self) -> dict[str, str]:
+        """Return the persisted dossier for this state bundle, ``{}`` if absent.
+
+        The bridge ``createRuntime`` hook writes ``state_dir/dossier.json``
+        from the OCI ``dossier.*`` annotations the orchestrator set on
+        ``podman run``.  Reading it here lets ``Shield.up()`` /
+        ``Shield.down()`` send hub events that carry the same identity
+        bundle as the per-container reader's block events — without
+        which the clearance UI would render shield state changes with a
+        bare container name and block popups with the full
+        ``project/task · name`` triple, splitting one container's
+        notifications across two visual identities in the same session.
+        """
+        from .resources._oci_state import read_dossier
+
+        return read_dossier(self.config.state_dir)
 
     def state(self, container: str) -> ShieldState:
         """Query the live nft ruleset to determine a container's shield state."""
