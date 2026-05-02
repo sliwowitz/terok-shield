@@ -695,95 +695,24 @@ class TestPersistDossier:
         _oci_state.persist_dossier(tmp_path, payload)
         assert _oci_state.read_dossier(tmp_path) == payload
 
-    def test_writes_atomically_with_tmp_then_replace(self, tmp_path: Path) -> None:
-        """No ``dossier.json.*`` temp files survive a successful write."""
-        _oci_state.persist_dossier(tmp_path, {"k": "v"})
-        leftover = list(tmp_path.glob(".dossier.json.*"))
-        assert leftover == [], leftover
-
     def test_overwrite_replaces_previous_payload(self, tmp_path: Path) -> None:
         """Second persist call rewrites the file rather than merging."""
         _oci_state.persist_dossier(tmp_path, {"a": "1", "b": "2"})
         _oci_state.persist_dossier(tmp_path, {"c": "3"})
         assert _oci_state.read_dossier(tmp_path) == {"c": "3"}
 
-    def test_file_mode_is_user_only(self, tmp_path: Path) -> None:
-        """Persisted dossier is 0o600 — same as audit log, no group/world readers."""
-        _oci_state.persist_dossier(tmp_path, {"k": "v"})
-        st = (tmp_path / "dossier.json").stat()
-        assert (st.st_mode & 0o777) == 0o600
-
     def test_empty_dict_is_persisted_as_empty_object(self, tmp_path: Path) -> None:
         """Standalone container path: write ``{}`` rather than skipping the file."""
         _oci_state.persist_dossier(tmp_path, {})
         assert (tmp_path / "dossier.json").read_text() == "{}"
 
-    def test_state_dir_open_failure_soft_fails(self, tmp_path: Path) -> None:
+    def test_missing_state_dir_soft_fails(self, tmp_path: Path) -> None:
         """A vanished state_dir → log + return, no exception."""
         gone = tmp_path / "vanished"
         with mock.patch.object(_oci_state, "log") as logger:
             _oci_state.persist_dossier(gone, {"k": "v"})
         logger.assert_called_once()
-        assert "open dir" in logger.call_args.args[0]
-
-    def test_tmp_open_failure_soft_fails(self, tmp_path: Path) -> None:
-        """An ``os.open`` failure on the tmp file → log + return, no exception.
-
-        Wraps the second ``os.open`` (the temp-file create) so the
-        outer dir-fd is still acquired and properly closed in the
-        ``finally`` arm.
-        """
-        original_open = _oci_state.os.open
-        seen: list[str] = []
-
-        def fail_on_tmp(*args: object, **kwargs: object):  # noqa: ANN202
-            path = args[0] if args else kwargs.get("path")
-            if isinstance(path, str) and path.startswith(".dossier.json."):
-                seen.append(path)
-                raise OSError("ENOSPC")
-            return original_open(*args, **kwargs)  # type: ignore[arg-type]
-
-        with (
-            mock.patch.object(_oci_state.os, "open", side_effect=fail_on_tmp),
-            mock.patch.object(_oci_state, "log") as logger,
-        ):
-            _oci_state.persist_dossier(tmp_path, {"k": "v"})
-        assert seen, "tmp-file open path was never attempted"
-        logger.assert_called_once()
-        assert "open tmp" in logger.call_args.args[0]
-
-    def test_replace_failure_unlinks_tmp(self, tmp_path: Path) -> None:
-        """A failing rename leaves no ``.dossier.json.*`` corpse behind.
-
-        Hostile ENOSPC / EACCES on the rename mid-write cleans up the
-        scratch file rather than letting it accrete in ``state_dir``.
-        """
-        with (
-            mock.patch.object(_oci_state.os, "replace", side_effect=OSError("EXDEV")),
-            mock.patch.object(_oci_state, "log") as logger,
-        ):
-            _oci_state.persist_dossier(tmp_path, {"k": "v"})
-        leftover = list(tmp_path.glob(".dossier.json.*"))
-        assert leftover == [], leftover
-        assert not (tmp_path / "dossier.json").exists()
-        logger.assert_called_once()
-        assert "rename" in logger.call_args.args[0]
-
-    def test_replace_failure_then_tmp_unlink_failure_swallows_silently(
-        self, tmp_path: Path
-    ) -> None:
-        """Cleanup unlink errors after a failed replace are absorbed quietly.
-
-        Defence-in-depth: if both rename and the cleanup unlink fail,
-        the writer must still return rather than propagate.
-        """
-        # Spell 'replace' to fail, AND make the cleanup unlink fail too.
-        with (
-            mock.patch.object(_oci_state.os, "replace", side_effect=OSError("EXDEV")),
-            mock.patch.object(_oci_state.os, "unlink", side_effect=OSError("ENOENT")) as unlink,
-        ):
-            _oci_state.persist_dossier(tmp_path, {"k": "v"})  # must not raise
-        unlink.assert_called_once()
+        assert "persist failed" in logger.call_args.args[0]
 
 
 class TestReadDossier:

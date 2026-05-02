@@ -27,7 +27,6 @@ _STDLIB = {
     "os",
     "pathlib",
     "pwd",
-    "secrets",
     "shutil",
     "signal",
     "stat",

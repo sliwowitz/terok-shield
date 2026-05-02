@@ -27,7 +27,6 @@ from __future__ import annotations
 import json
 import os
 import pwd
-import secrets
 import shutil
 import stat
 import subprocess  # nosec B404
@@ -56,7 +55,10 @@ events that the per-container reader emits on blocks.  Without it the
 ``shield_{up,down}`` events lacked dossier and the clearance UI fell
 back to bare container names while block popups carried the full
 ``project/task · name`` triple — visible inconsistency for one
-container in one session.
+container in one session.  The file is a write-once label cache —
+annotations are immutable for the container's life, so it never
+goes stale and is swept along with the rest of ``state_dir`` on
+container teardown.
 """
 
 DOSSIER_FILE_NAME = "dossier.json"
@@ -206,68 +208,33 @@ def _under_sensitive_prefix(path: Path) -> bool:
 
 
 def persist_dossier(state_dir: Path, dossier: dict[str, str]) -> None:
-    """Write *dossier* to ``state_dir/dossier.json`` atomically, soft-fail.
+    """Write *dossier* to ``state_dir/dossier.json``, soft-fail.
 
-    The createRuntime bridge hook is the writer; the host-side ``Shield``
-    facade is the reader.  Atomic-rename + ``O_NOFOLLOW`` + ``0o600``
-    matches the ballast's other state-dir writes (audit log, reader.pid)
-    so a hostile peer can neither truncate via a planted symlink nor
-    read the bundle if it briefly appears.
-
-    Soft-fail by contract — a missing dossier file just degrades the
-    next ``shield_{up,down}`` event to a bare container name, same as
-    every pre-v12 deployment.
+    Set-once-by-the-bridge-hook label cache — annotations are immutable
+    for the container's life, so the file never goes stale and is
+    swept along with the rest of ``state_dir`` when the container is
+    cleaned up.  No atomic-rename, no ``O_NOFOLLOW``: ``state_dir`` is
+    operator-owned (verified by [`state_dir_from_oci`][terok_shield.resources._oci_state.state_dir_from_oci]) and the
+    payload itself is non-secret (the orchestrator already broadcasts
+    the same fields as plaintext OCI annotations).
     """
-    payload = json.dumps(dossier, separators=(",", ":"), sort_keys=True).encode()
-    tmp_name = f".{DOSSIER_FILE_NAME}.{secrets.token_hex(8)}"
     try:
-        dir_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        (state_dir / DOSSIER_FILE_NAME).write_text(json.dumps(dossier))
     except OSError as exc:
-        log(f"terok-shield bridge hook: dossier persist (open dir): {exc}")
-        return
-    try:
-        try:
-            fd = os.open(
-                tmp_name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o600,
-                dir_fd=dir_fd,
-            )
-        except OSError as exc:
-            log(f"terok-shield bridge hook: dossier persist (open tmp): {exc}")
-            return
-        try:
-            os.write(fd, payload)
-        finally:
-            os.close(fd)
-        try:
-            os.replace(tmp_name, DOSSIER_FILE_NAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        except OSError as exc:
-            log(f"terok-shield bridge hook: dossier persist (rename): {exc}")
-            try:
-                os.unlink(tmp_name, dir_fd=dir_fd)
-            except OSError:
-                pass
-    finally:
-        os.close(dir_fd)
+        log(f"terok-shield bridge hook: dossier persist failed: {exc}")
 
 
 def read_dossier(state_dir: Path) -> dict[str, str]:
     """Read the persisted dossier; return ``{}`` on any failure.
 
-    Counterpart to :func:`persist_dossier`.  Soft-fail: a missing /
-    malformed file means the orchestrator never published a dossier
-    for this container (or pre-v12 hook bundle), and the caller's hub
-    event degrades to a bare container name — same as before this
-    contract existed.
+    Soft-fail: missing file (pre-v12 bundle, standalone container with
+    no orchestrator annotations) or unparseable content drops back to
+    a bare-container-name hub event — same shape every caller already
+    handled before this contract existed.
     """
     try:
-        raw = (state_dir / DOSSIER_FILE_NAME).read_bytes()
-    except OSError:
-        return {}
-    try:
-        decoded = json.loads(raw)
-    except ValueError:
+        decoded = json.loads((state_dir / DOSSIER_FILE_NAME).read_text())
+    except (OSError, ValueError):
         return {}
     if not isinstance(decoded, dict):
         return {}
