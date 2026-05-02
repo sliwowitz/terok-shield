@@ -66,17 +66,6 @@ _BLOCKED_PREFIX_TAG = "BLOCKED"
 #: in the audit log.  ``_resolve_dossier`` strips it from any dict it merges.
 _META_PATH_KEY = "meta_path"
 
-#: Translation from orchestrator-meta-JSON keys (``project_id`` /
-#: ``task_id`` / ``name``) to the wire-dossier keys (``project`` /
-#: ``task`` / ``name``) the clearance UI renders.  The host-side
-#: shield_up/down path applies the same map in
-#: ``_oci_state.resolve_dossier_from_meta`` — keep them in lock-step.
-_TASK_META_KEY_MAP = {
-    "project_id": "project",
-    "task_id": "task",
-    "name": "name",
-}
-
 # ── nsenter handshake ─────────────────────────────────────────────────
 # Re-exec sets this so the second invocation knows it's already inside
 # the container netns and skips the podman-unshare dance.
@@ -462,17 +451,15 @@ class ReaderSession:
         )
 
     def _resolve_dossier(self) -> Dossier:
-        """Project the orchestrator's task-meta JSON onto the wire-dossier shape.
+        """Merge the orchestrator's wire-dossier JSON file into the static floor.
 
-        The orchestrator's static ``dossier.*`` annotations form a
-        floor.  When ``dossier.meta_path`` was supplied, the meta JSON
-        is re-read on every emit (so podman rename / late-bound naming
-        propagate without a reader restart) and the orchestrator's
-        storage keys (``project_id`` / ``task_id`` / ``name``) are
-        translated to the wire keys (``project`` / ``task`` / ``name``)
-        the clearance UI renders.  Identical projection runs on the
-        host-side shield_up/down path (see ``_oci_state``); both event
-        paths produce the same dossier shape for one container.
+        Static ``dossier.*`` annotations from the OCI state form a
+        floor (mostly relevant for standalone containers without a
+        meta-file orchestrator).  When ``dossier.meta_path`` was
+        supplied, the file at that path *is* the wire dossier — same
+        keys the clearance UI renders, JSON dict-of-strings, no
+        projection — re-read on every emit so podman rename /
+        late-bound naming propagate without a reader restart.
 
         Soft-fail at every step — missing file, EACCES, malformed JSON,
         non-object payload — drops back to the static floor rather
@@ -487,10 +474,9 @@ class ReaderSession:
             return dossier
         if not isinstance(decoded, dict):
             return dossier
-        for src_key, dst_key in _TASK_META_KEY_MAP.items():
-            value = decoded.get(src_key, "")
+        for key, value in decoded.items():
             if value:
-                dossier[dst_key] = str(value)
+                dossier[str(key)] = str(value)
         return dossier
 
     def _append_audit_block(self, event: _RawBlockEvent, domain: str, dossier: Dossier) -> bool:

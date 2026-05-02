@@ -714,33 +714,22 @@ class TestReadMetaPath:
 
 
 class TestResolveDossierFromMeta:
-    """``_oci_state.resolve_dossier_from_meta`` projects the orchestrator's task-meta JSON to wire-dossier shape."""
+    """``_oci_state.resolve_dossier_from_meta`` reads the orchestrator's wire-dossier JSON file as-is."""
 
-    def test_projects_orchestrator_keys_to_wire_keys(self, tmp_path: Path) -> None:
-        """``project_id`` / ``task_id`` / ``name`` → ``project`` / ``task`` / ``name``."""
-        meta = tmp_path / "task.json"
-        meta.write_text(
-            json.dumps(
-                {
-                    "project_id": "terok",
-                    "task_id": "abc",
-                    "name": "diligent-octopus",
-                    "mode": "cli",
-                    "web_port": 8080,
-                    "hooks_fired": ["pre_start", "post_start"],
-                }
-            )
-        )
+    def test_reads_dossier_file_verbatim(self, tmp_path: Path) -> None:
+        """The file is wire-shape JSON — no projection, no key translation."""
+        meta = tmp_path / "dossier.json"
+        meta.write_text(json.dumps({"project": "terok", "task": "abc", "name": "diligent-octopus"}))
         assert _oci_state.resolve_dossier_from_meta(meta) == {
             "project": "terok",
             "task": "abc",
             "name": "diligent-octopus",
         }
 
-    def test_missing_keys_are_omitted(self, tmp_path: Path) -> None:
-        """Only the keys the orchestrator actually wrote land on the wire."""
-        meta = tmp_path / "task.json"
-        meta.write_text(json.dumps({"task_id": "abc"}))
+    def test_falsy_values_drop_out(self, tmp_path: Path) -> None:
+        """Empty / null fields don't bloat the wire — same as omitting them."""
+        meta = tmp_path / "dossier.json"
+        meta.write_text(json.dumps({"project": "", "task": "abc", "name": None}))
         assert _oci_state.resolve_dossier_from_meta(meta) == {"task": "abc"}
 
     def test_empty_meta_path_returns_empty(self, _: Path | None = None) -> None:
@@ -752,19 +741,34 @@ class TestResolveDossierFromMeta:
         assert _oci_state.resolve_dossier_from_meta(tmp_path / "absent.json") == {}
 
     def test_malformed_json_returns_empty(self, tmp_path: Path) -> None:
-        """Torn / mid-write meta JSON soft-fails (next emit picks up the fixed file)."""
-        meta = tmp_path / "task.json"
+        """Torn / mid-write file soft-fails (next emit picks up the fixed file)."""
+        meta = tmp_path / "dossier.json"
         meta.write_text("{not json")
         assert _oci_state.resolve_dossier_from_meta(meta) == {}
 
     def test_non_object_payload_returns_empty(self, tmp_path: Path) -> None:
-        """Top-level list / scalar isn't a meta dict — drop quietly."""
-        meta = tmp_path / "task.json"
+        """Top-level list / scalar isn't a dossier dict — drop quietly."""
+        meta = tmp_path / "dossier.json"
         meta.write_text("[1, 2, 3]")
         assert _oci_state.resolve_dossier_from_meta(meta) == {}
 
+    def test_forward_compat_keys_pass_through(self, tmp_path: Path) -> None:
+        """A future dossier field the renderer doesn't yet know rides through.
+
+        The renderer tolerates unknown dossier keys (it reads only what
+        it cares about), so the resolver doesn't need to whitelist —
+        forward compat for free.
+        """
+        meta = tmp_path / "dossier.json"
+        meta.write_text(json.dumps({"project": "terok", "task": "abc", "future": "value"}))
+        assert _oci_state.resolve_dossier_from_meta(meta) == {
+            "project": "terok",
+            "task": "abc",
+            "future": "value",
+        }
+
     def test_non_string_values_are_coerced(self, tmp_path: Path) -> None:
-        """A forward-compat field landing as int/bool still becomes a wire string."""
-        meta = tmp_path / "task.json"
-        meta.write_text(json.dumps({"task_id": 42, "name": True}))
+        """Forward-compat values landing as int/bool still become wire strings."""
+        meta = tmp_path / "dossier.json"
+        meta.write_text(json.dumps({"task": 42, "name": True}))
         assert _oci_state.resolve_dossier_from_meta(meta) == {"task": "42", "name": "True"}

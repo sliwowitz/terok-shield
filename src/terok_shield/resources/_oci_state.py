@@ -59,32 +59,24 @@ name}``.
 """
 
 META_PATH_FILE_NAME = "meta_path"
-"""Per-container pointer to the orchestrator's task meta JSON.
+"""Per-container pointer to the orchestrator's wire-dossier JSON.
 
 A single-line text file.  The bridge ``createRuntime`` hook writes
 it from the ``dossier.meta_path`` OCI annotation; ``Shield.up()`` /
 ``Shield.down()`` and the per-container reader both follow it to
-read the orchestrator's task meta and project the result onto the
-wire dossier.  Empty / absent file degrades gracefully to a bare
+the orchestrator's dossier file and forward its contents onto the
+wire verbatim.  Empty / absent file degrades gracefully to a bare
 container name on the wire — same shape as a standalone
 non-orchestrator container.
+
+**Contract.**  The file at ``meta_path`` is JSON, ``{str: str}``,
+in *wire-dossier shape* (``project`` / ``task`` / ``name`` keys
+the clearance UI renders directly).  This is deliberate: the
+file's audience is shield consumers, so it speaks the wire's
+language — no translation table, no projection, no orchestrator-
+internal storage keys leaking through.  Orchestrator bookkeeping
+lives elsewhere.
 """
-
-#: Keys the wire dossier carries — read off the orchestrator's meta JSON
-#: with ``_TASK_META_KEY_MAP`` translation.  Anything else in the meta
-#: file (lifecycle state, web ports, hooks_fired) is orchestrator
-#: bookkeeping and stays off the wire.
-_DOSSIER_KEYS = ("project", "task", "name")
-
-#: Translation from orchestrator-meta-JSON keys to wire-dossier keys.
-#: terok writes ``project_id`` / ``task_id`` / ``name``; the wire shape
-#: speaks ``project`` / ``task`` / ``name`` (the keys the clearance UI
-#: renders).  One mapping table, two consumers (reader + Shield CLI).
-_TASK_META_KEY_MAP = {
-    "project_id": "project",
-    "task_id": "task",
-    "name": "name",
-}
 
 #: System paths that must never appear as state_dir prefixes — even a
 #: well-formed OCI annotation pointing here means something is wrong
@@ -251,20 +243,21 @@ def read_meta_path(state_dir: Path) -> str:
 
 
 def resolve_dossier_from_meta(meta_path: str | Path) -> dict[str, str]:
-    """Open the orchestrator's task-meta JSON and project it to a wire dossier.
+    """Open the orchestrator's wire-dossier JSON and return it as ``{str: str}``.
 
-    Translates the orchestrator's storage keys (``project_id`` /
-    ``task_id`` / ``name``) to the wire-dossier keys the clearance UI
-    renders (``project`` / ``task`` / ``name``).  Anything else in the
-    meta file is orchestrator bookkeeping — lifecycle state, web ports,
-    hooks_fired — and stays off the wire.
+    The file at *meta_path* is the orchestrator's contract with
+    shield: a small JSON object whose keys *are* the wire-dossier
+    keys the clearance UI renders (``project`` / ``task`` / ``name``).
+    No projection, no key translation — bookkeeping the orchestrator
+    keeps for itself lives in a different file the orchestrator alone
+    consumes.  Empty / falsy values are dropped so the wire stays
+    minimal.
 
     Soft-fail by contract — both the per-block reader and the
     host-side ``Shield.up()`` / ``Shield.down()`` call this on every
-    event; an unreadable or malformed meta JSON degrades to ``{}``,
-    which the renderer turns into a bare-container-name popup (same
-    as a non-orchestrator container).  Single resolution path → single
-    failure mode.
+    event; an unreadable or malformed file degrades to ``{}``, which
+    the renderer turns into a bare-container-name popup (same as a
+    non-orchestrator container).
     """
     if not meta_path:
         return {}
@@ -274,12 +267,7 @@ def resolve_dossier_from_meta(meta_path: str | Path) -> dict[str, str]:
         return {}
     if not isinstance(decoded, dict):
         return {}
-    out: dict[str, str] = {}
-    for src_key, dst_key in _TASK_META_KEY_MAP.items():
-        value = decoded.get(src_key, "")
-        if value:
-            out[dst_key] = str(value)
-    return out
+    return {str(k): str(v) for k, v in decoded.items() if v}
 
 
 # ── Environment bootstrap ─────────────────────────────────
