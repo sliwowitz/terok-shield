@@ -23,9 +23,12 @@ from terok_shield.resources import nflog_reader as reader
 
 from ..testfs import AUDIT_FILENAME, DNSMASQ_LOG_FILENAME, READER_EVENTS_SOCK_FILENAME
 from ..testnet import (
+    DNSMASQ_DOMAIN,
     IPV6_MCAST_ALL_ROUTERS,
     IPV6_MCAST_MLDV2,
     TEST_DOMAIN,
+    TEST_DOMAIN_ATTACK,
+    TEST_DOMAIN_MARKUP,
     TEST_IP1,
     TEST_IP2,
     TEST_IP99,
@@ -1045,7 +1048,7 @@ class TestPayloadSanitisation:
                 dest=TEST_IP1,
                 port=443,
                 proto=6,
-                domain="evil\x1b[31mfake\x00.example.com",
+                domain=TEST_DOMAIN_ATTACK,
                 dossier={},
             )
         )
@@ -1061,7 +1064,7 @@ class TestPayloadSanitisation:
                 dest=TEST_IP1,
                 port=443,
                 proto=6,
-                domain="example.com",
+                domain=DNSMASQ_DOMAIN,
                 dossier={"name": "p\nspoof", "task": "café"},
             )
         )
@@ -1077,11 +1080,11 @@ class TestPayloadSanitisation:
                 dest=TEST_IP1,
                 port=443,
                 proto=6,
-                domain="<a&b>.example.com",
+                domain=TEST_DOMAIN_MARKUP,
                 dossier={},
             )
         )
-        assert payload["domain"] == "<a&b>.example.com"
+        assert payload["domain"] == TEST_DOMAIN_MARKUP
 
     def test_started_payload_sanitises_container_id(self) -> None:
         payload = reader._started_payload("evil\x00\x1bfoo")
