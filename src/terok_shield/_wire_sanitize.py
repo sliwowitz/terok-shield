@@ -49,12 +49,19 @@ _TRUNCATION_MARKER = "..."
 
 
 def sanitize(value: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
-    """Coerce *value* to printable ASCII, capped at *max_len* characters."""
+    """Coerce *value* to printable ASCII, capped at *max_len* characters.
+
+    When *max_len* is shorter than the truncation marker, the marker is
+    clipped so the post-condition ``len(result) <= max_len`` always
+    holds.
+    """
     if not value:
         return ""
     cleaned = "".join(ch if _PRINTABLE_LO <= ord(ch) <= _PRINTABLE_HI else " " for ch in value)
     if len(cleaned) <= max_len:
         return cleaned
+    if max_len <= len(_TRUNCATION_MARKER):
+        return _TRUNCATION_MARKER[:max_len]
     return cleaned[: max_len - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
 
 

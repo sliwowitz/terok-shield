@@ -57,7 +57,7 @@ class TestSanitize:
 
     def test_rtlo_bidi_override_is_neutralised(self) -> None:
         """U+202E becomes a space — kills the homoglyph attack at the boundary."""
-        assert sanitize("evil‮.com") == "evil .com"
+        assert sanitize("evil\u202e.com") == "evil .com"
 
     def test_length_cap_uses_ascii_marker(self) -> None:
         out = sanitize("x" * 1000, max_len=10)
@@ -71,6 +71,12 @@ class TestSanitize:
         name = "warp-core/t42-feature-rebuild-2026-04"
         assert len(name) < DEFAULT_MAX_LEN
         assert sanitize(name) == name
+
+    def test_truncation_marker_clipped_when_max_len_smaller(self) -> None:
+        """Pathological tiny ``max_len`` still satisfies the length post-condition."""
+        assert sanitize("x" * 100, max_len=2) == ".."
+        assert sanitize("x" * 100, max_len=1) == "."
+        assert sanitize("x" * 100, max_len=0) == ""
 
 
 class TestSanitizeMapping:

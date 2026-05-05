@@ -1042,7 +1042,7 @@ class TestPayloadSanitisation:
             reader.BlockedEvent(
                 container="c1",
                 request_id="c1:1",
-                dest="192.0.2.1",
+                dest=TEST_IP1,
                 port=443,
                 proto=6,
                 domain="evil\x1b[31mfake\x00.example.com",
@@ -1058,7 +1058,7 @@ class TestPayloadSanitisation:
             reader.BlockedEvent(
                 container="c1",
                 request_id="c1:1",
-                dest="192.0.2.1",
+                dest=TEST_IP1,
                 port=443,
                 proto=6,
                 domain="example.com",
@@ -1074,7 +1074,7 @@ class TestPayloadSanitisation:
             reader.BlockedEvent(
                 container="c1",
                 request_id="c1:1",
-                dest="192.0.2.1",
+                dest=TEST_IP1,
                 port=443,
                 proto=6,
                 domain="<a&b>.example.com",
@@ -1090,6 +1090,34 @@ class TestPayloadSanitisation:
     def test_exited_payload_sanitises_reason(self) -> None:
         payload = reader._exited_payload("c1", "reason\nwith\tcontrol")
         assert payload["reason"] == "reason with control"
+
+
+class TestInlineSanitizer:
+    """The reader's stdlib-only sanitiser mirrors the canonical helper.
+
+    Resource bypasses the package, so the inline copy can drift unless the
+    invariants are pinned both ends.  These tests pair with
+    ``test_wire_sanitize.py`` against the canonical version.
+    """
+
+    def test_empty_string_short_circuits(self) -> None:
+        assert reader._sanitize_str("") == ""
+
+    def test_truncation_marker_clipped_when_max_len_smaller(self) -> None:
+        """``max_len`` shorter than ``...`` still bounds the result length."""
+        assert reader._sanitize_str("x" * 100, max_len=2) == ".."
+        assert reader._sanitize_str("x" * 100, max_len=1) == "."
+        assert reader._sanitize_str("x" * 100, max_len=0) == ""
+
+    def test_long_value_uses_full_marker(self) -> None:
+        out = reader._sanitize_str("x" * 1000, max_len=10)
+        assert out == "xxxxxxx..."
+        assert len(out) == 10
+
+    def test_dict_helper_passes_through_non_string_values(self) -> None:
+        """``_sanitize_dict`` only touches strings — ints / lists pass verbatim."""
+        out = reader._sanitize_dict({"name": "p\nspoof", "port": 8080, "tags": ["x"]})
+        assert out == {"name": "p spoof", "port": 8080, "tags": ["x"]}
 
 
 class _FakeSocket:

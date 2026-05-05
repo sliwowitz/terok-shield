@@ -77,7 +77,12 @@ _SANITIZE_TRUNCATION = "..."
 
 
 def _sanitize_str(value: str, max_len: int = _SANITIZE_DEFAULT_MAX_LEN) -> str:
-    """Coerce *value* to printable ASCII, capped at *max_len* characters."""
+    """Coerce *value* to printable ASCII, capped at *max_len* characters.
+
+    Mirrors the canonical helper in ``terok_shield._wire_sanitize``;
+    when *max_len* is shorter than the truncation marker, the marker is
+    clipped so ``len(result) <= max_len`` always holds.
+    """
     if not value:
         return ""
     cleaned = "".join(
@@ -85,6 +90,8 @@ def _sanitize_str(value: str, max_len: int = _SANITIZE_DEFAULT_MAX_LEN) -> str:
     )
     if len(cleaned) <= max_len:
         return cleaned
+    if max_len <= len(_SANITIZE_TRUNCATION):
+        return _SANITIZE_TRUNCATION[:max_len]
     return cleaned[: max_len - len(_SANITIZE_TRUNCATION)] + _SANITIZE_TRUNCATION
 
 
