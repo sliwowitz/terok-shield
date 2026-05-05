@@ -23,9 +23,12 @@ from terok_shield.resources import nflog_reader as reader
 
 from ..testfs import AUDIT_FILENAME, DNSMASQ_LOG_FILENAME, READER_EVENTS_SOCK_FILENAME
 from ..testnet import (
+    DNSMASQ_DOMAIN,
     IPV6_MCAST_ALL_ROUTERS,
     IPV6_MCAST_MLDV2,
     TEST_DOMAIN,
+    TEST_DOMAIN_ATTACK,
+    TEST_DOMAIN_MARKUP,
     TEST_IP1,
     TEST_IP2,
     TEST_IP99,
@@ -1031,6 +1034,93 @@ class TestAuditBlockAppend:
             "audit-log dedup window must collapse retry storms to one entry; "
             f"got {len(lines)} entries"
         )
+
+
+class TestPayloadSanitisation:
+    """``WIRE_SPEC(safe-string)``: every wire payload field is printable-ASCII clean."""
+
+    def test_pending_payload_sanitises_attacker_controlled_domain(self) -> None:
+        """A crafted DNS name leaves no control bytes in the wire JSON."""
+        payload = reader._pending_payload(
+            reader.BlockedEvent(
+                container="c1",
+                request_id="c1:1",
+                dest=TEST_IP1,
+                port=443,
+                proto=6,
+                domain=TEST_DOMAIN_ATTACK,
+                dossier={},
+            )
+        )
+        assert "\x1b" not in payload["domain"]
+        assert "\x00" not in payload["domain"]
+
+    def test_pending_payload_sanitises_dossier_values(self) -> None:
+        """Non-ASCII / control bytes in dossier values collapse to spaces."""
+        payload = reader._pending_payload(
+            reader.BlockedEvent(
+                container="c1",
+                request_id="c1:1",
+                dest=TEST_IP1,
+                port=443,
+                proto=6,
+                domain=DNSMASQ_DOMAIN,
+                dossier={"name": "p\nspoof", "task": "café"},
+            )
+        )
+        assert payload["dossier"]["name"] == "p spoof"
+        assert payload["dossier"]["task"] == "caf "
+
+    def test_pending_payload_keeps_pango_chars_intact(self) -> None:
+        """``& < >`` are printable ASCII — wire layer leaves them alone."""
+        payload = reader._pending_payload(
+            reader.BlockedEvent(
+                container="c1",
+                request_id="c1:1",
+                dest=TEST_IP1,
+                port=443,
+                proto=6,
+                domain=TEST_DOMAIN_MARKUP,
+                dossier={},
+            )
+        )
+        assert payload["domain"] == TEST_DOMAIN_MARKUP
+
+    def test_started_payload_sanitises_container_id(self) -> None:
+        payload = reader._started_payload("evil\x00\x1bfoo")
+        assert payload["container"] == "evil  foo"
+
+    def test_exited_payload_sanitises_reason(self) -> None:
+        payload = reader._exited_payload("c1", "reason\nwith\tcontrol")
+        assert payload["reason"] == "reason with control"
+
+
+class TestInlineSanitizer:
+    """The reader's stdlib-only sanitiser mirrors the canonical helper.
+
+    Resource bypasses the package, so the inline copy can drift unless the
+    invariants are pinned both ends.  These tests pair with
+    ``test_wire_sanitize.py`` against the canonical version.
+    """
+
+    def test_empty_string_short_circuits(self) -> None:
+        assert reader._sanitize_str("") == ""
+
+    def test_truncation_marker_clipped_when_max_len_smaller(self) -> None:
+        """``max_len`` shorter than ``...`` still bounds the result length."""
+        assert reader._sanitize_str("x" * 100, max_len=2) == ".."
+        assert reader._sanitize_str("x" * 100, max_len=1) == "."
+        assert reader._sanitize_str("x" * 100, max_len=0) == ""
+
+    def test_long_value_uses_full_marker(self) -> None:
+        out = reader._sanitize_str("x" * 1000, max_len=10)
+        assert out == "xxxxxxx..."
+        assert len(out) == 10
+
+    def test_dict_helper_passes_through_non_string_values(self) -> None:
+        """``_sanitize_dict`` only touches strings — ints / lists pass verbatim."""
+        out = reader._sanitize_dict({"name": "p\nspoof", "port": 8080, "tags": ["x"]})
+        assert out == {"name": "p spoof", "port": 8080, "tags": ["x"]}
 
 
 class _FakeSocket:

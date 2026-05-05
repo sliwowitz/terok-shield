@@ -25,6 +25,12 @@ CUSTOM_DOMAIN = "custom.example.com"  # Fixture domain for user-override profile
 BLOCKED_DOMAIN = "evil.example.com"  # Domain NOT in any allowlist (for watch tests)
 BLOCKED_SUBDOMAIN = "api.evil.example.com"  # Subdomain of BLOCKED_DOMAIN
 
+# Adversarial domain shapes used by the wire-format sanitiser tests.
+# Centralised here so SonarCloud only flags the constant definitions,
+# not every call site that needs to verify defence against them.
+TEST_DOMAIN_ATTACK = "evil\x1b[31mfake\x00.example.com"  # Control-byte injection probe
+TEST_DOMAIN_MARKUP = "<a&b>.example.com"  # Pango-markup chars (printable ASCII)
+
 # ── RFC 5737 TEST-NET addresses (non-routable, safe for unit tests) ──
 
 # TEST-NET-1 (192.0.2.0/24)
