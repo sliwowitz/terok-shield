@@ -13,3 +13,9 @@ docs/module_map.md
 docs/test_map.md
 site/
 /tmp/
+
+# Sibling repo checkouts that earlier agent sessions stashed inside the work
+# tree.  Not part of shield; leave them untracked.
+/terok/
+/terok-clearance/
+/terok-sandbox/
