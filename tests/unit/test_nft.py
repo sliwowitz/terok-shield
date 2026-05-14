@@ -737,7 +737,7 @@ def test_verify_bypass_reports_errors_for_empty_input() -> None:
     assert _builder.verify_bypass("")
 
 
-# ── build_block() ─────────────────────────────────────────
+# ── build_quarantine() ─────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
@@ -751,84 +751,84 @@ def test_verify_bypass_reports_errors_for_empty_input() -> None:
         pytest.param(BLOCKED_LOG_PREFIX, id="blocked-log-prefix"),
     ],
 )
-def test_block_ruleset_contains_required_fragments(fragment: str) -> None:
+def test_quarantine_ruleset_contains_required_fragments(fragment: str) -> None:
     """The block ruleset preserves the expected security invariants."""
-    assert fragment in RulesetBuilder.build_block()
+    assert fragment in RulesetBuilder.build_quarantine()
 
 
-def test_block_ruleset_has_no_allow_sets() -> None:
+def test_quarantine_ruleset_has_no_allow_sets() -> None:
     """Block mode must have no allowlists -- total blackout."""
-    rs = RulesetBuilder.build_block()
+    rs = RulesetBuilder.build_quarantine()
     assert "allow_v4" not in rs
     assert "allow_v6" not in rs
 
 
-def test_block_ruleset_has_no_deny_sets() -> None:
+def test_quarantine_ruleset_has_no_deny_sets() -> None:
     """Block mode needs no deny sets -- everything is dropped anyway."""
-    rs = RulesetBuilder.build_block()
+    rs = RulesetBuilder.build_quarantine()
     assert "deny_v4" not in rs
     assert "deny_v6" not in rs
 
 
-def test_block_ruleset_has_no_dns_rules() -> None:
+def test_quarantine_ruleset_has_no_dns_rules() -> None:
     """Block mode drops DNS -- no external resolution allowed."""
-    rs = RulesetBuilder.build_block()
+    rs = RulesetBuilder.build_quarantine()
     assert "dport 53" not in rs
 
 
-def test_block_ruleset_has_no_port_accept_rules() -> None:
+def test_quarantine_ruleset_has_no_port_accept_rules() -> None:
     """Block mode allows only loopback + established -- no port-specific accepts."""
-    rs = RulesetBuilder.build_block()
+    rs = RulesetBuilder.build_quarantine()
     assert "tcp dport" not in rs
 
 
-def test_block_ruleset_does_not_include_bypass_or_deny_prefixes() -> None:
+def test_quarantine_ruleset_does_not_include_bypass_or_deny_prefixes() -> None:
     """Block mode uses only the BLOCKED prefix, not BYPASS or DENIED."""
-    rs = RulesetBuilder.build_block()
+    rs = RulesetBuilder.build_quarantine()
     assert _DENY_LOG_PREFIX not in rs
     assert BYPASS_LOG_PREFIX not in rs
 
 
-# ── verify_block() ─────────────────────────────────────────
+# ── verify_quarantine() ─────────────────────────────────────────
 
 
-def test_verify_block_accepts_generated_block_ruleset() -> None:
-    """verify_block() returns no errors for a valid block ruleset."""
-    assert RulesetBuilder.verify_block(RulesetBuilder.build_block()) == []
+def test_verify_quarantine_accepts_generated_block_ruleset() -> None:
+    """verify_quarantine() returns no errors for a valid block ruleset."""
+    assert RulesetBuilder.verify_quarantine(RulesetBuilder.build_quarantine()) == []
 
 
-def test_verify_block_rejects_hook_ruleset() -> None:
+def test_verify_quarantine_rejects_hook_ruleset() -> None:
     """Hook (deny-all with allowlists) must not satisfy block verification."""
-    errors = RulesetBuilder.verify_block(_builder.build_hook())
+    errors = RulesetBuilder.verify_quarantine(_builder.build_hook())
     assert errors
     assert any("allow_v4" in e for e in errors)
 
 
-def test_verify_block_rejects_bypass_ruleset() -> None:
+def test_verify_quarantine_rejects_bypass_ruleset() -> None:
     """Bypass (accept-all) must not satisfy block verification."""
-    errors = RulesetBuilder.verify_block(_builder.build_bypass())
+    errors = RulesetBuilder.verify_quarantine(_builder.build_bypass())
     assert errors
 
 
-def test_verify_block_reports_missing_chain() -> None:
+def test_verify_quarantine_reports_missing_chain() -> None:
     """Missing chains are reported."""
     minimal = f"table {NFT_TABLE} {{ chain output {{ policy drop; {BLOCKED_LOG_PREFIX} }} }}"
-    errors = RulesetBuilder.verify_block(minimal)
+    errors = RulesetBuilder.verify_quarantine(minimal)
     assert "input chain missing" in errors
 
 
-def test_verify_block_reports_missing_prefix() -> None:
+def test_verify_quarantine_reports_missing_prefix() -> None:
     """Missing blocked log prefix is reported."""
     minimal = (
         f"table {NFT_TABLE} {{ chain output {{ policy drop; }} chain input {{ policy drop; }} }}"
     )
-    errors = RulesetBuilder.verify_block(minimal)
+    errors = RulesetBuilder.verify_quarantine(minimal)
     assert "blocked nflog prefix missing" in errors
 
 
-def test_verify_block_reports_errors_for_empty_input() -> None:
+def test_verify_quarantine_reports_errors_for_empty_input() -> None:
     """Empty nft output should fail block-mode verification."""
-    assert RulesetBuilder.verify_block("")
+    assert RulesetBuilder.verify_quarantine("")
 
 
 # ── Gateway sets and port rules ──────────────────────────

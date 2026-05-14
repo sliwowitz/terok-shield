@@ -30,12 +30,12 @@ class TestBypassCLI:
         assert "Shield down" in captured.out
         assert _shield().state(shielded_container) == ShieldState.DOWN
 
-    def test_cli_down_all(self, shielded_container: str, capsys: pytest.CaptureFixture) -> None:
+    def test_cli_disengaged(self, shielded_container: str, capsys: pytest.CaptureFixture) -> None:
         """``main(["down", container, "--all"])`` enables full bypass."""
         main(["down", shielded_container, "--all"])
         captured = capsys.readouterr()
         assert "all traffic" in captured.out
-        assert _shield().state(shielded_container) == ShieldState.DOWN_ALL
+        assert _shield().state(shielded_container) == ShieldState.DISENGAGED
 
     def test_cli_up(self, shielded_container: str, capsys: pytest.CaptureFixture) -> None:
         """``main(["up", container])`` restores deny-all mode."""
@@ -85,7 +85,7 @@ class TestBypassPreviewCLI:
         assert "policy accept" in captured.out
         assert BYPASS_LOG_PREFIX in captured.out
 
-    def test_preview_down_all(self, capsys: pytest.CaptureFixture) -> None:
+    def test_preview_disengaged(self, capsys: pytest.CaptureFixture) -> None:
         """``preview --down --all`` omits private-range rules."""
         main(["preview", "--down", "--all"])
         captured = capsys.readouterr()

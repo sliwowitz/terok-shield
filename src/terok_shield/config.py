@@ -91,19 +91,19 @@ class ShieldMode(enum.Enum):
 class ShieldState(enum.Enum):
     """Per-container shield state, derived from the live nft ruleset.
 
-    BLOCK: Total network blackout — all traffic dropped, forensic logging only.
+    QUARANTINE: Total network blackout — all traffic dropped, dropped traffic logged.
     UP: Normal enforcing mode (deny-all with allowlists).
     DOWN: Bypass mode with private-range protection (RFC 1918 + RFC 4193).
-    DOWN_ALL: Bypass mode without private-range protection.
-    INACTIVE: No ruleset found (container stopped or unshielded).
+    DISENGAGED: Bypass mode without private-range protection.
+    OFFLINE: No ruleset found (container stopped or unshielded).
     ERROR: Ruleset present but unrecognised.
     """
 
-    BLOCK = "block"
+    QUARANTINE = "quarantine"
     UP = "up"
     DOWN = "down"
-    DOWN_ALL = "down_all"
-    INACTIVE = "inactive"
+    DISENGAGED = "disengaged"
+    OFFLINE = "offline"
     ERROR = "error"
 
 
@@ -227,7 +227,7 @@ class ShieldModeBackend(Protocol):
         """Switch a container to bypass mode."""
         ...
 
-    def shield_block(self, container: str) -> None:
+    def shield_quarantine(self, container: str) -> None:
         """Total network blackout — drop all traffic."""
         ...
 

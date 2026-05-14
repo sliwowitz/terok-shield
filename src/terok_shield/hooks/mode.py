@@ -472,7 +472,7 @@ class HookMode:
         ruleset = self._container_ruleset(container)
         rs = ruleset.build_bypass(allow_all=allow_all)
         current = self.shield_state(container)
-        if current == ShieldState.INACTIVE:
+        if current == ShieldState.OFFLINE:
             stdin = rs
         else:
             stdin = f"delete table {NFT_TABLE}\n{rs}"
@@ -496,12 +496,18 @@ class HookMode:
         if errors:
             raise RuntimeError(f"Shield-down ruleset verification failed: {'; '.join(errors)}")
 
-    def shield_block(self, container: str) -> None:
-        """Total network blackout — drop all traffic, log for forensics."""
-        ruleset = self._container_ruleset(container)
-        rs = ruleset.build_block()
+    def shield_quarantine(self, container: str) -> None:
+        """Total network blackout — drop all traffic, log dropped traffic.
+
+        Reads no settings — no DNS, no allowlists, no loopback ports,
+        no gateway probe, no profile lookup.  ``build_quarantine`` /
+        ``verify_quarantine`` are static; the only inputs are the
+        container name and the live ruleset state (table-or-no-table).
+        Any config-conditional branch added here is a bug.
+        """
+        rs = RulesetBuilder.build_quarantine()
         current = self.shield_state(container)
-        stdin = rs if current == ShieldState.INACTIVE else f"delete table {NFT_TABLE}\n{rs}"
+        stdin = rs if current == ShieldState.OFFLINE else f"delete table {NFT_TABLE}\n{rs}"
         self._runner.nft_via_nsenter(container, stdin=stdin)
         output = self._runner.nft_via_nsenter(
             container,
@@ -510,7 +516,7 @@ class HookMode:
             "inet",
             NFT_TABLE_NAME,
         )
-        errors = ruleset.verify_block(output)
+        errors = RulesetBuilder.verify_quarantine(output)
         if errors:
             raise RuntimeError(f"Block ruleset verification failed: {'; '.join(errors)}")
 
@@ -521,7 +527,7 @@ class HookMode:
         ruleset = self._container_ruleset(container)
         rs = ruleset.build_hook()
         current = self.shield_state(container)
-        if current == ShieldState.INACTIVE:
+        if current == ShieldState.OFFLINE:
             stdin = rs
         else:
             stdin = f"delete table {NFT_TABLE}\n{rs}"
@@ -621,18 +627,18 @@ class HookMode:
         """Query the live nft ruleset to determine the container's shield state."""
         output = self.list_rules(container)
         if not output.strip():
-            return ShieldState.INACTIVE
+            return ShieldState.OFFLINE
 
         # verify_* returns a list of errors; empty list = ruleset is valid.
         # Block is checked first: its minimal ruleset (no sets, no DNS)
         # would fail all other verifiers.
-        if not self._ruleset.verify_block(output):
-            return ShieldState.BLOCK
+        if not self._ruleset.verify_quarantine(output):
+            return ShieldState.QUARANTINE
 
         if not self._ruleset.verify_bypass(output, allow_all=False):
             return ShieldState.DOWN
         if not self._ruleset.verify_bypass(output, allow_all=True):
-            return ShieldState.DOWN_ALL
+            return ShieldState.DISENGAGED
 
         if not self._ruleset.verify_hook(output):
             return ShieldState.UP

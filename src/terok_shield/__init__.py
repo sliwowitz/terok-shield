@@ -372,10 +372,10 @@ class Shield:
         )
         self.hub_events.shield_down(container, allow_all=allow_all, dossier=self._read_dossier())
 
-    def block(self, container: str) -> None:
-        """Total network blackout — drop all traffic, log for forensics."""
-        self._mode.shield_block(container)
-        self.audit.log_event(container, "shield_block")
+    def quarantine(self, container: str) -> None:
+        """Total network blackout — drop all traffic, log dropped traffic."""
+        self._mode.shield_quarantine(container)
+        self.audit.log_event(container, "shield_quarantine")
 
     def up(self, container: str) -> None:
         """Restore normal deny-all mode for a running container."""

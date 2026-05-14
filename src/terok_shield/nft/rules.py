@@ -165,7 +165,7 @@ class RulesetBuilder:
         """)
 
     @staticmethod
-    def build_block() -> str:
+    def build_quarantine() -> str:
         """Generate the block-mode (total blackout) ruleset.
 
         Drops all traffic except loopback and established connections.
@@ -271,7 +271,7 @@ class RulesetBuilder:
         return errors
 
     @staticmethod
-    def verify_block(nft_output: str) -> list[str]:
+    def verify_quarantine(nft_output: str) -> list[str]:
         """Check applied block ruleset invariants.  Returns errors (empty = OK).
 
         Expects output from ``nft list table inet terok_shield`` (scoped to the

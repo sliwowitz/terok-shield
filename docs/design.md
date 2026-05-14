@@ -198,7 +198,7 @@ shield = Shield(ShieldConfig(state_dir=Path("/path/to/state")))
 | `deny(container, target)` | Live-deny a domain/IP (best-effort) |
 | `down(container)` | Switch to bypass mode (accept-all + log) |
 | `up(container)` | Restore deny-all mode |
-| `state(container)` | Query container shield state (`UP`, `DOWN`, `DOWN_ALL`, `INACTIVE`) |
+| `state(container)` | Query container shield state (`UP`, `DOWN`, `DISENGAGED`, `OFFLINE`) |
 | `rules(container)` | Return current nft ruleset for a container |
 | `resolve(container, profiles)` | Resolve DNS profiles and cache results |
 | `status()` | Return mode, profiles, audit config |

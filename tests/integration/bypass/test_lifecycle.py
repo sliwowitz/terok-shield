@@ -66,11 +66,11 @@ class TestBypassBasicLifecycle:
         assert shield.state(shielded_container) == ShieldState.UP
         assert_blocked(shielded_container, BLOCKED_TARGET_HTTP)
 
-    def test_up_down_all_up_cycle(self, shielded_container: str) -> None:
-        """Full cycle with allow_all: UP -> DOWN_ALL -> UP."""
+    def test_up_disengaged_up_cycle(self, shielded_container: str) -> None:
+        """Full cycle with allow_all: UP -> DISENGAGED -> UP."""
         shield = _shield()
         shield.down(shielded_container, allow_all=True)
-        assert shield.state(shielded_container) == ShieldState.DOWN_ALL
+        assert shield.state(shielded_container) == ShieldState.DISENGAGED
 
         rules = shield.rules(shielded_container)
         assert "policy accept" in rules
@@ -124,26 +124,26 @@ class TestBypassIdempotency:
 @nft_missing
 @pytest.mark.usefixtures("nft_in_netns")
 class TestBypassModeSwitch:
-    """Verify switching between bypass modes (DOWN <-> DOWN_ALL)."""
+    """Verify switching between bypass modes (DOWN <-> DISENGAGED)."""
 
-    def test_down_to_down_all(self, shielded_container: str) -> None:
+    def test_down_to_disengaged(self, shielded_container: str) -> None:
         """Switch from protected bypass to full bypass."""
         shield = _shield()
         shield.down(shielded_container)
         assert shield.state(shielded_container) == ShieldState.DOWN
 
         shield.down(shielded_container, allow_all=True)
-        assert shield.state(shielded_container) == ShieldState.DOWN_ALL
+        assert shield.state(shielded_container) == ShieldState.DISENGAGED
 
         # Private-range rules should be gone
         rules = shield.rules(shielded_container)
         assert "TEROK_SHIELD_PRIVATE" not in rules
 
-    def test_down_all_to_down(self, shielded_container: str) -> None:
+    def test_disengaged_to_down(self, shielded_container: str) -> None:
         """Switch from full bypass back to protected bypass."""
         shield = _shield()
         shield.down(shielded_container, allow_all=True)
-        assert shield.state(shielded_container) == ShieldState.DOWN_ALL
+        assert shield.state(shielded_container) == ShieldState.DISENGAGED
 
         shield.down(shielded_container)
         assert shield.state(shielded_container) == ShieldState.DOWN
@@ -267,7 +267,7 @@ class TestBypassAuditTrail:
         up_idx = actions.index("shield_up")
         assert down_idx < up_idx
 
-    def test_down_all_logs_detail(self, shielded_container: str, shield_env: Path) -> None:
+    def test_disengaged_logs_detail(self, shielded_container: str, shield_env: Path) -> None:
         """shield.down(allow_all=True) logs the allow_all detail."""
         sd = shield_env / "containers" / shielded_container
         shield = Shield(ShieldConfig(state_dir=sd))
@@ -335,7 +335,7 @@ class TestBypassFullE2E:
 
             # Step 4: Switch to full bypass to also check RFC1918 destinations
             shield.down(name, allow_all=True)
-            assert shield.state(name) == ShieldState.DOWN_ALL
+            assert shield.state(name) == ShieldState.DISENGAGED
             assert_connectable(name, BLOCKED_TARGET_IP, BLOCKED_TARGET_DNS_PORT)
 
             # Step 5: Back to protected bypass

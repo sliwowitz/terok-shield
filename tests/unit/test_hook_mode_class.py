@@ -453,7 +453,7 @@ def test_shield_up_reapplies_hook_ruleset(
 @pytest.mark.parametrize(
     ("nft_output", "verify_bypass", "verify_hook", "expected"),
     [
-        pytest.param("", None, None, ShieldState.INACTIVE, id="inactive"),
+        pytest.param("", None, None, ShieldState.OFFLINE, id="offline"),
         pytest.param(RulesetBuilder().build_hook(), ["not bypass"], [], ShieldState.UP, id="up"),
         pytest.param(RulesetBuilder().build_bypass(), [], None, ShieldState.DOWN, id="down"),
         pytest.param(
@@ -468,7 +468,7 @@ def test_shield_state_classifies_rulesets(
     verify_hook: list[str] | None,
     expected: ShieldState,
 ) -> None:
-    """shield_state() distinguishes inactive, hook, bypass, and invalid rulesets."""
+    """shield_state() distinguishes offline, hook, bypass, and invalid rulesets."""
     harness = make_hook_mode()
     harness.runner.nft_via_nsenter.return_value = nft_output
     if verify_bypass is not None:
@@ -479,68 +479,82 @@ def test_shield_state_classifies_rulesets(
 
 
 def test_shield_state_detects_block(make_hook_mode: HookModeHarnessFactory) -> None:
-    """shield_state() returns BLOCK when verify_block passes."""
+    """shield_state() returns BLOCK when verify_quarantine passes."""
     harness = make_hook_mode()
     harness.runner.nft_via_nsenter.return_value = "table inet terok_shield { policy drop }"
-    harness.ruleset.verify_block.return_value = []  # passes
+    harness.ruleset.verify_quarantine.return_value = []  # passes
     harness.ruleset.verify_bypass.return_value = ["not bypass"]
-    assert harness.mode.shield_state("test") == ShieldState.BLOCK
+    assert harness.mode.shield_state("test") == ShieldState.QUARANTINE
 
 
-def test_shield_block_applies_block_ruleset(make_hook_mode: HookModeHarnessFactory) -> None:
-    """shield_block() applies the block ruleset and verifies it."""
+def test_shield_quarantine_applies_block_ruleset(
+    make_hook_mode: HookModeHarnessFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """shield_quarantine() applies the block ruleset and verifies it.
+
+    ``build_quarantine`` / ``verify_quarantine`` are static class methods
+    on ``RulesetBuilder`` (no config dependency by design — see
+    ``HookMode.shield_quarantine``).  Patch at the class to stub them.
+    """
+    from terok_shield.nft.rules import RulesetBuilder
+
     harness = make_hook_mode()
-    harness.mode._container_ruleset = lambda _c: harness.ruleset
     harness.runner.nft_via_nsenter.side_effect = [
         "table inet terok_shield {}",  # shield_state() → list_rules
         "",  # apply block ruleset
         "valid output",  # verify
     ]
-    harness.ruleset.build_block.return_value = "block ruleset"
-    harness.ruleset.verify_block.return_value = []
     harness.ruleset.verify_bypass.return_value = ["not bypass"]
     harness.ruleset.verify_hook.return_value = ["not hook"]
+    build_mock = mock.Mock(return_value="block ruleset")
+    verify_mock = mock.Mock(return_value=[])
+    monkeypatch.setattr(RulesetBuilder, "build_quarantine", build_mock)
+    monkeypatch.setattr(RulesetBuilder, "verify_quarantine", verify_mock)
 
-    harness.mode.shield_block("test-ctr")
+    harness.mode.shield_quarantine("test-ctr")
     assert harness.runner.nft_via_nsenter.call_count == 3
-    harness.ruleset.build_block.assert_called_once()
+    build_mock.assert_called_once()
 
 
-def test_shield_block_raises_on_verification_failure(
-    make_hook_mode: HookModeHarnessFactory,
+def test_shield_quarantine_raises_on_verification_failure(
+    make_hook_mode: HookModeHarnessFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """shield_block() raises RuntimeError when verification fails."""
+    """shield_quarantine() raises RuntimeError when verification fails."""
+    from terok_shield.nft.rules import RulesetBuilder
+
     harness = make_hook_mode()
-    harness.mode._container_ruleset = lambda _c: harness.ruleset
     harness.runner.nft_via_nsenter.side_effect = [
         "table inet terok_shield {}",  # shield_state()
         "",  # apply
         "bad output",  # verify
     ]
-    harness.ruleset.build_block.return_value = "block ruleset"
-    harness.ruleset.verify_block.return_value = ["policy is not drop"]
     harness.ruleset.verify_bypass.return_value = ["not bypass"]
     harness.ruleset.verify_hook.return_value = ["not hook"]
+    monkeypatch.setattr(RulesetBuilder, "build_quarantine", mock.Mock(return_value="block ruleset"))
+    monkeypatch.setattr(
+        RulesetBuilder, "verify_quarantine", mock.Mock(return_value=["policy is not drop"])
+    )
 
     with pytest.raises(RuntimeError, match="Block ruleset verification failed"):
-        harness.mode.shield_block("test-ctr")
+        harness.mode.shield_quarantine("test-ctr")
 
 
-def test_shield_block_on_inactive_applies_without_delete(
-    make_hook_mode: HookModeHarnessFactory,
+def test_shield_quarantine_on_offline_applies_without_delete(
+    make_hook_mode: HookModeHarnessFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """shield_block() on an inactive container applies ruleset without delete prefix."""
+    """shield_quarantine() on an offline container applies ruleset without delete prefix."""
+    from terok_shield.nft.rules import RulesetBuilder
+
     harness = make_hook_mode()
-    harness.mode._container_ruleset = lambda _c: harness.ruleset
     harness.runner.nft_via_nsenter.side_effect = [
-        "",  # shield_state() → INACTIVE
+        "",  # shield_state() → OFFLINE
         "",  # apply
         "valid output",  # verify
     ]
-    harness.ruleset.build_block.return_value = "block ruleset"
-    harness.ruleset.verify_block.return_value = []
+    monkeypatch.setattr(RulesetBuilder, "build_quarantine", mock.Mock(return_value="block ruleset"))
+    monkeypatch.setattr(RulesetBuilder, "verify_quarantine", mock.Mock(return_value=[]))
 
-    harness.mode.shield_block("test-ctr")
+    harness.mode.shield_quarantine("test-ctr")
 
     # Second call (apply) should NOT have "delete table" prefix
     apply_call = harness.runner.nft_via_nsenter.call_args_list[1]
@@ -893,16 +907,16 @@ def test_container_ruleset_returns_builder_with_dns(
     assert isinstance(ruleset, RulesetBuilder)
 
 
-def test_shield_up_on_inactive_applies_without_delete(
+def test_shield_up_on_offline_applies_without_delete(
     make_hook_mode: HookModeHarnessFactory,
     make_config: ConfigFactory,
 ) -> None:
-    """shield_up() on INACTIVE netns applies ruleset without delete table prefix."""
+    """shield_up() on OFFLINE netns applies ruleset without delete table prefix."""
     harness = make_hook_mode(config=make_config())
     harness.mode._container_ruleset = lambda _c: harness.ruleset
-    # shield_state() → list_rules returns empty (INACTIVE)
+    # shield_state() → list_rules returns empty (OFFLINE)
     harness.runner.nft_via_nsenter.side_effect = [
-        "",  # shield_state() → INACTIVE
+        "",  # shield_state() → OFFLINE
         "",  # apply ruleset (no delete prefix)
         "valid output",  # verify
     ]
@@ -917,15 +931,15 @@ def test_shield_up_on_inactive_applies_without_delete(
         assert "delete" not in call.kwargs.get("stdin", "")
 
 
-def test_shield_down_on_inactive_applies_without_delete(
+def test_shield_down_on_offline_applies_without_delete(
     make_hook_mode: HookModeHarnessFactory,
 ) -> None:
-    """shield_down() on INACTIVE netns applies bypass ruleset without delete table prefix."""
+    """shield_down() on OFFLINE netns applies bypass ruleset without delete table prefix."""
     harness = make_hook_mode()
     harness.mode._container_ruleset = lambda _c: harness.ruleset
-    # shield_state() → list_rules returns empty (INACTIVE)
+    # shield_state() → list_rules returns empty (OFFLINE)
     harness.runner.nft_via_nsenter.side_effect = [
-        "",  # shield_state() → INACTIVE
+        "",  # shield_state() → OFFLINE
         "",  # apply bypass ruleset (no delete prefix)
         "valid output",  # verify
     ]
@@ -1281,15 +1295,15 @@ def test_pre_start_includes_hooks_dir_when_persists(
     assert "--hooks-dir" in args
 
 
-def test_shield_state_returns_down_all(make_hook_mode: HookModeHarnessFactory) -> None:
-    """shield_state() returns DOWN_ALL when allow-all bypass is active but not simple bypass."""
+def test_shield_state_returns_disengaged(make_hook_mode: HookModeHarnessFactory) -> None:
+    """shield_state() returns DISENGAGED when allow-all bypass is active but not simple bypass."""
     harness = make_hook_mode()
     harness.runner.nft_via_nsenter.return_value = "some rules"
     # First call (allow_all=False): non-empty errors → not DOWN, continue
-    # Second call (allow_all=True): empty list → DOWN_ALL
+    # Second call (allow_all=True): empty list → DISENGAGED
     harness.ruleset.verify_bypass.side_effect = [["not bypass"], []]
 
-    assert harness.mode.shield_state("test-ctr") == ShieldState.DOWN_ALL
+    assert harness.mode.shield_state("test-ctr") == ShieldState.DISENGAGED
 
 
 @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)

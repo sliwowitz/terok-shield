@@ -196,7 +196,7 @@ def _build_parser() -> argparse.ArgumentParser:
         if idx == -1:
             return text
         eol = text.index("\n", idx + 1)
-        hint = "\n    status CONTAINER    Query container firewall state (up/down/down_all/inactive/error)"
+        hint = "\n    status CONTAINER    Query container firewall state (up/down/disengaged/offline/error)"
         return text[:eol] + hint + text[eol:]
 
     parser.format_help = _format_help  # type: ignore[method-assign]

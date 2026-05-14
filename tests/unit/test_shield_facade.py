@@ -307,12 +307,12 @@ def test_down_resolves_dossier_via_meta_path(
     )
 
 
-def test_block_delegates_and_logs(make_shield: ShieldHarnessFactory) -> None:
+def test_quarantine_delegates_and_logs(make_shield: ShieldHarnessFactory) -> None:
     """block() delegates to the backend and logs the transition."""
     harness = make_shield()
-    harness.shield.block("test-ctr")
-    harness.mode.shield_block.assert_called_once_with("test-ctr")
-    harness.audit.log_event.assert_called_once_with("test-ctr", "shield_block")
+    harness.shield.quarantine("test-ctr")
+    harness.mode.shield_quarantine.assert_called_once_with("test-ctr")
+    harness.audit.log_event.assert_called_once_with("test-ctr", "shield_quarantine")
 
 
 def test_state_delegates_to_mode(make_shield: ShieldHarnessFactory) -> None:

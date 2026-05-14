@@ -91,8 +91,8 @@ Audit:    enabled
 Profiles: base, dev-node, dev-python, dev-standard, nvidia-hpc
 ```
 
-With a container name, prints the live firewall state (`up`, `down`, `down_all`,
-`inactive`, or `error`). Useful for scripting and integration:
+With a container name, prints the live firewall state (`up`, `down`, `disengaged`,
+`offline`, or `error`). Useful for scripting and integration:
 
 ```bash
 terok-shield status my-container

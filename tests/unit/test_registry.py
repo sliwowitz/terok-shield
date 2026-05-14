@@ -13,11 +13,11 @@ from terok_shield.cli.registry import (
     COMMANDS,
     ArgDef,
     _handle_allow,
-    _handle_block,
     _handle_deny,
     _handle_logs,
     _handle_preview,
     _handle_profiles,
+    _handle_quarantine,
     _handle_status,
     _handle_watch,
 )
@@ -127,13 +127,15 @@ class TestHandlers:
             _handle_watch(shield, "ctr")
         mock_run.assert_called_once_with(shield.config.state_dir, "ctr")
 
-    def test_handle_block_delegates_and_prints(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """_handle_block calls shield.block() and prints confirmation."""
+    def test_handle_quarantine_delegates_and_prints(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """_handle_quarantine calls shield.quarantine() and prints confirmation."""
         shield = mock.MagicMock()
-        _handle_block(shield, "test-ctr")
-        shield.block.assert_called_once_with("test-ctr")
+        _handle_quarantine(shield, "test-ctr")
+        shield.quarantine.assert_called_once_with("test-ctr")
         output = capsys.readouterr().out
-        assert "BLOCKED" in output
+        assert "QUARANTINED" in output
         assert "test-ctr" in output
 
     def test_handle_preview_all_without_down_raises(self) -> None:
