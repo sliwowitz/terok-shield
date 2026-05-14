@@ -51,10 +51,11 @@ from .util import is_ip as _is_ip
 if TYPE_CHECKING:
     from ._hub_events import HubEventEmitter
     from .audit import AuditLogger
+    from .commands import COMMANDS, ArgDef, CommandDef
     from .dns.resolver import DnsResolver
     from .nft.rules import RulesetBuilder
     from .profiles import ProfileLoader
-    from .run import CommandRunner
+    from .run import CommandRunner, ExecError
 
 # ── Lazy: core + support layer ──────────────────────────
 # Re-exported names from __all__ that are deferred until first access.
@@ -74,10 +75,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "SubprocessRunner": ("terok_shield.run", "SubprocessRunner"),
     "check_firewall_binaries": ("terok_shield.prereqs", "check_firewall_binaries"),
     "setup_global_hooks": ("terok_shield.hooks.install", "setup_global_hooks"),
-    # CLI registry — re-exported for terok integration layer
-    "ArgDef": ("terok_shield.cli.registry", "ArgDef"),
-    "COMMANDS": ("terok_shield.cli.registry", "COMMANDS"),
-    "CommandDef": ("terok_shield.cli.registry", "CommandDef"),
+    # Command registry — re-exported for the terok integration layer
+    "ArgDef": ("terok_shield.commands", "ArgDef"),
+    "COMMANDS": ("terok_shield.commands", "COMMANDS"),
+    "CommandDef": ("terok_shield.commands", "CommandDef"),
 }
 
 
