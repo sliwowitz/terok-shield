@@ -35,14 +35,15 @@ class ArgDef:
 class CommandDef:
     """Definition of a shield subcommand.
 
-    Structurally compatible with terok-sandbox's ``CommandDef``: same
-    attribute names + ``children`` for nested verb groups, so
-    downstream consumers (terok-sandbox) can wire the registry through
-    sandbox's ``CommandTree`` without a per-package adapter.  Shield-
-    specific fields (``needs_container``, ``standalone_only``) stay
-    first-class — they're load-bearing for shield's own CLI — but the
-    unified ``CommandTree.wire`` ignores fields it doesn't know about,
-    so the extra fields don't leak downstream.
+    Structurally compatible with terok-sandbox's
+    [`CommandDef`][terok_sandbox.commands.CommandDef]: same attribute
+    names + ``children`` for nested verb groups, so downstream
+    consumers (terok-sandbox) can wire the registry through sandbox's
+    [`CommandTree`][terok_sandbox.commands.CommandTree] without a
+    per-package adapter.  Shield-specific fields (``needs_container``,
+    ``standalone_only``) stay first-class — they're load-bearing for
+    shield's own CLI — but the unified wire layer ignores fields it
+    doesn't know about, so the extra fields don't leak downstream.
 
     Attributes:
         name: Subcommand name (e.g. ``"allow"``).
