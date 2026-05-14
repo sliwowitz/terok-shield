@@ -90,19 +90,19 @@ class TestRulesetBuilderBuildBlock:
     """Test RulesetBuilder.build_quarantine()."""
 
     def test_produces_drop_policy(self) -> None:
-        """Block ruleset has drop policy."""
+        """Quarantine ruleset has drop policy."""
         builder = RulesetBuilder()
         rs = builder.build_quarantine()
         assert "policy drop" in rs
 
     def test_includes_blocked_log(self) -> None:
-        """Block ruleset includes blocked nflog prefix."""
+        """Quarantine ruleset includes blocked nflog prefix."""
         builder = RulesetBuilder()
         rs = builder.build_quarantine()
         assert BLOCKED_LOG_PREFIX in rs
 
     def test_has_no_allow_sets(self) -> None:
-        """Block ruleset has no allowlist sets."""
+        """Quarantine ruleset has no allowlist sets."""
         builder = RulesetBuilder()
         rs = builder.build_quarantine()
         assert "allow_v4" not in rs
@@ -113,7 +113,7 @@ class TestRulesetBuilderVerify:
     """Test RulesetBuilder verification methods."""
 
     def test_verify_quarantine_passes(self) -> None:
-        """verify_quarantine returns empty for valid block ruleset."""
+        """verify_quarantine returns empty for valid quarantine ruleset."""
         builder = RulesetBuilder()
         rs = builder.build_quarantine()
         assert builder.verify_quarantine(rs) == []

@@ -166,10 +166,11 @@ class RulesetBuilder:
 
     @staticmethod
     def build_quarantine() -> str:
-        """Generate the block-mode (total blackout) ruleset.
+        """Generate the quarantine-mode (total blackout) ruleset.
 
         Drops all traffic except loopback and established connections.
-        No DNS, no allowlists, no gateway ports.  Forensic logging only.
+        No DNS, no allowlists, no gateway ports.  All dropped packets
+        are tagged for the audit log.
         """
         blocked_log = f'        log group {NFLOG_GROUP} prefix "{BLOCKED_LOG_PREFIX}: " drop'
         return textwrap.dedent(f"""\
@@ -272,7 +273,7 @@ class RulesetBuilder:
 
     @staticmethod
     def verify_quarantine(nft_output: str) -> list[str]:
-        """Check applied block ruleset invariants.  Returns errors (empty = OK).
+        """Check applied quarantine ruleset invariants.  Returns errors (empty = OK).
 
         Expects output from ``nft list table inet terok_shield`` (scoped to the
         managed table), not ``nft list ruleset``.
@@ -294,9 +295,9 @@ class RulesetBuilder:
         if BLOCKED_LOG_PREFIX not in nft_output:
             errors.append("blocked nflog prefix missing")
         if "allow_v4" in nft_output:
-            errors.append("allow_v4 set present in block mode")
+            errors.append("allow_v4 set present in quarantine mode")
         if "allow_v6" in nft_output:
-            errors.append("allow_v6 set present in block mode")
+            errors.append("allow_v6 set present in quarantine mode")
         return errors
 
     # ── Set operations (instance) ──────────────────────

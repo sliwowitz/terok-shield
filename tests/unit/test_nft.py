@@ -752,7 +752,7 @@ def test_verify_bypass_reports_errors_for_empty_input() -> None:
     ],
 )
 def test_quarantine_ruleset_contains_required_fragments(fragment: str) -> None:
-    """The block ruleset preserves the expected security invariants."""
+    """The quarantine ruleset preserves the expected security invariants."""
     assert fragment in RulesetBuilder.build_quarantine()
 
 
@@ -793,7 +793,7 @@ def test_quarantine_ruleset_does_not_include_bypass_or_deny_prefixes() -> None:
 
 
 def test_verify_quarantine_accepts_generated_block_ruleset() -> None:
-    """verify_quarantine() returns no errors for a valid block ruleset."""
+    """verify_quarantine() returns no errors for a valid quarantine ruleset."""
     assert RulesetBuilder.verify_quarantine(RulesetBuilder.build_quarantine()) == []
 
 
@@ -827,7 +827,7 @@ def test_verify_quarantine_reports_missing_prefix() -> None:
 
 
 def test_verify_quarantine_reports_errors_for_empty_input() -> None:
-    """Empty nft output should fail block-mode verification."""
+    """Empty nft output should fail quarantine-mode verification."""
     assert RulesetBuilder.verify_quarantine("")
 
 

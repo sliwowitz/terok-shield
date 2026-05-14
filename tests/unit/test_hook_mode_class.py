@@ -478,8 +478,8 @@ def test_shield_state_classifies_rulesets(
     assert harness.mode.shield_state("test") == expected
 
 
-def test_shield_state_detects_block(make_hook_mode: HookModeHarnessFactory) -> None:
-    """shield_state() returns BLOCK when verify_quarantine passes."""
+def test_shield_state_detects_quarantine(make_hook_mode: HookModeHarnessFactory) -> None:
+    """shield_state() returns QUARANTINE when verify_quarantine passes."""
     harness = make_hook_mode()
     harness.runner.nft_via_nsenter.return_value = "table inet terok_shield { policy drop }"
     harness.ruleset.verify_quarantine.return_value = []  # passes
@@ -490,7 +490,7 @@ def test_shield_state_detects_block(make_hook_mode: HookModeHarnessFactory) -> N
 def test_shield_quarantine_applies_block_ruleset(
     make_hook_mode: HookModeHarnessFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """shield_quarantine() applies the block ruleset and verifies it.
+    """shield_quarantine() applies the quarantine ruleset and verifies it.
 
     ``build_quarantine`` / ``verify_quarantine`` are static class methods
     on ``RulesetBuilder`` (no config dependency by design — see
@@ -501,12 +501,12 @@ def test_shield_quarantine_applies_block_ruleset(
     harness = make_hook_mode()
     harness.runner.nft_via_nsenter.side_effect = [
         "table inet terok_shield {}",  # shield_state() → list_rules
-        "",  # apply block ruleset
+        "",  # apply quarantine ruleset
         "valid output",  # verify
     ]
     harness.ruleset.verify_bypass.return_value = ["not bypass"]
     harness.ruleset.verify_hook.return_value = ["not hook"]
-    build_mock = mock.Mock(return_value="block ruleset")
+    build_mock = mock.Mock(return_value="quarantine ruleset")
     verify_mock = mock.Mock(return_value=[])
     monkeypatch.setattr(RulesetBuilder, "build_quarantine", build_mock)
     monkeypatch.setattr(RulesetBuilder, "verify_quarantine", verify_mock)
@@ -530,12 +530,12 @@ def test_shield_quarantine_raises_on_verification_failure(
     ]
     harness.ruleset.verify_bypass.return_value = ["not bypass"]
     harness.ruleset.verify_hook.return_value = ["not hook"]
-    monkeypatch.setattr(RulesetBuilder, "build_quarantine", mock.Mock(return_value="block ruleset"))
+    monkeypatch.setattr(RulesetBuilder, "build_quarantine", mock.Mock(return_value="quarantine ruleset"))
     monkeypatch.setattr(
         RulesetBuilder, "verify_quarantine", mock.Mock(return_value=["policy is not drop"])
     )
 
-    with pytest.raises(RuntimeError, match="Block ruleset verification failed"):
+    with pytest.raises(RuntimeError, match="Quarantine ruleset verification failed"):
         harness.mode.shield_quarantine("test-ctr")
 
 
@@ -551,7 +551,7 @@ def test_shield_quarantine_on_offline_applies_without_delete(
         "",  # apply
         "valid output",  # verify
     ]
-    monkeypatch.setattr(RulesetBuilder, "build_quarantine", mock.Mock(return_value="block ruleset"))
+    monkeypatch.setattr(RulesetBuilder, "build_quarantine", mock.Mock(return_value="quarantine ruleset"))
     monkeypatch.setattr(RulesetBuilder, "verify_quarantine", mock.Mock(return_value=[]))
 
     harness.mode.shield_quarantine("test-ctr")

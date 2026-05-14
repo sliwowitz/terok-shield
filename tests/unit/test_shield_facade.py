@@ -308,7 +308,7 @@ def test_down_resolves_dossier_via_meta_path(
 
 
 def test_quarantine_delegates_and_logs(make_shield: ShieldHarnessFactory) -> None:
-    """block() delegates to the backend and logs the transition."""
+    """quarantine() delegates to the backend and logs the transition."""
     harness = make_shield()
     harness.shield.quarantine("test-ctr")
     harness.mode.shield_quarantine.assert_called_once_with("test-ctr")

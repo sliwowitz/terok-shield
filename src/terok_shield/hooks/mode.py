@@ -518,7 +518,7 @@ class HookMode:
         )
         errors = RulesetBuilder.verify_quarantine(output)
         if errors:
-            raise RuntimeError(f"Block ruleset verification failed: {'; '.join(errors)}")
+            raise RuntimeError(f"Quarantine ruleset verification failed: {'; '.join(errors)}")
 
     def shield_up(self, container: str) -> None:
         """Restore normal deny-all mode for a running container."""
