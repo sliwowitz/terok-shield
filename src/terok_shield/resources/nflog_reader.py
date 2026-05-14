@@ -424,7 +424,7 @@ class ReaderSession:
         re-trigger ``_emit_connection_blocked`` every NFLOG packet
         (because ``_last_emit`` stays unmarked), and *each* of those
         retries would currently re-write the same ``"blocked"`` line
-        to ``audit.jsonl`` — flooding the forensic log during the
+        to ``audit.jsonl`` — flooding the audit log during the
         very window where it's least helpful.
 
         Dossier resolution happens once per fresh tick; both the audit

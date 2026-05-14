@@ -100,11 +100,11 @@ class TestHubEventEmitter:
             "container": _CONTAINER,
         }
 
-    def test_shield_down_allow_all_maps_to_down_all(self, hub_socket: _SocketRecorder) -> None:
-        """``allow_all=True`` flips the event type to ``shield_down_all``."""
+    def test_shield_down_allow_all_maps_to_disengaged(self, hub_socket: _SocketRecorder) -> None:
+        """``allow_all=True`` flips the event type to ``shield_disengaged``."""
         HubEventEmitter(hub_socket.path).shield_down(_CONTAINER, allow_all=True)
         assert json.loads(_received_one_line(hub_socket)) == {
-            "type": "shield_down_all",
+            "type": "shield_disengaged",
             "container": _CONTAINER,
         }
 

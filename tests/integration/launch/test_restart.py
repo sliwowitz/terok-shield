@@ -94,7 +94,7 @@ class TestRestartPersistence:
             # Shield must still be active — the global hook fired on restart
             assert shield.state(name) == ShieldState.UP, (
                 "Shield should be UP after restart (fail-close guarantee). "
-                "If INACTIVE, the OCI hook did not fire on podman start — "
+                "If OFFLINE, the OCI hook did not fire on podman start — "
                 "the container is running without firewall protection."
             )
 

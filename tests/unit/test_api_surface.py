@@ -72,14 +72,14 @@ class TestAPISurface:
         assert members == {"HOOK": "hook"}
 
     def test_shield_state_members(self):
-        """ShieldState has BLOCK, UP, DOWN, DOWN_ALL, INACTIVE, ERROR."""
+        """ShieldState has QUARANTINE, UP, DOWN, DISENGAGED, OFFLINE, ERROR."""
         members = {m.name: m.value for m in ShieldState}
         assert members == {
-            "BLOCK": "block",
+            "QUARANTINE": "quarantine",
             "UP": "up",
             "DOWN": "down",
-            "DOWN_ALL": "down_all",
-            "INACTIVE": "inactive",
+            "DISENGAGED": "disengaged",
+            "OFFLINE": "offline",
             "ERROR": "error",
         }
 

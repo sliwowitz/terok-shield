@@ -5,6 +5,15 @@ also the "Changelog" link in PyPI metadata.
 
 [rel]: https://github.com/terok-ai/terok-shield/releases
 
+## v0.6.41 — The State of the Shields
+
+## What's Changed
+* feat!: ShieldState vocabulary + tighten panic codepath in https://github.com/terok-ai/terok-shield/pull/307
+* chore: bump virtualenv 21.3.2 → 21.3.3 in lock for py3.14.4 by @sliwowitz in https://github.com/terok-ai/terok-shield/pull/306
+
+
+**Full Changelog**: https://github.com/terok-ai/terok-shield/compare/v0.6.40...v0.6.41
+
 ## v0.6.40 — The Tree of Command
 
 **Full Changelog**: https://github.com/terok-ai/terok-shield/compare/v0.6.39...v0.6.40

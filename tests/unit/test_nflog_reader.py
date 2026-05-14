@@ -957,7 +957,7 @@ class TestAuditBlockAppend:
         """Hub down (emitter returns False) → audit entry is still recorded.
 
         Auditing should be terminal-end, not best-effort: the operator
-        can lose a popup to a hub restart and still need the forensic
+        can lose a popup to a hub restart and still need the audit
         record of which destination got blocked when.
         """
 
@@ -1009,7 +1009,7 @@ class TestAuditBlockAppend:
         would re-trigger ``_emit_connection_blocked`` on every NFLOG
         packet (because ``_last_emit`` stays unmarked while the wire
         keeps failing) and *each* of those retries would re-write the
-        same ``"blocked"`` line — flooding the forensic log during the
+        same ``"blocked"`` line — flooding the audit log during the
         very window where it's least helpful.  ``_last_audit`` is the
         knob that prevents that without giving up wire-side retries.
         """

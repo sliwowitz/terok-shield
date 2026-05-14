@@ -620,7 +620,7 @@ def test_rules_output_for_missing_rules(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """rules prints a friendly message when the ruleset is empty."""
-    cli_dispatch.shield.state.return_value = ShieldState.INACTIVE
+    cli_dispatch.shield.state.return_value = ShieldState.OFFLINE
     cli_dispatch.shield.rules.return_value = ""
     main(["rules", _CONTAINER])
     assert "No rules found" in capsys.readouterr().out

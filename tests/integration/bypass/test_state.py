@@ -4,7 +4,7 @@
 """Integration tests: shield state detection with real containers.
 
 Verifies ``Shield.state()`` correctly classifies live nft rulesets
-as UP, DOWN, DOWN_ALL, or INACTIVE by querying actual container
+as UP, DOWN, DISENGAGED, or OFFLINE by querying actual container
 network namespaces.
 """
 
@@ -37,11 +37,11 @@ class TestShieldState:
         shield.down(shielded_container)
         assert shield.state(shielded_container) == ShieldState.DOWN
 
-    def test_state_down_all_after_shield_down_all(self, shielded_container: str) -> None:
-        """State is DOWN_ALL after shield.down(allow_all=True)."""
+    def test_state_disengaged_after_shield_disengaged(self, shielded_container: str) -> None:
+        """State is DISENGAGED after shield.down(allow_all=True)."""
         shield = _shield()
         shield.down(shielded_container, allow_all=True)
-        assert shield.state(shielded_container) == ShieldState.DOWN_ALL
+        assert shield.state(shielded_container) == ShieldState.DISENGAGED
 
     def test_state_up_after_shield_up(self, shielded_container: str) -> None:
         """State returns to UP after shield.down() then shield.up()."""
@@ -57,13 +57,13 @@ class TestShieldState:
 @podman_missing
 @nft_missing
 class TestShieldStateInactive:
-    """Verify INACTIVE state for containers without rulesets."""
+    """Verify OFFLINE state for containers without rulesets."""
 
-    def test_state_inactive_for_stopped_container(self) -> None:
-        """A nonexistent/stopped container reports INACTIVE."""
+    def test_state_offline_for_stopped_container(self) -> None:
+        """A nonexistent/stopped container reports OFFLINE."""
         bogus = f"nonexistent-{uuid.uuid4().hex[:12]}"
-        assert _shield().state(bogus) == ShieldState.INACTIVE
+        assert _shield().state(bogus) == ShieldState.OFFLINE
 
-    def test_state_inactive_for_bare_container(self, container: str) -> None:
-        """A running container with no shield ruleset reports INACTIVE."""
-        assert _shield().state(container) == ShieldState.INACTIVE
+    def test_state_offline_for_bare_container(self, container: str) -> None:
+        """A running container with no shield ruleset reports OFFLINE."""
+        assert _shield().state(container) == ShieldState.OFFLINE

@@ -124,10 +124,10 @@ def _handle_up(shield: Shield, container: str) -> None:
     print(f"Shield up for {container}")
 
 
-def _handle_block(shield: Shield, container: str) -> None:
+def _handle_quarantine(shield: Shield, container: str) -> None:
     """Total network blackout."""
-    shield.block(container)
-    print(f"Shield BLOCKED for {container} — all traffic dropped")
+    shield.quarantine(container)
+    print(f"Shield QUARANTINED for {container} — all traffic dropped")
 
 
 def _handle_rules(shield: Shield, container: str) -> None:
@@ -215,7 +215,7 @@ COMMANDS: tuple[CommandDef, ...] = (
             ArgDef(
                 name="container",
                 nargs="?",
-                help="Container name — prints firewall state (up/down/down_all/inactive/error)",
+                help="Container name — prints firewall state (up/down/disengaged/offline/error)",
             ),
         ),
     ),
@@ -278,9 +278,9 @@ COMMANDS: tuple[CommandDef, ...] = (
         needs_container=True,
     ),
     CommandDef(
-        name="block",
-        help="Total network blackout (drop all, log for forensics)",
-        handler=_handle_block,
+        name="quarantine",
+        help="Total network blackout (drop all, log dropped traffic)",
+        handler=_handle_quarantine,
         needs_container=True,
     ),
     CommandDef(
