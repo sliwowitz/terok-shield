@@ -35,6 +35,16 @@ class ArgDef:
 class CommandDef:
     """Definition of a shield subcommand.
 
+    Structurally compatible with terok-sandbox's
+    [`CommandDef`][terok_sandbox.commands.CommandDef]: same attribute
+    names + ``children`` for nested verb groups, so downstream
+    consumers (terok-sandbox) can wire the registry through sandbox's
+    [`CommandTree`][terok_sandbox.commands.CommandTree] without a
+    per-package adapter.  Shield-specific fields (``needs_container``,
+    ``standalone_only``) stay first-class — they're load-bearing for
+    shield's own CLI — but the unified wire layer ignores fields it
+    doesn't know about, so the extra fields don't leak downstream.
+
     Attributes:
         name: Subcommand name (e.g. ``"allow"``).
         help: One-line help string for ``--help``.
@@ -42,6 +52,9 @@ class CommandDef:
         needs_container: Whether the command requires a ``container`` positional arg.
         args: Extra arguments beyond the implicit ``container``.
         standalone_only: If True, only available in the standalone CLI, not via terok.
+        children: Sub-verbs.  Empty for every existing shield verb —
+            present for structural compatibility with the unified
+            CommandDef shape across the terok-ai ecosystem.
     """
 
     name: str
@@ -50,6 +63,7 @@ class CommandDef:
     needs_container: bool = False
     args: tuple[ArgDef, ...] = ()
     standalone_only: bool = False
+    children: tuple["CommandDef", ...] = ()
 
 
 # ── Handler functions (ordered to match COMMANDS) ────────
