@@ -530,7 +530,9 @@ def test_shield_quarantine_raises_on_verification_failure(
     ]
     harness.ruleset.verify_bypass.return_value = ["not bypass"]
     harness.ruleset.verify_hook.return_value = ["not hook"]
-    monkeypatch.setattr(RulesetBuilder, "build_quarantine", mock.Mock(return_value="quarantine ruleset"))
+    monkeypatch.setattr(
+        RulesetBuilder, "build_quarantine", mock.Mock(return_value="quarantine ruleset")
+    )
     monkeypatch.setattr(
         RulesetBuilder, "verify_quarantine", mock.Mock(return_value=["policy is not drop"])
     )
@@ -551,7 +553,9 @@ def test_shield_quarantine_on_offline_applies_without_delete(
         "",  # apply
         "valid output",  # verify
     ]
-    monkeypatch.setattr(RulesetBuilder, "build_quarantine", mock.Mock(return_value="quarantine ruleset"))
+    monkeypatch.setattr(
+        RulesetBuilder, "build_quarantine", mock.Mock(return_value="quarantine ruleset")
+    )
     monkeypatch.setattr(RulesetBuilder, "verify_quarantine", mock.Mock(return_value=[]))
 
     harness.mode.shield_quarantine("test-ctr")
