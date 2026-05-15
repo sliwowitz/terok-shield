@@ -109,7 +109,7 @@ deadcode:
 
 # Static type check with mypy.
 typecheck:
-	poetry run mypy src/terok_shield/
+	poetry run mypy src/terok_shield/ $(MYPYFLAGS)
 
 # Check REUSE (SPDX license/copyright) compliance
 reuse:
