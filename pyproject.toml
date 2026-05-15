@@ -26,7 +26,7 @@ Homepage = "https://terok.ai/"
 Repository = "https://github.com/terok-ai/terok-shield"
 Documentation = "https://terok-ai.github.io/terok-shield/"
 Issues = "https://github.com/terok-ai/terok-shield/issues"
-Changelog = "https://github.com/terok-ai/terok-shield/releases"
+Changelog = "https://github.com/terok-ai/terok-shield/blob/master/CHANGELOG.md"
 Security = "https://github.com/terok-ai/terok-shield/security/policy"
 
 [project.scripts]
