@@ -29,6 +29,8 @@ from pathlib import Path
 
 from terok_shield.resources import __file__ as _resources_init  # pragma: no cover
 
+from .subprocess_env import child_process_env
+
 _RESOURCES_DIR = Path(_resources_init).parent
 _READER_SCRIPT = _RESOURCES_DIR / "nflog_reader.py"
 _HUB_BUS_NAME = "org.terok.Shield1"
@@ -219,15 +221,14 @@ class ClearanceSession:
         # that normally rewrites the env on startup) spawning ``python -m
         # terok_shield.cli`` from inside a running terok_shield process
         # bypasses that wrapper, and the child can't find the ``terok_shield``
-        # package on its import path.  Passing the parent's ``sys.path``
-        # through as ``PYTHONPATH`` lets the subprocess resolve the same
-        # install this process is running from.  See #242 by Franz Pöschel.
-        env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+        # package on its import path.  ``child_process_env`` threads the
+        # parent's ``sys.path`` through as ``PYTHONPATH`` so the subprocess
+        # resolves the same install this process is running from.
         result = subprocess.run(  # nosec B603
             [sys.executable, "-m", "terok_shield.cli", action, self._container, pending.dest],
             check=False,
             capture_output=True,
-            env=env,
+            env=child_process_env(),
         )
         return result.returncode == 0
 
