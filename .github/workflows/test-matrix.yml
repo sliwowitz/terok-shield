@@ -9,6 +9,9 @@ name: Test Matrix
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   matrix:
     if: github.repository == 'terok-ai/terok-shield'
