@@ -97,6 +97,7 @@ make spdx NAME="Real Human Name" FILES="src/terok_shield/new_file.py"  # Add SPD
     ```
   - `grep 'WORKAROUND(hooks-dir-persist)'` finds every affected site. One canonical explanation, distributed awareness.
 - **Documentation filenames**: Markdown files under `docs/` use `lowercase.md` naming (e.g. `getting_started.md`, `cli.md`, `modes.md`) to match the MkDocs `index.md` convention. Root-level project files (e.g. `README.md`, `AGENTS.md`) stay UPPERCASE per standard convention.
+- **Public API surface**: `__init__.py` + `__all__` is the contract. Symbols listed in `__all__` are stable across minor releases; anything underscore-prefixed or absent from `__all__` is internal and may change without notice. (Shield's `_LAZY_IMPORTS` + `__getattr__` pattern keeps the import cost down while honouring the same contract — additions go in both `_LAZY_IMPORTS` and `__all__`.) Review the list before each release — stable APIs stay small because growing them costs.
 
 ## Security Boundary
 
