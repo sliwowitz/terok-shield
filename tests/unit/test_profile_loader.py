@@ -81,6 +81,17 @@ def test_list_profiles_includes_bundled_profiles() -> None:
     profiles = ProfileLoader(user_dir=NONEXISTENT_DIR).list_profiles()
     assert "base" in profiles
     assert "dev-standard" in profiles
+    assert "krun_guest" in profiles
+
+
+def test_krun_guest_profile_minimal() -> None:
+    """krun_guest profile is intentionally tight — NTP + distro updates only."""
+    entries = ProfileLoader(user_dir=NONEXISTENT_DIR).load_profile("krun_guest")
+    assert any("ntp" in entry for entry in entries)
+    # Sanity: it must not have grown to include developer-grade egress.
+    # If this fails, ask whether the addition really belongs on krun guests.
+    assert "github.com" not in entries
+    assert "pypi.org" not in entries
 
 
 def test_list_profiles_includes_user_profiles(tmp_path: Path) -> None:

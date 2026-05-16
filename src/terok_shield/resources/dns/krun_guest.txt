@@ -1,0 +1,25 @@
+# Tight egress allowlist for terok krun microVM guests.
+#
+# Krun guests run unmodified OCI workloads inside KVM microVMs and talk
+# to the host exclusively over vsock — ingress hardening is therefore
+# structural (sshd binds AF_VSOCK only; no TCP listen at all), not an
+# nftables matter.  This file constrains the *egress* side: a compromised
+# guest should not be able to call out to arbitrary hosts even if the
+# in-VM workload tries to.
+#
+# Membership rule: only what the guest itself needs to boot, sync time,
+# and refresh its own package metadata.  Workload egress is granted
+# per-task via the user/project profile, layered on top of this.
+
+# NTP time synchronization (clock skew breaks key auth)
+pool.ntp.org
+time.google.com
+time.cloudflare.com
+
+# Distro security update channels (mirroring base.txt; krun guests share
+# the same minimal-base image lineage so the same hosts apply)
+archive.ubuntu.com
+security.ubuntu.com
+deb.debian.org
+mirrors.fedoraproject.org
+dl.fedoraproject.org
