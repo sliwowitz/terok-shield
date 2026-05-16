@@ -10,7 +10,7 @@ import pytest
 from terok_shield.profiles import ProfileLoader
 
 from ..testfs import FAKE_PROFILES_DIR, FORBIDDEN_TRAVERSAL, NONEXISTENT_DIR
-from ..testnet import CUSTOM_DOMAIN, TEST_DOMAIN, TEST_IP1
+from ..testnet import CUSTOM_DOMAIN, DEV_PYPI_DOMAIN, TEST_DOMAIN, TEST_IP1
 from .helpers import write_lines
 
 
@@ -90,8 +90,8 @@ def test_krun_guest_profile_minimal() -> None:
     assert any("ntp" in entry for entry in entries)
     # Sanity: it must not have grown to include developer-grade egress.
     # If this fails, ask whether the addition really belongs on krun guests.
-    assert "github.com" not in entries
-    assert "pypi.org" not in entries
+    assert TEST_DOMAIN not in entries
+    assert DEV_PYPI_DOMAIN not in entries
 
 
 def test_list_profiles_includes_user_profiles(tmp_path: Path) -> None:
