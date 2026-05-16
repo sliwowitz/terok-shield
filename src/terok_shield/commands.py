@@ -18,6 +18,18 @@ from typing import Any
 from . import EnvironmentCheck, Shield
 
 
+def _csv_list(value: str) -> list[str]:
+    """Split a comma-separated CLI value into a list, stripping whitespace.
+
+    Used as ``ArgDef.type`` for multi-value optional flags so they don't
+    rely on argparse's greedy ``nargs="+"`` (which silently slurps the
+    following positional, turning ``--profiles a b mycontainer`` into
+    ``profiles=["a","b","mycontainer"]``).  Comma-separated single-value
+    matches podman's convention (``--cap-add=A,B,C``).
+    """
+    return [p.strip() for p in value.split(",") if p.strip()]
+
+
 @dataclass(frozen=True)
 class ArgDef:
     """Definition of a single CLI argument for a command."""
@@ -225,7 +237,11 @@ COMMANDS: tuple[CommandDef, ...] = (
         needs_container=True,
         standalone_only=True,
         args=(
-            ArgDef(name="--profiles", nargs="+", help="Override default profiles"),
+            ArgDef(
+                name="--profiles",
+                type=_csv_list,
+                help="Override default profiles (comma-separated, e.g. 'dev,pypi')",
+            ),
             ArgDef(name="--json", action="store_true", dest="output_json", help="JSON output"),
         ),
     ),
@@ -234,7 +250,13 @@ COMMANDS: tuple[CommandDef, ...] = (
         help="Launch a shielded container via podman",
         needs_container=True,
         standalone_only=True,
-        args=(ArgDef(name="--profiles", nargs="+", help="Override default profiles"),),
+        args=(
+            ArgDef(
+                name="--profiles",
+                type=_csv_list,
+                help="Override default profiles (comma-separated, e.g. 'dev,pypi')",
+            ),
+        ),
     ),
     CommandDef(
         name="resolve",

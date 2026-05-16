@@ -175,19 +175,44 @@ def test_parser_requires_container_and_target(
 
 
 def test_prepare_parser_supports_profiles(parser: argparse.ArgumentParser) -> None:
-    """prepare accepts a positional container plus profile overrides."""
-    parsed = parser.parse_args(["prepare", "my-ctr", "--profiles", "base", "extra"])
+    """prepare accepts a positional container plus comma-separated profile overrides.
+
+    Regression for #606 — argparse's greedy ``nargs="+"`` used to
+    silently slurp the following positional, so
+    ``--profiles base extra mycontainer`` parsed as
+    ``profiles=["base","extra","mycontainer"]`` and
+    ``container=missing``.  The fix switches to a single comma-separated
+    value (matches podman's ``--cap-add=A,B`` convention) and a small
+    ``_csv_list`` splitter so the parsed shape stays ``list[str]`` for
+    downstream consumers.
+    """
+    parsed = parser.parse_args(["prepare", "my-ctr", "--profiles", "base,extra"])
     assert parsed.command == "prepare"
     assert parsed.container == "my-ctr"
     assert parsed.profiles == ["base", "extra"]
 
 
 def test_run_parser_supports_profiles(parser: argparse.ArgumentParser) -> None:
-    """run accepts a positional container plus profile overrides."""
+    """run accepts a positional container plus comma-separated profile overrides."""
     parsed = parser.parse_args(["run", "my-ctr", "--profiles", "base"])
     assert parsed.command == "run"
     assert parsed.container == "my-ctr"
     assert parsed.profiles == ["base"]
+
+
+def test_profiles_flag_does_not_eat_following_positional(
+    parser: argparse.ArgumentParser,
+) -> None:
+    """#606: ``--profiles foo my-ctr`` no longer hijacks the container positional.
+
+    Under the old ``nargs="+"`` this parsed ``profiles=["foo","my-ctr"]``
+    and errored "the following arguments are required: container".
+    Under the comma-separated contract, ``foo`` is the entire profile
+    list and ``my-ctr`` lands on ``container`` as intended.
+    """
+    parsed = parser.parse_args(["prepare", "--profiles", "foo", "my-ctr"])
+    assert parsed.profiles == ["foo"]
+    assert parsed.container == "my-ctr"
 
 
 def test_logs_parser_supports_optional_container_and_count(parser: argparse.ArgumentParser) -> None:
@@ -259,7 +284,7 @@ def test_main_status_dispatches_to_shield(cli_dispatch: CliDispatchHarness) -> N
     [
         pytest.param(["prepare", _CONTAINER], None, id="default-profiles"),
         pytest.param(
-            ["prepare", _CONTAINER, "--profiles", "base", "extra"],
+            ["prepare", _CONTAINER, "--profiles", "base,extra"],
             ["base", "extra"],
             id="explicit-profiles",
         ),
