@@ -10,7 +10,7 @@ import pytest
 from terok_shield.profiles import ProfileLoader
 
 from ..testfs import FAKE_PROFILES_DIR, FORBIDDEN_TRAVERSAL, NONEXISTENT_DIR
-from ..testnet import CUSTOM_DOMAIN, TEST_DOMAIN, TEST_IP1
+from ..testnet import CUSTOM_DOMAIN, DEV_PYPI_DOMAIN, TEST_DOMAIN, TEST_IP1
 from .helpers import write_lines
 
 
@@ -81,6 +81,17 @@ def test_list_profiles_includes_bundled_profiles() -> None:
     profiles = ProfileLoader(user_dir=NONEXISTENT_DIR).list_profiles()
     assert "base" in profiles
     assert "dev-standard" in profiles
+    assert "krun_guest" in profiles
+
+
+def test_krun_guest_profile_minimal() -> None:
+    """krun_guest profile is intentionally tight — NTP + distro updates only."""
+    entries = ProfileLoader(user_dir=NONEXISTENT_DIR).load_profile("krun_guest")
+    assert any("ntp" in entry for entry in entries)
+    # Sanity: it must not have grown to include developer-grade egress.
+    # If this fails, ask whether the addition really belongs on krun guests.
+    assert TEST_DOMAIN not in entries
+    assert DEV_PYPI_DOMAIN not in entries
 
 
 def test_list_profiles_includes_user_profiles(tmp_path: Path) -> None:
