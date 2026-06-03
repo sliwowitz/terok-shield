@@ -21,7 +21,7 @@ If the config file is missing, defaults are used.  Unparseable YAML
 
 ### Mode selection
 
-Currently only hook mode is supported. Setting `mode: auto` or `mode: hook`
+Currently there is only one mode, the "hook mode". Setting `mode: auto` or `mode: hook`
 both resolve to hook mode. Future modes may be added for different network
 topologies.
 
@@ -38,10 +38,10 @@ Each container gets an isolated state bundle under `containers/`:
 ~/.local/state/terok/shield/
 └── containers/
     └── my-container/
-        ├── hooks/
+        ├── hooks/                  # only if per-container hooks are supported
         │   ├── terok-shield-createRuntime.json
         │   └── terok-shield-poststop.json
-        ├── terok-shield-hook       # OCI hook entrypoint (stdlib-only Python)
+        ├── terok-shield-hook       # OCI hook entrypoint (stdlib-only Python), per-container hooks only
         ├── ruleset.nft             # Pre-generated nft ruleset
         ├── gateway                 # Discovered gateway IP
         ├── profile.allowed         # Pre-resolved IPs from DNS profiles
@@ -58,10 +58,21 @@ Each container gets an isolated state bundle under `containers/`:
         └── audit.jsonl             # Per-container audit log
 ```
 
+> **Where the hooks live.** The `hooks/` descriptors and the
+> `terok-shield-hook` entrypoint are part of this per-container bundle only
+> when podman supports persistent per-container hooks. It does not today —
+> podman drops a per-container `--hooks-dir` across stop/start
+> ([containers/podman#17935](https://github.com/containers/podman/issues/17935)) —
+> so shield installs the hooks once into a **global** directory and registers
+> it in podman's `containers.conf` (`hooks_dir` under `[engine]`;
+> `~/.config/containers/containers.conf` for rootless). Run `terok-shield setup`
+> to install the global hooks and patch `containers.conf`. The `pre_start()`
+> rows below describe the per-container-hooks layout.
+
 | File | Written by | Purpose |
 |------|-----------|---------|
-| `hooks/` | `pre_start()` | OCI hook descriptors |
-| `terok-shield-hook` | `pre_start()` | Stdlib-only hook entrypoint script |
+| `hooks/` | `pre_start()` | OCI hook descriptors (per-container hooks only) |
+| `terok-shield-hook` | `pre_start()` | Stdlib-only hook entrypoint script (per-container hooks only) |
 | `ruleset.nft` | `pre_start()` | Pre-generated nft ruleset applied by the hook |
 | `gateway` | OCI hook | Gateway IP discovered from `/proc/{pid}/net/route` |
 | `profile.allowed` | `pre_start()` / `resolve()` | Cached IPs from DNS resolution |
