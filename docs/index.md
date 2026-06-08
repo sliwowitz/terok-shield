@@ -1,6 +1,6 @@
 # terok-shield
 
-Default-deny egress firewall for rootless Podman containers.
+Default-deny egress firewall for rootless Podman containers — part of the [terok](https://terok-ai.github.io/terok/) ecosystem.
 
 terok-shield enforces **default-deny outbound** network filtering on
 Podman containers using nftables.  Containers can only reach
