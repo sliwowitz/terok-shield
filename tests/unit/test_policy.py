@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for the unified ``+``/``-`` policy line format (``terok_shield.policy``)."""
+
+import pytest
+
+from terok_shield.policy import PolicyEntry, parse_meta, parse_policy, render_policy
+from tests.testfs import FORBIDDEN_TRAVERSAL
+from tests.testnet import (
+    DEV_PYPI_DOMAIN,
+    IPV6_NET1,
+    IPV6_VERBOSE_CANONICAL,
+    LINK_LOCAL_DNS,
+    RFC1918_CIDR_10,
+    TEST_DOMAIN,
+    TEST_DOMAIN2,
+    TEST_DOMAIN_ATTACK,
+    TEST_IP1,
+    TEST_NET1,
+)
+
+WILDCARD = f"*.{TEST_DOMAIN2}"
+
+
+def test_parses_allow_and_deny() -> None:
+    """A leading ``+``/``-`` becomes the entry action."""
+    assert parse_policy(f"+{TEST_DOMAIN}\n-{DEV_PYPI_DOMAIN}\n") == [
+        PolicyEntry("+", TEST_DOMAIN),
+        PolicyEntry("-", DEV_PYPI_DOMAIN),
+    ]
+
+
+def test_ignores_blank_and_comment_lines() -> None:
+    """Blank lines and full-line ``#`` comments are skipped."""
+    assert parse_policy(f"\n# a comment\n   \n+{TEST_DOMAIN}\n") == [PolicyEntry("+", TEST_DOMAIN)]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        TEST_DOMAIN,
+        WILDCARD,
+        TEST_IP1,
+        TEST_NET1,
+        RFC1918_CIDR_10,
+        LINK_LOCAL_DNS,
+        IPV6_VERBOSE_CANONICAL,
+        IPV6_NET1,
+    ],
+)
+def test_accepts_valid_targets(target: str) -> None:
+    """Domains, wildcards, IP literals, and CIDRs (v4 and v6) all parse."""
+    assert parse_policy(f"+{target}") == [PolicyEntry("+", target)]
+
+
+def test_parses_ipv4_port() -> None:
+    """A trailing ``:port`` on an IPv4/host target is split off."""
+    assert parse_policy(f"+{TEST_IP1}:8080") == [PolicyEntry("+", TEST_IP1, 8080)]
+
+
+def test_parses_bracketed_ipv6_port() -> None:
+    """An IPv6 literal carries a port only when bracketed."""
+    assert parse_policy(f"+[{IPV6_VERBOSE_CANONICAL}]:443") == [
+        PolicyEntry("+", IPV6_VERBOSE_CANONICAL, 443)
+    ]
+
+
+def test_bare_ipv6_has_no_port() -> None:
+    """A bare (unbracketed) IPv6 literal is never split on its colons."""
+    (entry,) = parse_policy(f"+{IPV6_VERBOSE_CANONICAL}")
+    assert entry.port is None
+    assert entry.target == IPV6_VERBOSE_CANONICAL
+
+
+def test_trailing_comment_metadata() -> None:
+    """``key=value`` tokens in the trailing comment are exposed via ``meta()``."""
+    (entry,) = parse_policy(f"+{TEST_DOMAIN}   # reason=test expires=2026-06-09 note plain")
+    assert entry.comment == "reason=test expires=2026-06-09 note plain"
+    assert entry.meta() == {"reason": "test", "expires": "2026-06-09"}
+
+
+def test_parse_meta_standalone() -> None:
+    """Non-``key=value`` tokens are ignored; values may contain ``=``."""
+    assert parse_meta(None) == {}
+    assert parse_meta("just free text") == {}
+    assert parse_meta("a=1 b=2 plain c=x=y") == {"a": "1", "b": "2", "c": "x=y"}
+
+
+def test_round_trip_render_parse() -> None:
+    """``parse_policy(render_policy(x)) == x`` — including bracketed IPv6 ports."""
+    text = (
+        f"+{TEST_DOMAIN}\n"
+        f"+{WILDCARD}\n"
+        f"+{TEST_IP1}:8080\n"
+        f"-{DEV_PYPI_DOMAIN}\n"
+        f"+{RFC1918_CIDR_10}\n"
+        f"+[{IPV6_VERBOSE_CANONICAL}]:443\n"
+        f"+{TEST_DOMAIN}  # reason=keep\n"
+    )
+    entries = parse_policy(text)
+    assert parse_policy(render_policy(entries)) == entries
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        TEST_DOMAIN,  # missing +/- prefix
+        "+",  # empty target
+        "+   ",  # empty target (whitespace only)
+        f"+{TEST_DOMAIN}:99999",  # port out of range (high)
+        f"+{TEST_DOMAIN}:0",  # port out of range (low)
+        f"+{TEST_DOMAIN_ATTACK}",  # control bytes in target
+        f"+{FORBIDDEN_TRAVERSAL}",  # path-traversal shape
+        "+a/b",  # slash (path-ish) in target
+        f"+[{IPV6_VERBOSE_CANONICAL}",  # unterminated IPv6 bracket
+    ],
+)
+def test_rejects_malformed(bad: str) -> None:
+    """Malformed lines fail fast with a ``ValueError``."""
+    with pytest.raises(ValueError):
+        parse_policy(bad)
