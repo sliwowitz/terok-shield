@@ -5,39 +5,34 @@
 
 A policy file is one entry per line::
 
-    +pypi.org                       # allow a domain
-    +*.pythonhosted.org             # allow every subdomain
-    +192.168.1.50:8080              # allow one host:port
-    -telemetry.vendor.com           # deny
-    +api.anthropic.com   # reason=harness-test expires=2026-06-09T12:00Z
+    +pypi.org                          # allow a domain
+    +*.pythonhosted.org                # allow every subdomain
+    +192.168.1.50:8080                 # allow one host:port
+    -telemetry.vendor.com              # deny
+    +api.anthropic.com  %reason=harness-test %expires=2026-06-09T12:00Z
 
-The leading ``+`` (allow) or ``-`` (deny) is **mandatory** — there is no
-bare-line shortcut and no ``Pass`` token (a tier's Pass behaviour is
-structural, not per-line).  ``#`` starts a comment; a trailing comment may
-carry optional ``key=value`` metadata (``reason``, ``expires``, ``from``,
-``first``/``last``, ``hits``).  Blank and comment-only lines are ignored.
+The leading ``+`` (allow) or ``-`` (deny) is **mandatory**.  ``%key=value``
+markers carry optional metadata (``reason``, ``expires``, ``from``,
+``first``/``last``, ``hits``); ``#`` starts a free-text comment that the
+parser ignores entirely.  Blank and comment-only lines are skipped.
 
 This module is the single parser for shipped, generated, and authored
-policy alike — replacing the old allow-only ``parse_entries`` and the split
-``allow``/``deny`` files.  Stdlib-only, so it is cheap to audit and safe to
-import from anywhere.
+policy alike.  Stdlib-only, so it is cheap to audit and safe to import
+from anywhere.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 Action = Literal["+", "-"]
 """A policy verdict prefix: ``"+"`` (allow) or ``"-"`` (deny)."""
 
-# A DNS name: dot-separated labels of alphanumerics/hyphen/underscore, with an
-# optional leading ``*.`` standing for "any subdomain".  Deliberately
-# permissive about the TLD (internal names like ``metadata.google.internal``
-# are valid targets) but strict about shape, so no whitespace, slash, or
-# path-traversal character can slip into a target.
+# A DNS name: dot-separated alphanumeric/hyphen/underscore labels, with an
+# optional leading ``*.`` wildcard for "any subdomain".
 _DOMAIN = re.compile(r"^(?:\*\.)?(?:[A-Za-z0-9_-]+\.)*[A-Za-z0-9_-]+$")
 _MAX_PORT = 65535
 
@@ -50,17 +45,13 @@ class PolicyEntry:
         action: ``"+"`` (allow) or ``"-"`` (deny).
         target: a domain (optionally ``*.``-prefixed), an IP literal, or a CIDR.
         port: the optional ``:port`` (``None`` when unspecified).
-        comment: the raw trailing comment text (sans ``#``), or ``None``.
+        meta: the ``%key=value`` markers parsed off the line (empty when none).
     """
 
     action: Action
     target: str
     port: int | None = None
-    comment: str | None = None
-
-    def meta(self) -> dict[str, str]:
-        """Parse the ``key=value`` metadata tokens out of the trailing comment."""
-        return parse_meta(self.comment)
+    meta: dict[str, str] = field(default_factory=dict)
 
 
 def parse_policy(text: str) -> list[PolicyEntry]:
@@ -68,16 +59,17 @@ def parse_policy(text: str) -> list[PolicyEntry]:
 
     Raises:
         ValueError: on a missing ``+``/``-`` prefix, an empty or invalid
-            target, or an out-of-range port — annotated with the line number.
+            target, an out-of-range port, or a malformed ``%key=value``
+            marker — annotated with the line number.
     """
     entries: list[PolicyEntry] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        body, _, comment = line.partition("#")
+        body, _, _comment = line.partition("#")  # comments bear zero load
         try:
-            entries.append(_parse_line(body.strip(), comment.strip() or None))
+            entries.append(_parse_line(body.strip()))
         except ValueError as exc:
             raise ValueError(f"line {lineno}: {exc} ({raw!r})") from exc
     return entries
@@ -91,29 +83,35 @@ def render_policy(entries: list[PolicyEntry]) -> str:
         # is indistinguishable from a longer IPv6 address on re-parse.
         host = f"[{e.target}]" if (e.port is not None and ":" in e.target) else e.target
         line = f"{e.action}{host}" + (f":{e.port}" if e.port is not None else "")
-        if e.comment:
-            line += f"  # {e.comment}"
+        line += "".join(f" %{key}={value}" for key, value in e.meta.items())
         lines.append(line)
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def parse_meta(comment: str | None) -> dict[str, str]:
-    """Extract ``key=value`` tokens from a comment; non-``key=value`` tokens are ignored."""
-    if not comment:
-        return {}
-    return dict(token.split("=", 1) for token in comment.split() if "=" in token)
-
-
-def _parse_line(body: str, comment: str | None) -> PolicyEntry:
-    """Parse one non-comment ``body`` (a ``+``/``-`` prefix plus ``target[:port]``)."""
-    if not body or body[0] not in "+-":
+def _parse_line(body: str) -> PolicyEntry:
+    """Parse one non-comment ``body``: ``+``/``-`` target ``[:port]`` plus ``%key=value`` markers."""
+    head, *markers = body.split()
+    if not head or head[0] not in "+-":
         raise ValueError("entry must start with '+' (allow) or '-' (deny)")
-    action: Action = body[0]  # type: ignore[assignment]
-    target, port = _split_port(body[1:].strip())
+    action: Action = head[0]  # type: ignore[assignment]
+    target, port = _split_port(head[1:])
     if not target:
         raise ValueError("empty target")
     _validate_target(target)
-    return PolicyEntry(action, target, port, comment)
+    return PolicyEntry(action, target, port, _parse_markers(markers))
+
+
+def _parse_markers(markers: list[str]) -> dict[str, str]:
+    """Parse ``%key=value`` metadata markers; any other token is an error."""
+    meta: dict[str, str] = {}
+    for token in markers:
+        if not token.startswith("%"):
+            raise ValueError(f"unexpected token {token!r} (metadata needs a '%' prefix)")
+        key, sep, value = token[1:].partition("=")
+        if not key or not sep:
+            raise ValueError(f"malformed metadata {token!r} (expected '%key=value')")
+        meta[key] = value
+    return meta
 
 
 def _split_port(spec: str) -> tuple[str, int | None]:
@@ -149,4 +147,4 @@ def _validate_target(target: str) -> None:
         raise ValueError(f"invalid target: {target!r}")
 
 
-__all__ = ["Action", "PolicyEntry", "parse_meta", "parse_policy", "render_policy"]
+__all__ = ["Action", "PolicyEntry", "parse_policy", "render_policy"]
