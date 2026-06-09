@@ -309,6 +309,30 @@ def test_effective_policy_composes_ips_and_domains_by_action(tmp_path: Path) -> 
     assert eff.deny_domains() == [TEST_DOMAIN2]
 
 
+def test_allow_targets_lists_domains_and_ips_excluding_localhost(tmp_path: Path) -> None:
+    """``allow_targets`` is the resolver input: admitted domains + IPs, no localhost."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("project_allow").write_text(f"+{TEST_DOMAIN}\n+{TEST_IP1}\n+localhost:8000\n")
+    assert bundle.read_effective().allow_targets() == [TEST_DOMAIN, TEST_IP1]
+
+
+def test_policy_mtime_is_zero_without_files_and_tracks_writes(tmp_path: Path) -> None:
+    """``policy_mtime`` is 0.0 with no policy files and the file mtime once written."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    assert bundle.policy_mtime() == 0.0
+    bundle.tier_path("project_allow").write_text(f"+{TEST_DOMAIN}\n")
+    assert bundle.policy_mtime() == bundle.tier_path("project_allow").stat().st_mtime
+
+
+def test_resolved_cache_is_a_derived_top_level_file(tmp_path: Path) -> None:
+    """The resolved-IP cache lives outside ``policy/`` (it is derived, not authored)."""
+    bundle = StateBundle(tmp_path)
+    assert bundle.resolved_cache == tmp_path / "resolved.ips"
+    assert bundle.policy_dir not in bundle.resolved_cache.parents
+
+
 def test_ensure_dirs_creates_policy_dir_owner_only(tmp_path: Path) -> None:
     """``ensure_dirs`` creates ``policy/`` at the owner-only bundle mode."""
     bundle = StateBundle(tmp_path / "sd")
