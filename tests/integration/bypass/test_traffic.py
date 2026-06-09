@@ -13,7 +13,7 @@ Traffic tests are split by protocol/port so that future rule changes
 
 import pytest
 
-from terok_shield.nft.constants import BYPASS_LOG_PREFIX, IPV6_PRIVATE, RFC1918
+from terok_shield.nft.constants import BYPASS_LOG_PREFIX, HARD_DENY_RANGES, PRIVATE_RANGES
 from tests.testnet import (
     ALLOWED_TARGET_HTTP,
     BLOCKED_TARGET_DNS_PORT,
@@ -157,7 +157,7 @@ class TestBypassRFC1918:
         shield = _shield()
         shield.down(shielded_container, shielded_container.id)
         rules = shield.rules(shielded_container)
-        for net in RFC1918:
+        for net in (n for n in HARD_DENY_RANGES + PRIVATE_RANGES if "." in n):
             assert net in rules, f"RFC1918 reject rule for {net} missing in bypass"
 
     def test_rfc1918_rules_absent_in_allow_all_bypass(self, shielded_container: str) -> None:
@@ -165,7 +165,7 @@ class TestBypassRFC1918:
         shield = _shield()
         shield.down(shielded_container, shielded_container.id, allow_all=True)
         rules = shield.rules(shielded_container)
-        for net in RFC1918:
+        for net in (n for n in HARD_DENY_RANGES + PRIVATE_RANGES if "." in n):
             assert (
                 f"ip daddr {net}" not in rules or "reject" not in rules.split(net)[1].split("\n")[0]
             ), f"RFC1918 reject rule for {net} should not be in allow_all bypass"
@@ -197,7 +197,7 @@ class TestBypassIPv6Private:
         shield = _shield()
         shield.down(shielded_container, shielded_container.id)
         rules = shield.rules(shielded_container)
-        for net in IPV6_PRIVATE:
+        for net in (n for n in HARD_DENY_RANGES + PRIVATE_RANGES if ":" in n):
             assert net in rules, f"IPv6 private reject rule for {net} missing in bypass"
 
     def test_ipv6_private_rules_absent_in_allow_all_bypass(self, shielded_container: str) -> None:
@@ -205,7 +205,7 @@ class TestBypassIPv6Private:
         shield = _shield()
         shield.down(shielded_container, shielded_container.id, allow_all=True)
         rules = shield.rules(shielded_container)
-        for net in IPV6_PRIVATE:
+        for net in (n for n in HARD_DENY_RANGES + PRIVATE_RANGES if ":" in n):
             assert (
                 f"ip6 daddr {net}" not in rules
                 or "reject" not in rules.split(net)[1].split("\n")[0]

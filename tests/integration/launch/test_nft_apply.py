@@ -51,12 +51,12 @@ class TestHookApply:
 
     def test_rfc1918_blocked(self, container_pid: str) -> None:
         """All RFC1918 ranges must appear in the applied ruleset."""
-        from terok_shield.nft.constants import RFC1918
+        from terok_shield.nft.constants import HARD_DENY_RANGES, PRIVATE_RANGES
 
         _apply(container_pid)
         listed = _list(container_pid)
-        for net in RFC1918:
-            assert net in listed.stdout, f"RFC1918 block for {net} not found in applied ruleset"
+        for net in (n for n in HARD_DENY_RANGES + PRIVATE_RANGES if "." in n):
+            assert net in listed.stdout, f"Block for {net} not found in applied ruleset"
 
     def test_flush_and_reapply(self, container_pid: str) -> None:
         """Flushing and reapplying the ruleset works cleanly."""
