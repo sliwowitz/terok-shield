@@ -6,7 +6,7 @@ logs and kernel-level per-packet nftables logs.
 ## Application logs (JSON-lines)
 
 Each container has its own audit log at `{state_dir}/audit.jsonl` (e.g.
-`~/.local/state/terok-shield/containers/my-container/audit.jsonl`).
+`~/.local/state/terok/shield/containers/my-container/audit.jsonl`).
 
 Each line is a JSON object:
 
@@ -55,9 +55,11 @@ prefixes:
 
 | Prefix | Meaning |
 |--------|---------|
-| `TEROK_SHIELD_DENIED:` | Packet dropped by deny-all rule |
-| `TEROK_SHIELD_ALLOWED:` | Packet accepted by allow set (rate-limited: 10/sec) |
-| `TEROK_SHIELD_PRIVATE:` | Packet rejected by private-range rule (RFC 1918 / RFC 4193) |
+| `TEROK_SHIELD_ALLOWED:` | New connection accepted by allow set (not rate-limited; established traffic is accepted earlier in the chain and not logged) |
+| `TEROK_SHIELD_DENIED:` | Packet rejected by the explicit deny set (operator refused) |
+| `TEROK_SHIELD_PRIVATE:` | Packet rejected by private-range rule (RFC 1918 + RFC 4193/4291) |
+| `TEROK_SHIELD_BLOCKED:` | Packet rejected by the terminal default-deny rule (unclassified) |
+| `TEROK_SHIELD_BYPASS:` | Packet accepted while the shield is bypassed |
 
 View with:
 
@@ -67,7 +69,7 @@ journalctl -k --grep TEROK_SHIELD
 
 ## Disabling audit logging
 
-In `~/.config/terok-shield/config.yml`:
+In `~/.config/terok/shield/config.yml`:
 
 ```yaml
 audit:

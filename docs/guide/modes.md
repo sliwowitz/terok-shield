@@ -110,7 +110,7 @@ uses terok-shield as a library):
 
 ```python
 from terok_shield import Shield, ShieldConfig
-shield = Shield(ShieldConfig(state_dir=Path("~/.local/state/terok-shield/containers/my-ctr")))
+shield = Shield(ShieldConfig(state_dir=Path("~/.local/state/terok/shield/containers/my-ctr")))
 extra_args = shield.pre_start("my-ctr", ["dev-standard"])
 # pass extra_args to podman run
 ```

@@ -45,9 +45,9 @@ cdn.example.com
 To create a custom profile, place a `.txt` file in your profiles directory:
 
 ```bash
-mkdir -p ~/.config/terok-shield/profiles
+mkdir -p ~/.config/terok/shield/profiles
 
-cat > ~/.config/terok-shield/profiles/my-project.txt << 'EOF'
+cat > ~/.config/terok/shield/profiles/my-project.txt << 'EOF'
 # APIs my project needs
 api.example.com
 webhooks.example.com
@@ -67,7 +67,7 @@ terok-shield status
 ### Overriding bundled profiles
 
 If you create a custom profile with the same name as a bundled one
-(e.g. `~/.config/terok-shield/profiles/dev-standard.txt`), your version
+(e.g. `~/.config/terok/shield/profiles/dev-standard.txt`), your version
 takes precedence. The bundled version is ignored.
 
 ## Using profiles
@@ -100,7 +100,7 @@ terok-shield resolve my-container --force   # bypass cache freshness
 
 ### Changing the default profile
 
-Edit `~/.config/terok-shield/config.yml`:
+Edit `~/.config/terok/shield/config.yml`:
 
 ```yaml
 default_profiles:
