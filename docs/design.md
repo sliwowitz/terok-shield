@@ -45,7 +45,7 @@ dnsmasq compile-time nftset support.
 | `dev-node.txt` | npm, Yarn, jsDelivr, unpkg |
 | `nvidia-hpc.txt` | CUDA toolkit, NGC, NVIDIA repos |
 
-Users can add custom profiles in `$XDG_CONFIG_HOME/terok-shield/profiles/`.
+Users can add custom profiles in `$XDG_CONFIG_HOME/terok/shield/profiles/`.
 
 ## Persistent deny
 
@@ -187,9 +187,10 @@ operations.
 
 nftables log rules generate per-packet entries in dmesg/journald:
 
-- `TEROK_SHIELD_ALLOWED:` traffic hitting the allow set (rate-limited)
+- `TEROK_SHIELD_ALLOWED:` new connections to the allow set, logged and counted
+  (not rate-limited -- established traffic is accepted earlier in the chain)
 - `TEROK_SHIELD_DENIED:` traffic rejected by the explicit deny set (operator refused)
-- `TEROK_SHIELD_PRIVATE:` non-allowlisted private-range traffic rejected (RFC 1918/RFC 4193)
+- `TEROK_SHIELD_PRIVATE:` non-allowlisted private-range traffic rejected (RFC 1918 + RFC 4193/4291)
 - `TEROK_SHIELD_BLOCKED:` traffic rejected by the terminal default-deny rule (unclassified)
 - `TEROK_SHIELD_BYPASS:` traffic passing while the shield is bypassed
 
