@@ -75,6 +75,12 @@ def test_parses_bracketed_ipv6_port() -> None:
     ]
 
 
+def test_bracketed_ipv6_without_port() -> None:
+    """A bracketed IPv6 literal with no ``:port`` parses with ``port=None``."""
+    (entry,) = parse_policy(f"+[{IPV6_VERBOSE_CANONICAL}]")
+    assert entry == PolicyEntry("+", IPV6_VERBOSE_CANONICAL)
+
+
 def test_bare_ipv6_has_no_port() -> None:
     """A bare (unbracketed) IPv6 literal is never split on its colons."""
     (entry,) = parse_policy(f"+{IPV6_VERBOSE_CANONICAL}")
