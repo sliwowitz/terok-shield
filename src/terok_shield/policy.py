@@ -120,7 +120,11 @@ def _split_port(spec: str) -> tuple[str, int | None]:
         host, sep, rest = spec[1:].partition("]")
         if not sep:
             raise ValueError("unterminated '[' in IPv6 literal")
-        return host, (_parse_port(rest[1:]) if rest.startswith(":") else None)
+        if not rest:
+            return host, None
+        if not rest.startswith(":"):
+            raise ValueError(f"trailing characters after ']': {rest!r}")
+        return host, _parse_port(rest[1:])  # _parse_port rejects any non-numeric tail
     if spec.count(":") >= 2:  # bare IPv6 literal — a port needs brackets
         return spec, None
     host, sep, maybe_port = spec.rpartition(":")

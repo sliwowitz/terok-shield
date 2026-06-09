@@ -33,6 +33,8 @@ validated before interpolation into nft commands.
 import ipaddress
 import re
 import textwrap
+from collections.abc import Callable
+from typing import Any
 
 from .constants import (
     ALLOWED_LOG_PREFIX,
@@ -198,11 +200,15 @@ class RulesetBuilder:
             errors.append("policy is not drop")
         errors.extend(self._verify_common(nft_output))
         # Terminal deny-all: a standalone log+reject with the BLOCKED prefix
-        # (no daddr selector, unlike the tier rules).
+        # (no daddr selector, unlike the tier rules).  Require the ``reject``
+        # verdict on the same rule so a regression to a silent ``drop`` fails
+        # verification instead of passing on the log line alone.
         if not re.search(
-            rf'^\s*log\s+.*prefix\s+"{re.escape(BLOCKED_LOG_PREFIX)}', nft_output, re.MULTILINE
+            rf'^\s*log\s+.*prefix\s+"{re.escape(BLOCKED_LOG_PREFIX)}.*\breject\b',
+            nft_output,
+            re.MULTILINE,
         ):
-            errors.append("terminal deny-all rule missing")
+            errors.append("terminal reject-all rule missing")
         errors.extend(self._verify_ranges(nft_output, HARD_DENY_RANGES, "Hard-deny"))
         errors.extend(self._verify_ranges(nft_output, PRIVATE_RANGES, "Private-range"))
         return errors
@@ -506,7 +512,7 @@ def delete_elements(set_name: str, ips: list[str], table: str = NFT_TABLE) -> st
     return f"delete element {table} {set_name} {{ {elements} }}\n"
 
 
-def _emit_dual(op, base: str, ips: list[str], **kwargs) -> str:
+def _emit_dual(op: Callable[..., str], base: str, ips: list[str], **kwargs: Any) -> str:
     """Split *ips* by family and apply *op* to the ``base_v4`` / ``base_v6`` sets."""
     parts: list[str] = []
     for fam, group in zip(("v4", "v6"), _split_family(ips), strict=True):

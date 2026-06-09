@@ -23,7 +23,9 @@ class TestNftImportIsolation:
             Path(__file__).parents[2] / "src" / "terok_shield" / "nft" / "rules.py"
         ).read_text()
         tree = ast.parse(source)
-        stdlib = {"ipaddress", "re", "textwrap"}
+        # typing/collections.abc are stdlib and type-annotation-only — no
+        # runtime or injection surface, so they stay inside the boundary.
+        stdlib = {"collections", "ipaddress", "re", "textwrap", "typing"}
         # constants is the only non-stdlib import allowed (literals-only module)
         allowed_relative = {"constants"}
         for node in ast.walk(tree):

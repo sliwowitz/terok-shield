@@ -556,7 +556,18 @@ def test_verify_hook_rejects_a_bypass_ruleset() -> None:
     """Bypass mode must not satisfy enforce-mode verification."""
     errors = _builder.verify_hook(_builder.build_bypass())
     assert errors
-    assert any("terminal deny-all rule" in error for error in errors)
+    assert any("terminal reject-all rule" in error for error in errors)
+
+
+def test_verify_hook_rejects_silent_drop_terminal() -> None:
+    """A BLOCKED terminal that silently drops (no reject) fails verification."""
+    ruleset = _builder.build_hook()
+    silent = ruleset.replace(
+        f'prefix "{_BLOCKED_LOG_PREFIX}: " counter reject with icmpx {_ADMIN_PROHIBITED}',
+        f'prefix "{_BLOCKED_LOG_PREFIX}: " counter drop',
+    )
+    assert silent != ruleset  # sanity: the terminal reject was rewritten to drop
+    assert "terminal reject-all rule missing" in _builder.verify_hook(silent)
 
 
 def test_verify_hook_accepts_prefix_before_group_ordering() -> None:

@@ -112,6 +112,7 @@ def test_round_trip_render_parse() -> None:
         f"+{FORBIDDEN_TRAVERSAL}",  # path-traversal shape
         "+a/b",  # slash (path-ish) in target
         f"+[{IPV6_VERBOSE_CANONICAL}",  # unterminated IPv6 bracket
+        f"+[{IPV6_VERBOSE_CANONICAL}]junk",  # trailing junk after ']'
         f"+{TEST_DOMAIN} bar",  # bare token without a '%' prefix
         f"+{TEST_DOMAIN} %nokey",  # metadata marker missing '=value'
     ],
