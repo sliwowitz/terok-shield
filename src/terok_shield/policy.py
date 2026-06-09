@@ -8,6 +8,7 @@ A policy file is one entry per line::
     +pypi.org                          # allow a domain
     +*.pythonhosted.org                # allow every subdomain
     +192.168.1.50:8080                 # allow one host:port
+    +localhost:8000                    # reach a service on the host's localhost
     -telemetry.vendor.com              # deny
     +api.anthropic.com  %reason=harness-test %expires=2026-06-09T12:00Z
 
@@ -15,6 +16,11 @@ The leading ``+`` (allow) or ``-`` (deny) is **mandatory**.  ``%key=value``
 markers carry optional metadata (``reason``, ``expires``, ``from``,
 ``first``/``last``, ``hits``); ``#`` starts a free-text comment that the
 parser ignores entirely.  Blank and comment-only lines are skipped.
+
+The reserved target ``localhost`` is a host-service grant: ``+localhost:PORT``
+opens the host machine's own ``localhost:PORT`` to the container (the loader
+routes it to the backend host-loopback address, accepted above the deny tiers).
+It requires an explicit port and the ``+`` action.
 
 This module is the single parser for shipped, generated, and authored
 policy alike.  Stdlib-only, so it is cheap to audit and safe to import
@@ -30,6 +36,9 @@ from typing import Literal
 
 Action = Literal["+", "-"]
 """A policy verdict prefix: ``"+"`` (allow) or ``"-"`` (deny)."""
+
+LOCALHOST = "localhost"
+"""Reserved target: ``+localhost:PORT`` grants the container access to the host's localhost."""
 
 # A DNS name: dot-separated alphanumeric/hyphen/underscore labels, with an
 # optional leading ``*.`` wildcard for "any subdomain".
@@ -88,6 +97,11 @@ def render_policy(entries: list[PolicyEntry]) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
+def localhost_ports(entries: list[PolicyEntry]) -> tuple[int, ...]:
+    """Ports from the ``+localhost:PORT`` host-service grants, fed to the builder's ``loopback_ports``."""
+    return tuple(e.port for e in entries if e.target == LOCALHOST and e.port is not None)
+
+
 def _parse_line(body: str) -> PolicyEntry:
     """Parse one non-comment ``body``: ``+``/``-`` target ``[:port]`` plus ``%key=value`` markers."""
     head, *markers = body.split()
@@ -97,8 +111,19 @@ def _parse_line(body: str) -> PolicyEntry:
     target, port = _split_port(head[1:])
     if not target:
         raise ValueError("empty target")
-    _validate_target(target)
+    if target == LOCALHOST:
+        _validate_localhost(action, port)
+    else:
+        _validate_target(target)
     return PolicyEntry(action, target, port, _parse_markers(markers))
+
+
+def _validate_localhost(action: Action, port: int | None) -> None:
+    """The reserved ``localhost`` host-service grant needs the ``+`` action and a port."""
+    if action != "+":
+        raise ValueError("'localhost' is allow-only (it grants host-service access)")
+    if port is None:
+        raise ValueError("'localhost' needs an explicit port, e.g. +localhost:8000")
 
 
 def _parse_markers(markers: list[str]) -> dict[str, str]:
@@ -151,4 +176,11 @@ def _validate_target(target: str) -> None:
         raise ValueError(f"invalid target: {target!r}")
 
 
-__all__ = ["Action", "PolicyEntry", "parse_policy", "render_policy"]
+__all__ = [
+    "LOCALHOST",
+    "Action",
+    "PolicyEntry",
+    "localhost_ports",
+    "parse_policy",
+    "render_policy",
+]
