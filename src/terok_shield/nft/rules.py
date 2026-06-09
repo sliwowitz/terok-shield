@@ -48,6 +48,11 @@ from .constants import (
     PASTA_HOST_LOOPBACK_MAP,
     PRIVATE_LOG_PREFIX,
     PRIVATE_RANGES,
+    SET_BYPASS_WINDOW,
+    TIER_OVERRIDE,
+    TIER_PROJECT_ALLOW,
+    TIER_PROVIDER_ALLOW,
+    TIER_SECURITY_DENY,
 )
 
 _SAFE_TIMEOUT_RE = re.compile(r"^\d+[smhd]$")
@@ -56,10 +61,18 @@ _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Cross-family reject (auto-selects ICMP / ICMPv6 in an ``inet`` table).
 _REJECT = "reject with icmpx admin-prohibited"
 
-# The tier sets, in chain order; each is dual-stack (``_v4`` / ``_v6``).
-# ``allow`` may carry a dnsmasq element timeout; ``bypass_window`` always
-# carries the timeout flag so its elements expire to close the timed window.
-_TIER_SETS = ("override", "deny", "allow", "bypass_window")
+# The tier sets, in chain order; each is dual-stack (``_v4`` / ``_v6``).  Names
+# mirror the ``policy/<NN>-<name>`` bundle files 1:1 (``t<NN>_<name>``) so the
+# file→rule mapping is self-evident.  ``t40_project_allow`` carries the dnsmasq
+# element timeout (learned IPs); ``bypass_window`` always carries the timeout
+# flag so its elements expire to close the timed allow-all window.
+_TIER_SETS = (
+    TIER_OVERRIDE,
+    TIER_SECURITY_DENY,
+    TIER_PROVIDER_ALLOW,
+    TIER_PROJECT_ALLOW,
+    SET_BYPASS_WINDOW,
+)
 
 _INPUT_CHAIN = """\
     chain input {
@@ -125,11 +138,12 @@ class RulesetBuilder:
         body = self._join(
             self._preamble_lines(),
             self._range_reject(HARD_DENY_RANGES, PRIVATE_LOG_PREFIX),  # t00 absolute
-            self._match("override", "accept"),  # t10 break-glass
-            self._match("deny", _REJECT, DENIED_LOG_PREFIX),  # t20 deny set
+            self._match(TIER_OVERRIDE, "accept"),  # t10 break-glass
+            self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX),  # t20 deny set
             self._range_reject(PRIVATE_RANGES, PRIVATE_LOG_PREFIX),  # t20 RFC1918
-            self._match("allow", "accept", ALLOWED_LOG_PREFIX),  # t30/40
-            self._match("bypass_window", "accept", BYPASS_LOG_PREFIX),  # timed window
+            self._match(TIER_PROVIDER_ALLOW, "accept", ALLOWED_LOG_PREFIX),  # t30 provider
+            self._match(TIER_PROJECT_ALLOW, "accept", ALLOWED_LOG_PREFIX),  # t40 project
+            self._match(SET_BYPASS_WINDOW, "accept", BYPASS_LOG_PREFIX),  # timed window
             self._terminal(),  # terminal deny
         )
         return self._table(self._set_decls(), body, policy="drop")
@@ -148,7 +162,7 @@ class RulesetBuilder:
         sections = [self._preamble_lines()]
         if not allow_all:
             sections.append(self._range_reject(HARD_DENY_RANGES, PRIVATE_LOG_PREFIX))
-        sections.append(self._match("deny", _REJECT, DENIED_LOG_PREFIX))
+        sections.append(self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX))
         if not allow_all:
             sections.append(self._range_reject(PRIVATE_RANGES, PRIVATE_LOG_PREFIX))
         sections.append(
@@ -252,15 +266,17 @@ class RulesetBuilder:
                 errors.append(f"{chain} chain missing")
         if BLOCKED_LOG_PREFIX not in nft_output:
             errors.append("blocked nflog prefix missing")
-        for sname in ("allow_v4", "allow_v6"):
-            if sname in nft_output:
-                errors.append(f"{sname} set present in quarantine mode")
+        for base in (TIER_PROVIDER_ALLOW, TIER_PROJECT_ALLOW):
+            for fam in ("v4", "v6"):
+                sname = f"{base}_{fam}"
+                if sname in nft_output:
+                    errors.append(f"{sname} set present in quarantine mode")
         return errors
 
     # ── Set operations (instance) ──────────────────────
 
     def add_elements_dual(self, ips: list[str]) -> str:
-        """Add IPs to the allow sets, honouring the dnsmasq permanent-element rule.
+        """Add IPs to the tier-40 project-allow sets, honouring the dnsmasq permanent-element rule.
 
         When a ``set_timeout`` is configured (dnsmasq tier), profile/live IPs are
         written with ``timeout 0s`` so they do not auto-expire with the
@@ -293,8 +309,8 @@ class RulesetBuilder:
         """Declare every tier set (dual-stack), with the right flags per tier."""
         lines: list[str] = []
         for base in _TIER_SETS:
-            timeout = self._set_timeout if base == "allow" else ""
-            timed = base == "bypass_window"
+            timeout = self._set_timeout if base == TIER_PROJECT_ALLOW else ""
+            timed = base == SET_BYPASS_WINDOW
             lines.append(f"    {self._decl(f'{base}_v4', 'ipv4_addr', timeout, timed=timed)}")
             lines.append(f"    {self._decl(f'{base}_v6', 'ipv6_addr', timeout, timed=timed)}")
         return "\n".join(lines)
@@ -429,29 +445,29 @@ class RulesetBuilder:
 
 
 def add_elements_dual(ips: list[str], *, permanent: bool = False) -> str:
-    """Add IPs to the allow sets (tier 30/40), split by address family.
+    """Add IPs to the tier-40 project-allow sets, split by address family.
 
     Args:
         permanent: annotate elements with ``timeout 0s`` so profile/live IPs
             never expire in the dnsmasq-tier allow set (which carries a default
             element timeout for learned IPs).
     """
-    return _emit_dual(add_elements, "allow", ips, timeout_zero=permanent)
+    return _emit_dual(add_elements, TIER_PROJECT_ALLOW, ips, timeout_zero=permanent)
 
 
 def add_deny_elements_dual(ips: list[str]) -> str:
-    """Add IPs to the deny sets (tier 20 security-deny), split by address family."""
-    return _emit_dual(add_elements, "deny", ips)
+    """Add IPs to the tier-20 security-deny sets, split by address family."""
+    return _emit_dual(add_elements, TIER_SECURITY_DENY, ips)
 
 
 def add_override_elements_dual(ips: list[str]) -> str:
-    """Add IPs to the override sets (tier 10 break-glass), split by address family."""
-    return _emit_dual(add_elements, "override", ips)
+    """Add IPs to the tier-10 override (break-glass) sets, split by address family."""
+    return _emit_dual(add_elements, TIER_OVERRIDE, ips)
 
 
 def delete_deny_elements_dual(ips: list[str]) -> str:
-    """Remove IPs from the deny sets, split by address family."""
-    return _emit_dual(delete_elements, "deny", ips)
+    """Remove IPs from the tier-20 security-deny sets, split by address family."""
+    return _emit_dual(delete_elements, TIER_SECURITY_DENY, ips)
 
 
 def arm_bypass_window(timeout: str) -> str:
@@ -463,14 +479,17 @@ def arm_bypass_window(timeout: str) -> str:
     """
     _safe_timeout(timeout)
     return (
-        f"add element {NFT_TABLE} bypass_window_v4 {{ 0.0.0.0/0 timeout {timeout} }}\n"
-        f"add element {NFT_TABLE} bypass_window_v6 {{ ::/0 timeout {timeout} }}\n"
+        f"add element {NFT_TABLE} {SET_BYPASS_WINDOW}_v4 {{ 0.0.0.0/0 timeout {timeout} }}\n"
+        f"add element {NFT_TABLE} {SET_BYPASS_WINDOW}_v6 {{ ::/0 timeout {timeout} }}\n"
     )
 
 
 def disarm_bypass_window() -> str:
     """Close the timed allow-all window immediately by flushing both sets."""
-    return f"flush set {NFT_TABLE} bypass_window_v4\nflush set {NFT_TABLE} bypass_window_v6\n"
+    return (
+        f"flush set {NFT_TABLE} {SET_BYPASS_WINDOW}_v4\n"
+        f"flush set {NFT_TABLE} {SET_BYPASS_WINDOW}_v6\n"
+    )
 
 
 def add_elements(

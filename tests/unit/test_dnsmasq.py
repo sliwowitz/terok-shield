@@ -72,7 +72,8 @@ def test_nftset_entry_format() -> None:
     """nftset_entry() generates the correct dnsmasq nftset config line."""
     result = nftset_entry("github.com")
     assert result == (
-        f"nftset=/github.com/4#inet#{NFT_TABLE_NAME}#allow_v4,6#inet#{NFT_TABLE_NAME}#allow_v6"
+        f"nftset=/github.com/4#inet#{NFT_TABLE_NAME}#t40_project_allow_v4"
+        f",6#inet#{NFT_TABLE_NAME}#t40_project_allow_v6"
     )
 
 

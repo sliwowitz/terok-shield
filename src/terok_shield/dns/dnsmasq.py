@@ -24,7 +24,7 @@ import re
 import signal
 from pathlib import Path
 
-from ..nft.constants import DNSMASQ_BIND_DEFAULT, NFT_TABLE_NAME
+from ..nft.constants import DNSMASQ_BIND_DEFAULT, NFT_TABLE_NAME, TIER_PROJECT_ALLOW
 from ..run import CommandRunner, which_sbin_aware
 from ..state import StateBundle
 
@@ -261,19 +261,23 @@ def _extract_listen_address(conf_text: str) -> str | None:
 def nftset_entry(domain: str) -> str:
     """Generate a dnsmasq ``nftset`` config line for a domain.
 
-    Maps A records to the IPv4 allow set and AAAA records to the IPv6
-    allow set.  dnsmasq automatically matches the domain and all its
-    subdomains.
+    Maps A records to the IPv4 project-allow set and AAAA records to the
+    IPv6 project-allow set (tier 40).  dnsmasq automatically matches the
+    domain and all its subdomains.
 
     Example::
 
-        nftset=/github.com/4#inet#terok_shield#allow_v4,6#inet#terok_shield#allow_v6
+        nftset=/github.com/4#inet#terok_shield#t40_project_allow_v4,6#inet#terok_shield#t40_project_allow_v6
     """
     domain = _validate_domain(domain)
     # Strip leading wildcard — dnsmasq nftset inherently matches subdomains.
     if domain.startswith("*."):
         domain = domain[2:]
-    return f"nftset=/{domain}/4#inet#{NFT_TABLE_NAME}#allow_v4,6#inet#{NFT_TABLE_NAME}#allow_v6"
+    return (
+        f"nftset=/{domain}"
+        f"/4#inet#{NFT_TABLE_NAME}#{TIER_PROJECT_ALLOW}_v4"
+        f",6#inet#{NFT_TABLE_NAME}#{TIER_PROJECT_ALLOW}_v6"
+    )
 
 
 # ── Capability probing ─────────────────────────────────

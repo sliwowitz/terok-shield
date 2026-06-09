@@ -120,8 +120,8 @@ class TestDnsmasqConfigGeneration:
         """nftset_entry produces the correct dnsmasq directive."""
         entry = nftset_entry("github.com")
         assert entry.startswith("nftset=/github.com/")
-        assert "allow_v4" in entry
-        assert "allow_v6" in entry
+        assert "t40_project_allow_v4" in entry
+        assert "t40_project_allow_v6" in entry
 
     def test_generate_config_with_real_domains(self, tmp_path: Path) -> None:
         """generate_config() produces a valid dnsmasq config for real domains."""
@@ -412,10 +412,10 @@ class TestLiveDomainAllowDeny:
         if not pid:
             pytest.fail(f"podman inspect returned empty PID for container {name!r}")
 
-        r = nsenter_nft(pid, "list", "set", "inet", "terok_shield", "allow_v4")
+        r = nsenter_nft(pid, "list", "set", "inet", "terok_shield", "t40_project_allow_v4")
         assert r.returncode == 0
         assert GOOGLE_DNS_IP in r.stdout, (
-            f"{GOOGLE_DNS_IP} not found in allow_v4 set after resolving {GOOGLE_DNS_DOMAIN}; "
+            f"{GOOGLE_DNS_IP} not found in t40_project_allow_v4 set after resolving {GOOGLE_DNS_DOMAIN}; "
             f"set contents: {r.stdout!r}"
         )
 

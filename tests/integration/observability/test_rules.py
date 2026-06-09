@@ -27,7 +27,7 @@ class TestRulesAPI:
         """``Shield.rules()`` returns text containing ``terok_shield``."""
         rules = _shield().rules(shielded_container)
         assert "terok_shield" in rules
-        assert "allow_v4" in rules
+        assert "t40_project_allow_v4" in rules
 
 
 # -- CLI rules ------------------------------------------------

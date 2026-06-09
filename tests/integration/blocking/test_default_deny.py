@@ -147,12 +147,14 @@ class TestFirewallBlockingIPv6:
     """
 
     def test_ipv6_ruleset_has_dual_stack_sets(self, container: str, container_pid: str) -> None:
-        """Applied ruleset contains allow_v6 set and IPv6 private reject rules."""
+        """Applied ruleset contains t40_project_allow_v6 set and IPv6 private reject rules."""
         nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         listed = nsenter_nft(container_pid, "list", "ruleset")
         assert listed.returncode == 0, listed.stderr
         output = listed.stdout
-        assert "allow_v6" in output, "allow_v6 set must be in applied ruleset"
+        assert "t40_project_allow_v6" in output, (
+            "t40_project_allow_v6 set must be in applied ruleset"
+        )
         for net in (n for n in HARD_DENY_RANGES + PRIVATE_RANGES if ":" in n):
             assert net in output, f"IPv6 private reject rule for {net} missing"
 
