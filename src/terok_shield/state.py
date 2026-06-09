@@ -47,7 +47,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .paths import HOOK_ENTRYPOINT_NAME
-from .policy import PolicyEntry, localhost_ports, parse_policy
+from .policy import PolicyEntry, domain_targets, ip_targets, localhost_ports, parse_policy
+
+
+def _dedup(items: list[str]) -> list[str]:
+    """Deduplicate preserving first-seen order."""
+    return list(dict.fromkeys(items))
+
 
 BUNDLE_VERSION = 14
 """Integer version of the state bundle layout.
@@ -109,6 +115,32 @@ class EffectivePolicy:
     def localhost_ports(self) -> tuple[int, ...]:
         """Host-service ports granted by ``+localhost:PORT`` across every tier."""
         return localhost_ports(self.all_entries())
+
+    def _allows(self) -> list[PolicyEntry]:
+        """Every admitting (``+``) entry: provider + project + live's ``+``."""
+        pool = [*self.provider_allow, *self.project_allow, *self.live]
+        return [e for e in pool if e.action == "+"]
+
+    def _denies(self) -> list[PolicyEntry]:
+        """Every refusing (``-``) entry: security-deny + live's ``-``."""
+        return [e for e in (*self.security_deny, *self.live) if e.action == "-"]
+
+    def allow_domains(self) -> list[str]:
+        """Domains to admit — fed to dnsmasq's nftset auto-population."""
+        return _dedup(domain_targets(self._allows()))
+
+    def deny_domains(self) -> list[str]:
+        """Domains to refuse — withheld from dnsmasq's allow set."""
+        return _dedup(domain_targets(self._denies()))
+
+    def deny_ips(self) -> list[str]:
+        """IPs to load into the tier-20 security-deny set."""
+        return _dedup(ip_targets(self._denies()))
+
+    def effective_ips(self) -> list[str]:
+        """Admitted IPs minus denied — the tier-40 project-allow set seed."""
+        denied = set(self.deny_ips())
+        return [ip for ip in _dedup(ip_targets(self._allows())) if ip not in denied]
 
 
 STATE_DIR_MODE = 0o700

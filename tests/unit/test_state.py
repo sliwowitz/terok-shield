@@ -13,7 +13,7 @@ import pytest
 from terok_shield.state import BUNDLE_VERSION, STATE_DIR_MODE, StateBundle
 
 from ..testfs import FAKE_STATE_DIR, READER_PID_FILENAME
-from ..testnet import TEST_DOMAIN, TEST_IP1, TEST_IP2, TEST_IP3
+from ..testnet import TEST_DOMAIN, TEST_DOMAIN2, TEST_IP1, TEST_IP2, TEST_IP3
 
 
 def test_bundle_version_is_positive_int() -> None:
@@ -292,6 +292,21 @@ def test_effective_policy_localhost_ports_span_every_tier(tmp_path: Path) -> Non
     bundle.tier_path("project_allow").write_text("+localhost:8000\n")
     bundle.policy_live.write_text("+localhost:9090\n")
     assert bundle.read_effective().localhost_ports() == (8000, 9090)
+
+
+def test_effective_policy_composes_ips_and_domains_by_action(tmp_path: Path) -> None:
+    """Compose folds live into its tiers and splits IPs/domains, allow minus deny."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("project_allow").write_text(f"+{TEST_DOMAIN}\n+{TEST_IP1}\n+{TEST_IP2}\n")
+    bundle.tier_path("security_deny").write_text(f"-{TEST_IP2}\n-{TEST_DOMAIN2}\n")
+    bundle.policy_live.write_text(f"+{TEST_IP3}\n")
+
+    eff = bundle.read_effective()
+    assert eff.effective_ips() == [TEST_IP1, TEST_IP3]  # TEST_IP2 subtracted by the deny
+    assert eff.deny_ips() == [TEST_IP2]
+    assert eff.allow_domains() == [TEST_DOMAIN]
+    assert eff.deny_domains() == [TEST_DOMAIN2]
 
 
 def test_ensure_dirs_creates_policy_dir_owner_only(tmp_path: Path) -> None:
