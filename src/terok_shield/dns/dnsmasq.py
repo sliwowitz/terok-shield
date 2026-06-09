@@ -93,104 +93,14 @@ def reload(state_dir: Path, upstream_dns: str, domains: list[str]) -> None:
 # ── Domain file operations ─────────────────────────────
 
 
-def add_domain(state_dir: Path, domain: str) -> bool:
-    """Append a domain to the live.domains file.
-
-    Writes to ``live.domains`` (not ``profile.domains``) so that
-    runtime additions survive container restarts without overwriting
-    the profile-derived domain list.
-
-    Returns True if the domain was added, False if already present
-    in the merged domain set (profile + live - denied).
-    """
-    domain = _validate_domain(domain)
-    existing = read_merged_domains(state_dir)
-    if domain in existing:
-        return False
-
-    # Remove from denied.domains if present (un-deny)
-    denied_path = StateBundle(state_dir).denied_domains
-    if denied_path.is_file():
-        denied = read_domains(denied_path)
-        if domain in denied:
-            denied.remove(domain)
-            denied_path.write_text("\n".join(denied) + "\n" if denied else "")
-
-    live_path = StateBundle(state_dir).live_domains
-    with live_path.open("a") as f:
-        f.write(f"{domain}\n")
-    return True
-
-
-def remove_domain(state_dir: Path, domain: str) -> bool:
-    """Remove a domain by adding it to the denied.domains file.
-
-    Writes to ``denied.domains`` so the denial persists across
-    dnsmasq reloads.  Also removes from ``live.domains`` if present.
-
-    Returns True if the domain was removed, False if not found
-    in the merged domain set.
-    """
-    domain = _validate_domain(domain)
-    existing = read_merged_domains(state_dir)
-    if domain not in existing:
-        return False
-
-    # Remove from live.domains if present
-    live_path = StateBundle(state_dir).live_domains
-    if live_path.is_file():
-        live = read_domains(live_path)
-        if domain in live:
-            live.remove(domain)
-            live_path.write_text("\n".join(live) + "\n" if live else "")
-
-    # Add to denied.domains
-    denied_path = StateBundle(state_dir).denied_domains
-    denied = read_domains(denied_path)
-    if domain not in denied:
-        with denied_path.open("a") as f:
-            f.write(f"{domain}\n")
-
-    return True
-
-
-def read_domains(domains_path: Path) -> list[str]:
-    """Read and normalize domain names from a domains file.
-
-    Validates and lowercases each entry so comparisons with
-    ``add_domain()``/``remove_domain()`` are consistent.
-    Invalid entries are silently skipped.
-    """
-    if not domains_path.is_file():
-        return []
-    domains: list[str] = []
-    for line in domains_path.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            domains.append(_validate_domain(line))
-        except ValueError:
-            logger.warning("read_domains: skipping invalid entry in %s", domains_path)
-            continue
-    return list(dict.fromkeys(domains))
-
-
 def read_merged_domains(state_dir: Path) -> list[str]:
-    """Compute effective domains: (profile + live) - denied.
+    """Effective dnsmasq nftset domains: admitted (``+``) minus denied (``-``).
 
-    Returns a deduplicated, stable-order list.
+    Composed from the tiered ``policy/`` bundle (project/provider/live), so
+    runtime ``shield allow``/``deny`` of a domain takes effect on the next
+    dnsmasq reload.  Returns a deduplicated, stable-order list.
     """
-    profile = read_domains(StateBundle(state_dir).profile_domains)
-    live = read_domains(StateBundle(state_dir).live_domains)
-    denied = set(read_domains(StateBundle(state_dir).denied_domains))
-
-    merged: list[str] = []
-    seen: set[str] = set()
-    for d in profile + live:
-        if d not in seen and d not in denied:
-            seen.add(d)
-            merged.append(d)
-    return merged
+    return StateBundle(state_dir).read_effective().dnsmasq_domains()
 
 
 # ── Container DNS setup ────────────────────────────────

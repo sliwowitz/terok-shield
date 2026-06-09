@@ -147,7 +147,7 @@ class HookMode:
         # the builder reads ports from the bundle (SSOT): later up/down
         # rebuilds use the same source.
         entries = self._profiles.compose_profiles(profiles)
-        self._resolve_and_write_allowlists(sd, tier, entries)
+        self._write_policy_and_resolve(sd, entries)
         StateBundle(sd).upstream_dns.write_text(f"{upstream_dns}\n")
         StateBundle(sd).dns_tier.write_text(f"{tier.value}\n")
         StateBundle(sd).loopback_ports.write_text(
@@ -210,27 +210,24 @@ class HookMode:
         ]
         return args
 
-    def _resolve_and_write_allowlists(self, sd: Path, tier: DnsTier, entries: list[str]) -> None:
-        """Resolve profile entries and write allowlist files for the detected tier.
+    def _write_policy_and_resolve(self, sd: Path, entries: list[str]) -> None:
+        """Write the composed profiles as the project-allow tier, then refresh the resolved cache.
 
-        On the ``dnsmasq`` tier we still pre-resolve every domain in addition
-        to writing it into ``profile.domains``.  The pre-resolved IPs go into
-        ``profile.allowed`` as permanent (``timeout 0``) set members, so the
-        initial allow set is usable from the container's first packet — while
-        dnsmasq continues to add more IPs on-demand as new A/AAAA records come
-        back.  Without the pre-resolution, the first connection for an
-        allowlisted domain races dnsmasq's first ``--nftset`` add, and a
-        low-TTL record can slip out of the set between the ``reply`` and the
-        application's ``connect()``, producing an intermittent first-hit
-        block that then recovers on retry.
+        The authored ``policy/40-project-allow`` is the source of truth (domains
+        + literal IPs); the derived ``resolved.ips`` cache holds the resolution
+        of every admitted target, refreshed only when the cache is stale or
+        older than the authored policy.  Pre-resolving every domain seeds the
+        allow set so the first packet is usable — on the dnsmasq tier, dnsmasq
+        then keeps adding IPs on-demand as new A/AAAA records arrive (without
+        the seed, the first connection races dnsmasq's first ``--nftset`` add).
         """
-        if tier == DnsTier.DNSMASQ:
-            domains, _raw_ips = _split_domains_ips(entries)
-            StateBundle(sd).profile_domains.write_text("\n".join(domains) + "\n" if domains else "")
-            self._dns.resolve_and_cache(entries, StateBundle(sd).profile_allowed)
-        else:
-            # dig/getent tier: resolve everything to IPs at pre-start time.
-            self._dns.resolve_and_cache(entries, StateBundle(sd).profile_allowed)
+        bundle = StateBundle(sd)
+        bundle.write_tier("project_allow", "".join(f"+{e}\n" for e in entries))
+        self._dns.resolve_and_cache(
+            bundle.read_effective().allow_targets(),
+            bundle.resolved_cache,
+            source_mtime=bundle.policy_mtime(),
+        )
 
     def _write_ruleset(
         self, sd: Path, tier: DnsTier, upstream_dns: str, gw_v4: str = "", gw_v6: str = ""
@@ -321,42 +318,34 @@ class HookMode:
     # ── Live operations (domain) ───────────────────────
 
     def allow_domain(self, domain: str) -> None:
-        """Add a domain to the dnsmasq config and signal reload.
+        """Record ``+domain`` in the runtime overlay and signal a dnsmasq reload.
 
-        Delegates to ``dnsmasq.add_domain()``, which persists the domain to
-        ``live.domains`` (not ``profile.domains``) and removes any matching
-        entry from ``denied.domains``.  When dnsmasq is running, a SIGHUP is
-        sent so the change takes effect immediately without a container restart.
-        These entries are runtime additions: they survive dnsmasq reloads but
-        are separate from the pre-start ``profile.domains`` list.
+        The overlay (``policy/live``) flips any prior deny of *domain* and
+        survives reloads; dnsmasq re-reads the composed domain list on SIGHUP
+        so the change takes effect without a container restart.  The IP-level
+        allow (nft set update) is handled separately by ``allow_ip()``.
 
-        The IP-level allow (nft set update) is handled separately by
-        ``allow_ip()`` — this method is the domain-tracking counterpart
-        that ensures future IP rotations are also captured.
-
-        No-op when the container is not using the dnsmasq DNS tier (the
-        static IP-level allow already happened via ``allow_ip()``).
+        No-op when the container is not using the dnsmasq DNS tier (the static
+        IP-level allow already happened via ``allow_ip()``).
         """
         sd = self._config.state_dir.resolve()
         if not _is_dnsmasq_tier(sd):
             return
-        if not dnsmasq.add_domain(sd, domain):
-            return  # already present
+        StateBundle(sd).overlay_set("+", domain)
         self._reload_dnsmasq(sd)
 
     def deny_domain(self, domain: str) -> None:
-        """Remove a domain from the dnsmasq config and signal reload.
+        """Record ``-domain`` in the runtime overlay and signal a dnsmasq reload.
 
-        Counterpart of ``allow_domain()``.  Removes the domain so dnsmasq
-        stops auto-populating nft sets for it on future DNS queries.
+        Counterpart of ``allow_domain()``: dnsmasq stops auto-populating nft
+        sets for *domain* on future DNS queries.
 
         No-op when the container is not using the dnsmasq DNS tier.
         """
         sd = self._config.state_dir.resolve()
         if not _is_dnsmasq_tier(sd):
             return
-        if not dnsmasq.remove_domain(sd, domain):
-            return  # not present
+        StateBundle(sd).overlay_set("-", domain)
         self._reload_dnsmasq(sd)
 
     def _reload_dnsmasq(self, state_dir: Path) -> None:
@@ -377,22 +366,18 @@ class HookMode:
     def allow_ip(self, container: str, ip: str) -> None:
         """Live-allow an IP for a running container via nsenter."""
         ip = safe_ip(ip)
-
-        # Un-deny: remove from deny.list and nft deny set if present
         sd = self._config.state_dir.resolve()
-        dp = StateBundle(sd).deny
-        if dp.is_file():
-            denied = StateBundle(sd).read_denied_ips()
-            if ip in denied:
-                denied.discard(ip)
-                dp.write_text("".join(f"{d}\n" for d in sorted(denied)))
-                nft_cmd = delete_deny_elements_dual([ip])
-                if nft_cmd:
-                    self._nft_apply_best_effort(container, nft_cmd)
+        bundle = StateBundle(sd)
+
+        # Un-deny: drop from the nft deny set if it is currently denied.
+        if ip in bundle.read_denied_ips():
+            nft_cmd = delete_deny_elements_dual([ip])
+            if nft_cmd:
+                self._nft_apply_best_effort(container, nft_cmd)
 
         # When the dnsmasq set has a default timeout (30 m), permanent IPs must use
         # 'timeout 0s' so they are never evicted by the set's per-element expiry clock.
-        tier_path = StateBundle(sd).dns_tier
+        tier_path = bundle.dns_tier
         if tier_path.is_file() and tier_path.read_text().strip() == DnsTier.DNSMASQ.value:
             element = f"{{ {ip} timeout 0s }}"
         else:
@@ -407,23 +392,19 @@ class HookMode:
             self._set_for_ip(ip),
             element,
         )
-        # Persist to live.allowed (skip if already present)
-        live_path = self._live_path()
-        live_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = set(live_path.read_text().splitlines()) if live_path.is_file() else set()
-        if ip not in existing:
-            with live_path.open("a") as f:
-                f.write(f"{ip}\n")
+        # Persist to the runtime overlay (flips any prior deny of this IP).
+        bundle.overlay_set("+", ip)
 
     def deny_ip(self, container: str, ip: str) -> None:
         """Live-deny an IP for a running container via nsenter.
 
-        Removes from the nft allow set (best-effort) and from live.allowed.
-        Adds to the nft deny set.  Always persists to deny.list so operator
-        deny decisions stick across restarts.
+        Removes from the nft allow set (best-effort), adds to the nft deny set,
+        and records ``-ip`` in ``policy/live`` so the deny sticks across
+        ``shield up`` / restart and flips any prior allow.
         """
         ip = safe_ip(ip)
         sd = self._config.state_dir.resolve()
+        bundle = StateBundle(sd)
 
         # Best-effort nft delete (IP may not be in the set)
         try:
@@ -443,32 +424,17 @@ class HookMode:
             ):
                 logger.warning("nft delete element failed for %s: %s", ip, e)
 
-        # Remove from live.allowed
-        live_path = self._live_path()
-        if live_path.is_file():
-            lines = live_path.read_text().splitlines()
-            lines = [line for line in lines if line.strip() != ip]
-            live_path.write_text("\n".join(lines) + "\n" if lines else "")
-
         # Add to nft deny set (prevents dnsmasq from re-allowing)
         nft_cmd = add_deny_elements_dual([ip])
         if nft_cmd:
             self._nft_apply_best_effort(container, nft_cmd)
 
-        # Persist to deny.list so deny sets survive shield_up / restart.
-        # Operator deny decisions always stick.
-        dp = StateBundle(sd).deny
-        if ip not in StateBundle(sd).read_denied_ips():
-            with dp.open("a") as f:
-                f.write(f"{ip}\n")
+        # Persist to the runtime overlay (flips any prior allow; sticks across restart).
+        bundle.overlay_set("-", ip)
 
     def _set_for_ip(self, ip: str) -> str:
         """Return the tier-40 project-allow nft set for an IP address (by family)."""
         return f"{TIER_PROJECT_ALLOW}_v4" if is_ipv4(ip) else f"{TIER_PROJECT_ALLOW}_v6"
-
-    def _live_path(self) -> Path:
-        """Return the resolved path to live.allowed (prevents path traversal)."""
-        return StateBundle(self._config.state_dir).live_allowed.resolve()
 
     def _nft_apply_best_effort(self, container: str, nft_cmd: str) -> None:
         """Run multi-line nft commands via nsenter, swallowing errors."""

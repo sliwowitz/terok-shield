@@ -25,7 +25,6 @@ from terok_shield.profiles import ProfileLoader
 
 from ..testfs import FAKE_RESOLVED_DIR, NFT_BINARY
 from ..testnet import TEST_DOMAIN, TEST_IP1, TEST_IP2
-from .helpers import write_lines
 
 
 @dataclass
@@ -113,7 +112,7 @@ def test_resolve_and_cache_accepts_cache_path(tmp_path: Path) -> None:
     runner.dig_all.return_value = [TEST_IP1]
     resolver = DnsResolver(runner=runner)
 
-    cache_path = StateBundle(tmp_path).profile_allowed
+    cache_path = StateBundle(tmp_path).resolved_cache
     ips = resolver.resolve_and_cache([TEST_DOMAIN], cache_path)
     assert TEST_IP1 in ips
     assert cache_path.is_file()
@@ -125,7 +124,7 @@ def test_resolve_and_cache_reuses_fresh_cache(tmp_path: Path) -> None:
     runner = mock.MagicMock()
     runner.dig_all.return_value = [TEST_IP1]
     resolver = DnsResolver(runner=runner)
-    cache_path = StateBundle(tmp_path).profile_allowed
+    cache_path = StateBundle(tmp_path).resolved_cache
 
     resolver.resolve_and_cache([TEST_DOMAIN], cache_path)
     runner.dig_all.reset_mock()
@@ -133,56 +132,39 @@ def test_resolve_and_cache_reuses_fresh_cache(tmp_path: Path) -> None:
     runner.dig_all.assert_not_called()
 
 
-def test_allow_ip_writes_to_live_allowed(
+def test_allow_ip_records_in_overlay(
     make_hook_mode: Callable[..., HookModeHarness], tmp_path: Path
 ) -> None:
-    """allow_ip() persists live allowlist updates to live.allowed."""
+    """allow_ip() records ``+ip`` in the runtime overlay (policy/live)."""
     harness = make_hook_mode(state_dir=tmp_path)
     harness.runner.nft_via_nsenter.return_value = ""
 
     harness.mode.allow_ip("test-ctr", TEST_IP1)
-    assert TEST_IP1 in StateBundle(tmp_path).live_allowed.read_text()
+    assert f"+{TEST_IP1}" in StateBundle(tmp_path).policy_live.read_text()
 
 
-def test_deny_ip_removes_from_live_allowed(
+def test_deny_ip_flips_overlay_to_deny(
     make_hook_mode: Callable[..., HookModeHarness], tmp_path: Path
 ) -> None:
-    """deny_ip() removes the IP from live.allowed."""
-    live_path = write_lines(StateBundle(tmp_path).live_allowed, [TEST_IP1, TEST_IP2])
+    """deny_ip() flips a prior allow to a deny in the overlay, keeping others."""
+    bundle = StateBundle(tmp_path)
+    bundle.overlay_set("+", TEST_IP1)
+    bundle.overlay_set("+", TEST_IP2)
     harness = make_hook_mode(state_dir=tmp_path)
     harness.runner.nft_via_nsenter.return_value = ""
 
     harness.mode.deny_ip("test-ctr", TEST_IP1)
-    content = live_path.read_text()
-    assert TEST_IP1 not in content
-    assert TEST_IP2 in content
+    assert TEST_IP1 in bundle.read_denied_ips()
+    assert TEST_IP2 in bundle.read_effective_ips()
 
 
-@pytest.mark.parametrize(
-    ("profile_lines", "live_lines", "expected"),
-    [
-        pytest.param([TEST_IP1], [TEST_IP2], [TEST_IP1, TEST_IP2], id="merges-both-files"),
-        pytest.param([TEST_IP1], [TEST_IP1, TEST_IP2], [TEST_IP1, TEST_IP2], id="deduplicates"),
-    ],
-)
-def test_read_allowed_ips_merges_state_files(
-    tmp_path: Path,
-    profile_lines: list[str],
-    live_lines: list[str],
-    expected: list[str],
-) -> None:
-    """state.read_allowed_ips() merges profile.allowed and live.allowed."""
-    StateBundle(tmp_path).ensure_dirs()
-    write_lines(StateBundle(tmp_path).profile_allowed, profile_lines)
-    write_lines(StateBundle(tmp_path).live_allowed, live_lines)
-    assert StateBundle(tmp_path).read_allowed_ips() == expected
-
-
-def test_shield_up_reads_live_allowed(
+def test_shield_up_reads_runtime_allows(
     make_hook_mode: Callable[..., HookModeHarness], tmp_path: Path
 ) -> None:
-    """shield_up() re-adds persisted live.allowed IPs."""
-    write_lines(StateBundle(tmp_path).live_allowed, [TEST_IP1, TEST_IP2])
+    """shield_up() re-adds the runtime-allowed IPs from the overlay."""
+    bundle = StateBundle(tmp_path)
+    bundle.overlay_set("+", TEST_IP1)
+    bundle.overlay_set("+", TEST_IP2)
     harness = make_hook_mode(state_dir=tmp_path)
     # Mock DNS reading so _container_ruleset returns the mock ruleset
     harness.mode._container_ruleset = lambda _c: harness.ruleset
@@ -213,8 +195,8 @@ def test_shield_audit_path_derived_from_state_dir(_find: mock.Mock, tmp_path: Pa
 
 
 @mock.patch("terok_shield.run.find_nft", return_value=NFT_BINARY)
-def test_shield_resolve_uses_profile_allowed_path(_find: mock.Mock, tmp_path: Path) -> None:
-    """Shield.resolve() caches resolved entries in state_dir/profile.allowed."""
+def test_shield_resolve_caches_in_resolved_cache(_find: mock.Mock, tmp_path: Path) -> None:
+    """Shield.resolve() writes the project-allow tier and caches in resolved.ips."""
     dns = mock.MagicMock()
     dns.resolve_and_cache.return_value = [TEST_IP1]
     profiles = mock.MagicMock()
@@ -222,9 +204,11 @@ def test_shield_resolve_uses_profile_allowed_path(_find: mock.Mock, tmp_path: Pa
 
     Shield(ShieldConfig(state_dir=tmp_path), dns=dns, profiles=profiles).resolve(["dev-standard"])
 
+    bundle = StateBundle(tmp_path)
+    assert f"+{TEST_DOMAIN}" in bundle.tier_path("project_allow").read_text()
     args = dns.resolve_and_cache.call_args.args
-    assert args[0] == [TEST_DOMAIN]
-    assert args[1] == StateBundle(tmp_path).profile_allowed
+    assert args[0] == [TEST_DOMAIN]  # allow_targets() composed from the written tier
+    assert args[1] == bundle.resolved_cache
 
 
 from terok_shield.state import StateBundle

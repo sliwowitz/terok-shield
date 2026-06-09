@@ -18,7 +18,7 @@ import pytest
 from terok_shield.audit import AuditLogger
 from terok_shield.cli.main import _load_config_file
 from terok_shield.config import ShieldFileConfig
-from terok_shield.dns.dnsmasq import generate_config, read_domains
+from terok_shield.dns.dnsmasq import generate_config
 from terok_shield.nft.constants import DNSMASQ_BIND_DEFAULT, PASTA_DNS
 from terok_shield.run import ExecError
 from terok_shield.state import StateBundle
@@ -135,65 +135,6 @@ class TestLoadConfigFileWarnings:
         assert result == ShieldFileConfig(mode="hook")
         captured = capsys.readouterr()
         assert captured.err == ""
-
-
-# ── dnsmasq.read_domains logging ────────────────────────
-
-
-class TestReadDomainsWarnings:
-    """Verify read_domains() logs warnings for invalid entries."""
-
-    def test_invalid_entry_logs_warning(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Invalid domain entries are skipped with a logger warning."""
-        domains_path = tmp_path / "profile.domains"
-        domains_path.write_text(f"{TEST_DOMAIN}\n; injection\n{TEST_DOMAIN2}\n")
-
-        with caplog.at_level(logging.WARNING, logger="terok_shield.dns.dnsmasq"):
-            result = read_domains(domains_path)
-
-        assert result == [TEST_DOMAIN, TEST_DOMAIN2]
-        assert len(caplog.records) == 1
-        assert "skipping invalid entry" in caplog.records[0].message
-        # Must NOT log the raw entry value (security: avoid log injection)
-        assert "; injection" not in caplog.records[0].message
-
-    def test_multiple_invalid_entries_log_per_entry(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Each invalid entry generates its own warning."""
-        domains_path = tmp_path / "profile.domains"
-        domains_path.write_text(f"{TEST_DOMAIN}\n; bad1\n; bad2\n{TEST_DOMAIN2}\n")
-
-        with caplog.at_level(logging.WARNING, logger="terok_shield.dns.dnsmasq"):
-            result = read_domains(domains_path)
-
-        assert result == [TEST_DOMAIN, TEST_DOMAIN2]
-        assert len(caplog.records) == 2
-
-    def test_all_valid_no_warning(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        """All-valid entries produce no warnings."""
-        domains_path = tmp_path / "profile.domains"
-        domains_path.write_text(f"{TEST_DOMAIN}\n{TEST_DOMAIN2}\n")
-
-        with caplog.at_level(logging.WARNING, logger="terok_shield.dns.dnsmasq"):
-            result = read_domains(domains_path)
-
-        assert result == [TEST_DOMAIN, TEST_DOMAIN2]
-        assert len(caplog.records) == 0
-
-    def test_warning_includes_file_path(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """The warning message includes the file path for debugging."""
-        domains_path = tmp_path / "profile.domains"
-        domains_path.write_text("not-a-valid-entry\n")
-
-        with caplog.at_level(logging.WARNING, logger="terok_shield.dns.dnsmasq"):
-            read_domains(domains_path)
-
-        assert str(domains_path) in caplog.records[0].message
 
 
 # ── dnsmasq.generate_config logging ─────────────────────

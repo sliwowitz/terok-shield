@@ -12,14 +12,14 @@
 # per-task via the user/project profile, layered on top of this.
 
 # NTP time synchronization (clock skew breaks key auth)
-pool.ntp.org
-time.google.com
-time.cloudflare.com
++pool.ntp.org
++time.google.com
++time.cloudflare.com
 
 # Distro security update channels (mirroring base.txt; krun guests share
 # the same minimal-base image lineage so the same hosts apply)
-archive.ubuntu.com
-security.ubuntu.com
-deb.debian.org
-mirrors.fedoraproject.org
-dl.fedoraproject.org
++archive.ubuntu.com
++security.ubuntu.com
++deb.debian.org
++mirrors.fedoraproject.org
++dl.fedoraproject.org

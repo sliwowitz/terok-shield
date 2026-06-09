@@ -2,11 +2,11 @@
 # For projects that need broader Node/JS infrastructure access
 
 # Package registry (also in dev-standard)
-registry.npmjs.org
++registry.npmjs.org
 
 # Yarn
-registry.yarnpkg.com
++registry.yarnpkg.com
 
 # Package metadata and CDN
-cdn.jsdelivr.net
-unpkg.com
++cdn.jsdelivr.net
++unpkg.com

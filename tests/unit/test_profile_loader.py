@@ -59,7 +59,7 @@ def test_load_profile_raises_for_missing_profile() -> None:
 
 def test_load_profile_uses_user_override(tmp_path: Path) -> None:
     """load_profile() prefers user profiles over bundled ones."""
-    write_lines(tmp_path / "base.txt", [CUSTOM_DOMAIN, TEST_IP1])
+    write_lines(tmp_path / "base.txt", [f"+{CUSTOM_DOMAIN}", f"+{TEST_IP1}"])
     assert ProfileLoader(user_dir=tmp_path).load_profile("base") == [CUSTOM_DOMAIN, TEST_IP1]
 
 

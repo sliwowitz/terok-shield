@@ -10,13 +10,11 @@ import pytest
 
 from terok_shield.dns.dnsmasq import (
     _validate_domain,
-    add_domain,
     generate_config,
     has_nftset_support,
     nftset_entry,
     read_merged_domains,
     reload,
-    remove_domain,
 )
 from terok_shield.nft.constants import (
     DNSMASQ_BIND_DEFAULT,
@@ -264,99 +262,40 @@ def test_clear_pid_file_ignores_missing(tmp_path: Path) -> None:
     _clear_pid_file(tmp_path)  # should not raise
 
 
-# ── add_domain / remove_domain ────────────────────────────
-
-
-def test_add_domain_appends(tmp_path: Path) -> None:
-    """add_domain() appends a new domain to live.domains."""
-    StateBundle(tmp_path).ensure_dirs()
-    assert add_domain(tmp_path, TEST_DOMAIN) is True
-    assert TEST_DOMAIN in StateBundle(tmp_path).live_domains.read_text()
-
-
-def test_add_domain_deduplicates(tmp_path: Path) -> None:
-    """add_domain() returns False for an already-present domain."""
-    StateBundle(tmp_path).ensure_dirs()
-    add_domain(tmp_path, TEST_DOMAIN)
-    assert add_domain(tmp_path, TEST_DOMAIN) is False
-
-
-def test_add_domain_deduplicates_against_profile(tmp_path: Path) -> None:
-    """add_domain() returns False when domain already exists in profile.domains."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n")
-    assert add_domain(tmp_path, TEST_DOMAIN) is False
-
-
-def test_add_domain_undenies(tmp_path: Path) -> None:
-    """add_domain() removes domain from denied.domains if present."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).denied_domains.write_text(f"{TEST_DOMAIN}\n")
-    assert add_domain(tmp_path, TEST_DOMAIN) is True
-    denied = StateBundle(tmp_path).denied_domains.read_text()
-    assert TEST_DOMAIN not in denied
-
-
-def test_remove_domain(tmp_path: Path) -> None:
-    """remove_domain() adds domain to denied.domains and removes from live.domains."""
-    StateBundle(tmp_path).ensure_dirs()
-    add_domain(tmp_path, TEST_DOMAIN)
-    add_domain(tmp_path, TEST_DOMAIN2)
-    assert remove_domain(tmp_path, TEST_DOMAIN) is True
-    merged = read_merged_domains(tmp_path)
-    assert TEST_DOMAIN not in merged
-    assert TEST_DOMAIN2 in merged
-
-
-def test_remove_domain_from_profile(tmp_path: Path) -> None:
-    """remove_domain() denies a domain that exists in profile.domains."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n{TEST_DOMAIN2}\n")
-    assert remove_domain(tmp_path, TEST_DOMAIN) is True
-    merged = read_merged_domains(tmp_path)
-    assert TEST_DOMAIN not in merged
-    assert TEST_DOMAIN2 in merged
-    # profile.domains is unchanged
-    assert TEST_DOMAIN in StateBundle(tmp_path).profile_domains.read_text()
-
-
-def test_remove_domain_not_found(tmp_path: Path) -> None:
-    """remove_domain() returns False when domain is not present."""
-    StateBundle(tmp_path).ensure_dirs()
-    assert remove_domain(tmp_path, TEST_DOMAIN) is False
-
-
-# ── read_merged_domains ──────────────────────────────────
+# ── read_merged_domains (policy-backed) ──────────────────
 
 
 def test_read_merged_domains_empty(tmp_path: Path) -> None:
-    """read_merged_domains() returns empty list when no domain files exist."""
+    """read_merged_domains() returns empty list when no policy exists."""
     StateBundle(tmp_path).ensure_dirs()
     assert read_merged_domains(tmp_path) == []
 
 
-def test_read_merged_domains_profile_only(tmp_path: Path) -> None:
-    """read_merged_domains() returns profile domains when no live/denied."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n{TEST_DOMAIN2}\n")
+def test_read_merged_domains_project_tier(tmp_path: Path) -> None:
+    """Admitted domains from the project-allow tier are returned in order."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n+{TEST_DOMAIN2}\n")
     assert read_merged_domains(tmp_path) == [TEST_DOMAIN, TEST_DOMAIN2]
 
 
-def test_read_merged_domains_merges_live(tmp_path: Path) -> None:
-    """read_merged_domains() merges profile + live with dedup."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n")
-    StateBundle(tmp_path).live_domains.write_text(f"{TEST_DOMAIN2}\n")
+def test_read_merged_domains_merges_live_overlay(tmp_path: Path) -> None:
+    """The runtime overlay (policy/live) adds to the admitted domains."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
+    bundle.overlay_set("+", TEST_DOMAIN2)
     merged = read_merged_domains(tmp_path)
     assert TEST_DOMAIN in merged
     assert TEST_DOMAIN2 in merged
 
 
 def test_read_merged_domains_subtracts_denied(tmp_path: Path) -> None:
-    """read_merged_domains() subtracts denied domains from the result."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n{TEST_DOMAIN2}\n")
-    StateBundle(tmp_path).denied_domains.write_text(f"{TEST_DOMAIN}\n")
+    """A '-' overlay entry removes a domain from the dnsmasq list."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n+{TEST_DOMAIN2}\n")
+    bundle.overlay_set("-", TEST_DOMAIN)
     merged = read_merged_domains(tmp_path)
     assert TEST_DOMAIN not in merged
     assert TEST_DOMAIN2 in merged
@@ -458,45 +397,6 @@ def test_reload_raises_on_dead_process(tmp_path: Path) -> None:
     ):
         with pytest.raises(RuntimeError, match="dead"):
             reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
-
-
-# ── read_domains normalization ───────────────────────────
-
-
-def test_read_domains_normalizes_case(tmp_path: Path) -> None:
-    """read_domains() lowercases entries for consistent comparison."""
-    from terok_shield.dns.dnsmasq import read_domains
-
-    domains_path = tmp_path / "profile.domains"
-    domains_path.write_text("GitHub.COM\nexample.org\n")
-    assert read_domains(domains_path) == ["github.com", "example.org"]
-
-
-def test_read_domains_skips_invalid(tmp_path: Path) -> None:
-    """read_domains() silently skips invalid domain entries."""
-    from terok_shield.dns.dnsmasq import read_domains
-
-    domains_path = tmp_path / "profile.domains"
-    domains_path.write_text("github.com\n; injection\nexample.org\n")
-    assert read_domains(domains_path) == ["github.com", "example.org"]
-
-
-def test_read_domains_deduplicates(tmp_path: Path) -> None:
-    """read_domains() deduplicates after normalization."""
-    from terok_shield.dns.dnsmasq import read_domains
-
-    domains_path = tmp_path / "profile.domains"
-    domains_path.write_text("github.com\nGITHUB.COM\n")
-    assert read_domains(domains_path) == ["github.com"]
-
-
-def test_read_domains_skips_blank_lines(tmp_path: Path) -> None:
-    """read_domains() skips blank lines without treating them as invalid."""
-    from terok_shield.dns.dnsmasq import read_domains
-
-    domains_path = tmp_path / "profile.domains"
-    domains_path.write_text("\ngithub.com\n\nexample.org\n\n")
-    assert read_domains(domains_path) == ["github.com", "example.org"]
 
 
 # ── generate_config validation ───────────────────────────

@@ -22,16 +22,11 @@ Bundle layout::
     │   ├── 30-provider-allow          #   → t30_provider_allow
     │   ├── 40-project-allow           #   → t40_project_allow
     │   └── live                       #   runtime overlay (folded into its tiers)
+    ├── resolved.ips                   # derived: resolved allow IPs (t40 set seed)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
     ├── dns.tier                       # active DNS tier (dig/getent/dnsmasq)
     ├── loopback.ports                 # per-container host-loopback TCP ports (newline-separated)
-    ├── profile.allowed                # IPs from DNS resolution
-    ├── profile.domains                # domain names for dnsmasq config
-    ├── live.allowed                   # IPs from allow/deny
-    ├── live.domains                   # domain overrides from allow_domain
-    ├── deny.list                      # persistent deny overrides
-    ├── denied.domains                 # denied domains from deny_domain
     ├── dnsmasq.conf                   # generated dnsmasq configuration
     ├── dnsmasq.pid                    # dnsmasq PID (in container netns)
     ├── dnsmasq.log                    # dnsmasq query log (for shield watch)
@@ -49,11 +44,13 @@ from pathlib import Path
 from .paths import HOOK_ENTRYPOINT_NAME
 from .policy import (
     LOCALHOST,
+    Action,
     PolicyEntry,
     domain_targets,
     ip_targets,
     localhost_ports,
     parse_policy,
+    render_policy,
 )
 
 
@@ -62,7 +59,7 @@ def _dedup(items: list[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-BUNDLE_VERSION = 14
+BUNDLE_VERSION = 15
 """Integer version of the state bundle layout.
 
 Bumped whenever the file layout changes in a backwards-incompatible way.
@@ -72,10 +69,12 @@ stale on-disk entrypoint — bump it whenever the entrypoint *protocol*
 changes even if the file layout itself is unchanged, so that
 ``terok setup`` rewrites the script instead of short-circuiting.
 
-Current shape (v14): ``loopback.ports`` carries the per-container
-host-loopback TCP ports (the broker / signer ports the supervisor
-binds), persisted at pre_start time.  Earlier shapes are recoverable
-via ``git log -L /^BUNDLE_VERSION/:src/terok_shield/state.py``.
+Current shape (v15): the six v14 split allow/deny files
+(``profile.allowed``/``.domains``, ``live.allowed``/``.domains``,
+``deny.list``, ``denied.domains``) are replaced by the tiered ``policy/``
+bundle of unified ``+``/``-`` files plus the derived ``resolved.ips``
+cache.  Earlier shapes are recoverable via
+``git log -L /^BUNDLE_VERSION/:src/terok_shield/state.py``.
 """
 
 
@@ -140,6 +139,11 @@ class EffectivePolicy:
         """Domains to refuse — withheld from dnsmasq's allow set."""
         return _dedup(domain_targets(self._denies()))
 
+    def dnsmasq_domains(self) -> list[str]:
+        """Effective dnsmasq nftset list: admitted domains minus denied."""
+        denied = set(self.deny_domains())
+        return [d for d in self.allow_domains() if d not in denied]
+
     def deny_ips(self) -> list[str]:
         """IPs to load into the tier-20 security-deny set."""
         return _dedup(ip_targets(self._denies()))
@@ -173,11 +177,11 @@ class StateBundle:
     Frozen so the per-task instance is safe to pass through hook
     callbacks without anyone smuggling a mutated ``state_dir`` into a
     later stage.  Every property is a pure derivation off ``state_dir``;
-    the IO methods ([`read_allowed_ips`][terok_shield.state.StateBundle.read_allowed_ips],
-    [`read_denied_ips`][terok_shield.state.StateBundle.read_denied_ips],
+    the IO methods ([`read_effective`][terok_shield.state.StateBundle.read_effective],
     [`read_effective_ips`][terok_shield.state.StateBundle.read_effective_ips],
+    [`read_denied_ips`][terok_shield.state.StateBundle.read_denied_ips],
     [`ensure_dirs`][terok_shield.state.StateBundle.ensure_dirs]) bundle
-    the small handful of read-and-merge / setup helpers that previously
+    the small handful of read-and-compose / setup helpers that previously
     floated as free functions taking ``state_dir`` repeatedly.
     """
 
@@ -240,38 +244,6 @@ class StateBundle:
             if line.strip()
         )
 
-    # ── Allowlists and denylists ───────────────────────────
-
-    @property
-    def profile_allowed(self) -> Path:
-        """Path to the profile-derived allowlist file."""
-        return self.state_dir / "profile.allowed"
-
-    @property
-    def profile_domains(self) -> Path:
-        """Path to the profile domain names list (for dnsmasq config)."""
-        return self.state_dir / "profile.domains"
-
-    @property
-    def live_allowed(self) -> Path:
-        """Path to the live allow/deny allowlist file."""
-        return self.state_dir / "live.allowed"
-
-    @property
-    def live_domains(self) -> Path:
-        """Path to the live domain overrides file (from allow_domain)."""
-        return self.state_dir / "live.domains"
-
-    @property
-    def deny(self) -> Path:
-        """Path to the persistent denylist file."""
-        return self.state_dir / "deny.list"
-
-    @property
-    def denied_domains(self) -> Path:
-        """Path to the denied domains list (from deny_domain)."""
-        return self.state_dir / "denied.domains"
-
     # ── v15 tiered policy bundle ────────────────────────────
 
     @property
@@ -315,6 +287,18 @@ class StateBundle:
         """Parse one policy file; an absent file is an empty tier."""
         return parse_policy(path.read_text()) if path.is_file() else []
 
+    def write_tier(self, tier: str, content: str) -> None:
+        """Write a tier file only when *content* differs.
+
+        Skipping no-op writes preserves the file's mtime, which the resolver's
+        content-aware freshness keys on — so an unchanged allowlist stays a
+        cache hit across task starts instead of forcing a re-resolution.
+        """
+        path = self.tier_path(tier)
+        if not path.is_file() or path.read_text() != content:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+
     def read_effective(self) -> EffectivePolicy:
         """Read and compose every tier into an [`EffectivePolicy`][terok_shield.state.EffectivePolicy]."""
         return EffectivePolicy(
@@ -324,6 +308,20 @@ class StateBundle:
             project_allow=self.read_tier(self.tier_path("project_allow")),
             live=self.read_tier(self.policy_live),
         )
+
+    def overlay_set(self, action: Action, target: str) -> None:
+        """Upsert ``{action}{target}`` into the runtime overlay (``policy/live``).
+
+        The target is validated through the parser (a malformed domain/IP
+        raises).  Any prior entry for *target* is dropped first, so a later
+        ``shield allow`` flips an earlier ``deny`` (and vice-versa) rather
+        than stacking.
+        """
+        (entry,) = parse_policy(f"{action}{target}")
+        kept = [e for e in self.read_tier(self.policy_live) if e.target != entry.target]
+        kept.append(entry)
+        self.policy_live.parent.mkdir(parents=True, exist_ok=True)
+        self.policy_live.write_text(render_policy(kept))
 
     # ── dnsmasq runtime ────────────────────────────────────
 
@@ -378,37 +376,28 @@ class StateBundle:
 
     # ── State readers ──────────────────────────────────────
 
-    def read_allowed_ips(self) -> list[str]:
-        """Merge IPs from profile.allowed and live.allowed, deduplicated.
-
-        Returns a stable-order list: profile IPs first, then live IPs,
-        with duplicates removed (first occurrence wins).
-        """
-        ips: list[str] = []
-        for path in (self.profile_allowed, self.live_allowed):
-            if path.is_file():
-                ips.extend(line.strip() for line in path.read_text().splitlines() if line.strip())
-        seen: set[str] = set()
-        unique: list[str] = []
-        for ip in ips:
-            if ip not in seen:
-                seen.add(ip)
-                unique.append(ip)
-        return unique
-
     def read_denied_ips(self) -> set[str]:
-        """Read IPs from deny.list (empty set when the file is missing)."""
-        if not self.deny.is_file():
-            return set()
-        return {line.strip() for line in self.deny.read_text().splitlines() if line.strip()}
+        """Refused IPs composed from the security-deny tier + the runtime overlay."""
+        return set(self.read_effective().deny_ips())
 
     def read_effective_ips(self) -> list[str]:
-        """Compute effective allowed IPs: ``(profile ∪ live) − deny``.
+        """The tier-40 project-allow set seed: resolved allow IPs minus denied.
 
-        Returns a stable-order list with denied IPs subtracted.
+        Unions the derived [`resolved_cache`][terok_shield.state.StateBundle.resolved_cache]
+        (literal allow IPs plus resolved allow-domains, refreshed at pre_start)
+        with the policy tiers' current literal allow IPs — so a runtime
+        ``shield allow`` of a raw IP survives a ``shield up`` rebuild even
+        before the next resolution — then subtracts the denied IPs.
         """
-        denied = self.read_denied_ips()
-        return [ip for ip in self.read_allowed_ips() if ip not in denied]
+        eff = self.read_effective()
+        denied = set(eff.deny_ips())
+        cached = (
+            [line.strip() for line in self.resolved_cache.read_text().splitlines() if line.strip()]
+            if self.resolved_cache.is_file()
+            else []
+        )
+        seed = [ip for ip in cached if ip not in denied]
+        return _dedup(seed + eff.effective_ips())
 
     # ── Setup ──────────────────────────────────────────────
 

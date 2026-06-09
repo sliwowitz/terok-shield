@@ -27,16 +27,11 @@ def test_bundle_version_is_positive_int() -> None:
     [
         pytest.param("hooks_dir", FAKE_STATE_DIR / "hooks", id="hooks-dir"),
         pytest.param("hook_entrypoint", FAKE_STATE_DIR / "terok-shield-hook", id="hook-entrypoint"),
-        pytest.param("profile_allowed", FAKE_STATE_DIR / "profile.allowed", id="profile-allowed"),
-        pytest.param("live_allowed", FAKE_STATE_DIR / "live.allowed", id="live-allowed"),
-        pytest.param("deny", FAKE_STATE_DIR / "deny.list", id="deny-path"),
+        pytest.param("resolved_cache", FAKE_STATE_DIR / "resolved.ips", id="resolved-cache"),
         pytest.param("audit", FAKE_STATE_DIR / "audit.jsonl", id="audit-path"),
-        pytest.param("profile_domains", FAKE_STATE_DIR / "profile.domains", id="profile-domains"),
         pytest.param("dnsmasq_conf", FAKE_STATE_DIR / "dnsmasq.conf", id="dnsmasq-conf"),
         pytest.param("dnsmasq_pid", FAKE_STATE_DIR / "dnsmasq.pid", id="dnsmasq-pid"),
         pytest.param("dns_tier", FAKE_STATE_DIR / "dns.tier", id="dns-tier"),
-        pytest.param("live_domains", FAKE_STATE_DIR / "live.domains", id="live-domains"),
-        pytest.param("denied_domains", FAKE_STATE_DIR / "denied.domains", id="denied-domains"),
         pytest.param("container_id", FAKE_STATE_DIR / "container.id", id="container-id"),
         pytest.param("reader_pid", FAKE_STATE_DIR / READER_PID_FILENAME, id="reader-pid"),
     ],
@@ -138,47 +133,36 @@ def test_ensure_dirs_repairs_loose_existing_mode(tmp_path: Path) -> None:
     assert _mode(bundle.hooks_dir) == STATE_DIR_MODE
 
 
-def test_read_denied_ips_empty_when_file_missing(tmp_path: Path) -> None:
-    """``StateBundle.read_denied_ips()`` returns an empty set when deny.list is absent."""
+def test_read_denied_ips_empty_when_no_policy(tmp_path: Path) -> None:
+    """``StateBundle.read_denied_ips()`` returns an empty set with no policy."""
     assert StateBundle(tmp_path).read_denied_ips() == set()
 
 
-@pytest.mark.parametrize(
-    ("content", "expected"),
-    [
-        pytest.param(f"{TEST_IP1}\n{TEST_IP2}\n", {TEST_IP1, TEST_IP2}, id="multiple"),
-        pytest.param(f"\n{TEST_IP1}\n\n", {TEST_IP1}, id="skip-blanks"),
-    ],
-)
-def test_read_denied_ips(tmp_path: Path, content: str, expected: set[str]) -> None:
-    """``read_denied_ips()`` ignores blank lines while preserving denied entries."""
+def test_read_denied_ips_composes_security_deny_and_live(tmp_path: Path) -> None:
+    """``read_denied_ips()`` folds the security-deny tier and the runtime overlay."""
     bundle = StateBundle(tmp_path)
-    bundle.deny.write_text(content)
-    assert bundle.read_denied_ips() == expected
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("security_deny").write_text(f"-{TEST_IP1}\n")
+    bundle.policy_live.write_text(f"-{TEST_IP2}\n")
+    assert bundle.read_denied_ips() == {TEST_IP1, TEST_IP2}
 
 
-def test_read_effective_ips_subtracts_denied(tmp_path: Path) -> None:
-    """Denied IPs are removed from the effective allow list."""
+def test_read_effective_ips_unions_cache_and_subtracts_denied(tmp_path: Path) -> None:
+    """The seed is the resolved cache minus denied IPs."""
     bundle = StateBundle(tmp_path)
-    bundle.profile_allowed.write_text(f"{TEST_IP1}\n{TEST_IP2}\n")
-    bundle.deny.write_text(f"{TEST_IP1}\n")
+    bundle.policy_dir.mkdir()
+    bundle.resolved_cache.write_text(f"{TEST_IP1}\n{TEST_IP2}\n")
+    bundle.tier_path("security_deny").write_text(f"-{TEST_IP1}\n")
     assert bundle.read_effective_ips() == [TEST_IP2]
 
 
-def test_read_effective_ips_without_deny_file_includes_live_entries(tmp_path: Path) -> None:
-    """Without deny.list, effective IPs include both profile and live entries."""
+def test_read_effective_ips_includes_runtime_allow_before_reresolve(tmp_path: Path) -> None:
+    """A runtime ``+ip`` in policy/live survives a rebuild even before re-resolution."""
     bundle = StateBundle(tmp_path)
-    bundle.profile_allowed.write_text(f"{TEST_IP1}\n{TEST_IP2}\n")
-    bundle.live_allowed.write_text(f"{TEST_IP3}\n")
-    assert bundle.read_effective_ips() == [TEST_IP1, TEST_IP2, TEST_IP3]
-
-
-def test_read_effective_ips_ignores_denied_entries_not_in_allowed_set(tmp_path: Path) -> None:
-    """Unmatched deny.list entries do not affect the effective allow list."""
-    bundle = StateBundle(tmp_path)
-    bundle.profile_allowed.write_text(f"{TEST_IP1}\n")
-    bundle.deny.write_text(f"{TEST_IP3}\n")
-    assert bundle.read_effective_ips() == [TEST_IP1]
+    bundle.policy_dir.mkdir()
+    bundle.resolved_cache.write_text(f"{TEST_IP1}\n")
+    bundle.policy_live.write_text(f"+{TEST_IP3}\n")  # runtime allow, not yet in the cache
+    assert bundle.read_effective_ips() == [TEST_IP1, TEST_IP3]
 
 
 # ── ballast sync contract ────────────────────────────────────────────────────
