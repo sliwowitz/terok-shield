@@ -8,6 +8,9 @@ import pytest
 from terok_shield.policy import (
     LOCALHOST,
     PolicyEntry,
+    domain_targets,
+    ip_targets,
+    is_ip,
     localhost_ports,
     parse_policy,
     render_policy,
@@ -100,6 +103,24 @@ def test_localhost_ports_extracts_grants() -> None:
     """``localhost_ports`` collects every ``+localhost:PORT`` port, skipping other entries."""
     entries = parse_policy(f"+localhost:8000\n+{TEST_DOMAIN}\n+localhost:9090\n")
     assert localhost_ports(entries) == (8000, 9090)
+
+
+def test_ip_and_domain_targets_partition_entries() -> None:
+    """``ip_targets``/``domain_targets`` split entries by kind, excluding ``localhost``."""
+    entries = parse_policy(
+        f"+{TEST_DOMAIN}\n+{TEST_IP1}\n+{RFC1918_CIDR_10}\n+localhost:8000\n-{TEST_DOMAIN2}\n"
+    )
+    assert ip_targets(entries) == [TEST_IP1, RFC1918_CIDR_10]
+    assert domain_targets(entries) == [TEST_DOMAIN, TEST_DOMAIN2]
+
+
+def test_is_ip_classifies_literals_cidrs_and_domains() -> None:
+    """``is_ip`` accepts IP literals and CIDRs (v4/v6) and rejects domains/localhost."""
+    assert is_ip(TEST_IP1)
+    assert is_ip(RFC1918_CIDR_10)
+    assert is_ip(IPV6_VERBOSE_CANONICAL)
+    assert not is_ip(TEST_DOMAIN)
+    assert not is_ip(LOCALHOST)
 
 
 def test_round_trip_render_parse() -> None:

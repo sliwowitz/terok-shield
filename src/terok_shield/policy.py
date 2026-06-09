@@ -102,6 +102,25 @@ def localhost_ports(entries: list[PolicyEntry]) -> tuple[int, ...]:
     return tuple(e.port for e in entries if e.target == LOCALHOST and e.port is not None)
 
 
+def is_ip(target: str) -> bool:
+    """True when *target* is an IP literal or CIDR (a domain or ``localhost`` is False)."""
+    try:
+        ipaddress.ip_network(target, strict=False)
+    except ValueError:
+        return False
+    return True
+
+
+def ip_targets(entries: list[PolicyEntry]) -> list[str]:
+    """The IP/CIDR targets among *entries* (domains and ``localhost`` excluded), order-preserving."""
+    return [e.target for e in entries if is_ip(e.target)]
+
+
+def domain_targets(entries: list[PolicyEntry]) -> list[str]:
+    """The domain targets among *entries* (IPs and ``localhost`` excluded), order-preserving."""
+    return [e.target for e in entries if e.target != LOCALHOST and not is_ip(e.target)]
+
+
 def _parse_line(body: str) -> PolicyEntry:
     """Parse one non-comment ``body``: ``+``/``-`` target ``[:port]`` plus ``%key=value`` markers."""
     head, *markers = body.split()
@@ -180,6 +199,9 @@ __all__ = [
     "LOCALHOST",
     "Action",
     "PolicyEntry",
+    "domain_targets",
+    "ip_targets",
+    "is_ip",
     "localhost_ports",
     "parse_policy",
     "render_policy",
