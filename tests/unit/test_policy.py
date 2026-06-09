@@ -5,7 +5,7 @@
 
 import pytest
 
-from terok_shield.policy import PolicyEntry, parse_meta, parse_policy, render_policy
+from terok_shield.policy import PolicyEntry, parse_policy, render_policy
 from tests.testfs import FORBIDDEN_TRAVERSAL
 from tests.testnet import (
     DEV_PYPI_DOMAIN,
@@ -73,22 +73,20 @@ def test_bare_ipv6_has_no_port() -> None:
     assert entry.target == IPV6_VERBOSE_CANONICAL
 
 
-def test_trailing_comment_metadata() -> None:
-    """``key=value`` tokens in the trailing comment are exposed via ``meta()``."""
-    (entry,) = parse_policy(f"+{TEST_DOMAIN}   # reason=test expires=2026-06-09 note plain")
-    assert entry.comment == "reason=test expires=2026-06-09 note plain"
-    assert entry.meta() == {"reason": "test", "expires": "2026-06-09"}
+def test_metadata_markers() -> None:
+    """``%key=value`` markers are parsed into ``meta``; values may contain ``=``."""
+    (entry,) = parse_policy(f"+{TEST_DOMAIN}  %reason=test %expires=2026-06-09 %c=x=y")
+    assert entry.meta == {"reason": "test", "expires": "2026-06-09", "c": "x=y"}
 
 
-def test_parse_meta_standalone() -> None:
-    """Non-``key=value`` tokens are ignored; values may contain ``=``."""
-    assert parse_meta(None) == {}
-    assert parse_meta("just free text") == {}
-    assert parse_meta("a=1 b=2 plain c=x=y") == {"a": "1", "b": "2", "c": "x=y"}
+def test_comment_bears_zero_load() -> None:
+    """Everything after ``#`` is ignored — including stray ``%`` markers."""
+    (entry,) = parse_policy(f"+{TEST_DOMAIN}  %reason=keep  # free text %ignored=marker")
+    assert entry == PolicyEntry("+", TEST_DOMAIN, None, {"reason": "keep"})
 
 
 def test_round_trip_render_parse() -> None:
-    """``parse_policy(render_policy(x)) == x`` — including bracketed IPv6 ports."""
+    """``parse_policy(render_policy(x)) == x`` — including bracketed IPv6 ports and metadata."""
     text = (
         f"+{TEST_DOMAIN}\n"
         f"+{WILDCARD}\n"
@@ -96,7 +94,7 @@ def test_round_trip_render_parse() -> None:
         f"-{DEV_PYPI_DOMAIN}\n"
         f"+{RFC1918_CIDR_10}\n"
         f"+[{IPV6_VERBOSE_CANONICAL}]:443\n"
-        f"+{TEST_DOMAIN}  # reason=keep\n"
+        f"+{TEST_DOMAIN}  %reason=keep\n"
     )
     entries = parse_policy(text)
     assert parse_policy(render_policy(entries)) == entries
@@ -114,6 +112,8 @@ def test_round_trip_render_parse() -> None:
         f"+{FORBIDDEN_TRAVERSAL}",  # path-traversal shape
         "+a/b",  # slash (path-ish) in target
         f"+[{IPV6_VERBOSE_CANONICAL}",  # unterminated IPv6 bracket
+        f"+{TEST_DOMAIN} bar",  # bare token without a '%' prefix
+        f"+{TEST_DOMAIN} %nokey",  # metadata marker missing '=value'
     ],
 )
 def test_rejects_malformed(bad: str) -> None:
