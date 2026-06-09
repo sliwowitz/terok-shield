@@ -47,7 +47,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .paths import HOOK_ENTRYPOINT_NAME
-from .policy import PolicyEntry, domain_targets, ip_targets, localhost_ports, parse_policy
+from .policy import (
+    LOCALHOST,
+    PolicyEntry,
+    domain_targets,
+    ip_targets,
+    localhost_ports,
+    parse_policy,
+)
 
 
 def _dedup(items: list[str]) -> list[str]:
@@ -138,9 +145,13 @@ class EffectivePolicy:
         return _dedup(ip_targets(self._denies()))
 
     def effective_ips(self) -> list[str]:
-        """Admitted IPs minus denied — the tier-40 project-allow set seed."""
+        """Admitted literal IPs minus denied (the non-resolved part of the set seed)."""
         denied = set(self.deny_ips())
         return [ip for ip in _dedup(ip_targets(self._allows())) if ip not in denied]
+
+    def allow_targets(self) -> list[str]:
+        """Admitted domains + literal IPs to resolve (``localhost`` excluded) — the resolver input."""
+        return _dedup([e.target for e in self._allows() if e.target != LOCALHOST])
 
 
 STATE_DIR_MODE = 0o700
@@ -276,6 +287,29 @@ class StateBundle:
     def policy_live(self) -> Path:
         """Path to the runtime overlay (``shield allow``/``deny`` append here)."""
         return self.policy_dir / LIVE_FILE
+
+    @property
+    def resolved_cache(self) -> Path:
+        """Derived per-container cache of resolved allow IPs (the t40 set seed).
+
+        Separate from the authored ``policy/`` tiers so resolution can be
+        reused across task starts and invalidated independently — keyed on
+        [`policy_mtime`][terok_shield.state.StateBundle.policy_mtime].
+        """
+        return self.state_dir / "resolved.ips"
+
+    def policy_mtime(self) -> float:
+        """Newest mtime among the policy files (``0.0`` when none exist yet).
+
+        Feeds the resolver's content-aware freshness check: a resolved cache
+        older than this means the authored allowlist changed since we resolved.
+        """
+        mtimes = [
+            p.stat().st_mtime
+            for p in (*(self.tier_path(t) for t in TIER_FILES), self.policy_live)
+            if p.is_file()
+        ]
+        return max(mtimes, default=0.0)
 
     def read_tier(self, path: Path) -> list[PolicyEntry]:
         """Parse one policy file; an absent file is an empty tier."""

@@ -178,6 +178,43 @@ def test_resolve_and_cache_re_resolves_stale_cache(
     harness.runner.dig_all.assert_called_once()
 
 
+def test_resolve_and_cache_re_resolves_when_source_is_newer(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """A cache older than ``source_mtime`` is re-resolved even within ``max_age``."""
+    harness = make_resolver()
+    harness.runner.dig_all.return_value = [TEST_IP2]
+
+    cache_path = StateBundle(tmp_path).resolved_cache
+    cache_path.write_text(f"{TEST_IP1}\n")
+    edited_after = cache_path.stat().st_mtime + 10  # authored allowlist changed later
+
+    result = harness.resolver.resolve_and_cache(
+        [TEST_DOMAIN], cache_path, max_age=3600, source_mtime=edited_after
+    )
+    assert result == [TEST_IP2]
+    harness.runner.dig_all.assert_called_once()
+
+
+def test_resolve_and_cache_keeps_cache_when_source_is_older(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """A cache newer than ``source_mtime`` stays fresh — no re-resolution."""
+    harness = make_resolver()
+
+    cache_path = StateBundle(tmp_path).resolved_cache
+    cache_path.write_text(f"{TEST_IP1}\n")
+    edited_before = cache_path.stat().st_mtime - 10
+
+    result = harness.resolver.resolve_and_cache(
+        [TEST_DOMAIN], cache_path, max_age=3600, source_mtime=edited_before
+    )
+    assert result == [TEST_IP1]
+    harness.runner.dig_all.assert_not_called()
+
+
 def test_resolve_and_cache_mixed_entries(
     tmp_path: Path,
     make_resolver: ResolverHarnessFactory,
