@@ -293,6 +293,20 @@ def test_effective_policy_composes_ips_and_domains_by_action(tmp_path: Path) -> 
     assert eff.deny_domains() == [TEST_DOMAIN2]
 
 
+def test_deny_target_is_withheld_from_allow_views(tmp_path: Path) -> None:
+    """A ``-target`` refuses an otherwise-allowed one, so it never reaches the resolver."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("project_allow").write_text(f"+{TEST_DOMAIN}\n+{TEST_IP1}\n")
+    bundle.policy_live.write_text(f"-{TEST_DOMAIN}\n")  # deny the allowed domain
+
+    eff = bundle.read_effective()
+    assert TEST_DOMAIN not in eff.allow_targets()
+    assert TEST_DOMAIN not in eff.allow_domains()
+    assert TEST_DOMAIN not in eff.dnsmasq_domains()
+    assert TEST_IP1 in eff.allow_targets()  # the untouched allow survives
+
+
 def test_allow_targets_lists_domains_and_ips_excluding_localhost(tmp_path: Path) -> None:
     """``allow_targets`` is the resolver input: admitted domains + IPs, no localhost."""
     bundle = StateBundle(tmp_path)
