@@ -13,7 +13,7 @@ import pytest
 from terok_shield.state import BUNDLE_VERSION, STATE_DIR_MODE, StateBundle
 
 from ..testfs import FAKE_STATE_DIR, READER_PID_FILENAME
-from ..testnet import TEST_IP1, TEST_IP2, TEST_IP3
+from ..testnet import TEST_DOMAIN, TEST_IP1, TEST_IP2, TEST_IP3
 
 
 def test_bundle_version_is_positive_int() -> None:
@@ -241,3 +241,62 @@ def test_nft_hook_path_strings_match_state_attributes() -> None:
             f"StateBundle.{attr} returns that filename. "
             "Update nft_hook.py to match."
         )
+
+
+# ── v15 tiered policy bundle ─────────────────────────────────────────────────
+
+
+def test_policy_tier_paths_live_under_policy_dir(tmp_path: Path) -> None:
+    """Tier files and the runtime overlay resolve under ``policy/``."""
+    bundle = StateBundle(tmp_path)
+    assert bundle.policy_dir == tmp_path / "policy"
+    assert bundle.tier_path("project_allow") == tmp_path / "policy" / "40-project-allow"
+    assert bundle.tier_path("security_deny") == tmp_path / "policy" / "20-security-deny"
+    assert bundle.policy_live == tmp_path / "policy" / "live"
+
+
+def test_read_tier_parses_present_and_empties_absent(tmp_path: Path) -> None:
+    """``read_tier`` parses a written file and treats an absent one as empty."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("project_allow").write_text(f"+{TEST_DOMAIN}\n+{TEST_IP1}\n")
+    entries = bundle.read_tier(bundle.tier_path("project_allow"))
+    assert [(e.action, e.target) for e in entries] == [("+", TEST_DOMAIN), ("+", TEST_IP1)]
+    assert bundle.read_tier(bundle.tier_path("override")) == []
+
+
+def test_read_effective_composes_tiers_in_authority_order(tmp_path: Path) -> None:
+    """``read_effective`` reads every tier; ``all_entries`` is override→live order."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("security_deny").write_text(f"-{TEST_IP2}\n")
+    bundle.tier_path("project_allow").write_text(f"+{TEST_IP1}\n")
+    bundle.policy_live.write_text(f"+{TEST_IP3}\n")
+
+    eff = bundle.read_effective()
+    assert [e.target for e in eff.security_deny] == [TEST_IP2]
+    assert [e.target for e in eff.project_allow] == [TEST_IP1]
+    assert [e.target for e in eff.live] == [TEST_IP3]
+    # authority order: override, security_deny, provider_allow, project_allow, live
+    assert [(e.action, e.target) for e in eff.all_entries()] == [
+        ("-", TEST_IP2),
+        ("+", TEST_IP1),
+        ("+", TEST_IP3),
+    ]
+
+
+def test_effective_policy_localhost_ports_span_every_tier(tmp_path: Path) -> None:
+    """``+localhost:PORT`` grants are collected from all tiers via the overlay."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("project_allow").write_text("+localhost:8000\n")
+    bundle.policy_live.write_text("+localhost:9090\n")
+    assert bundle.read_effective().localhost_ports() == (8000, 9090)
+
+
+def test_ensure_dirs_creates_policy_dir_owner_only(tmp_path: Path) -> None:
+    """``ensure_dirs`` creates ``policy/`` at the owner-only bundle mode."""
+    bundle = StateBundle(tmp_path / "sd")
+    bundle.ensure_dirs()
+    assert bundle.policy_dir.is_dir()
+    assert stat.S_IMODE(bundle.policy_dir.stat().st_mode) == STATE_DIR_MODE

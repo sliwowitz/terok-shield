@@ -16,6 +16,12 @@ Bundle layout::
     │   ├── terok-shield-createRuntime.json
     │   └── terok-shield-poststop.json
     ├── {HOOK_ENTRYPOINT_NAME}         # entrypoint script (stdlib-only Python)
+    ├── policy/                        # v15 tiered +/- policy (one file per tier set)
+    │   ├── 10-override                #   → t10_override
+    │   ├── 20-security-deny           #   → t20_security_deny
+    │   ├── 30-provider-allow          #   → t30_provider_allow
+    │   ├── 40-project-allow           #   → t40_project_allow
+    │   └── live                       #   runtime overlay (folded into its tiers)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
     ├── dns.tier                       # active DNS tier (dig/getent/dnsmasq)
@@ -41,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .paths import HOOK_ENTRYPOINT_NAME
+from .policy import PolicyEntry, localhost_ports, parse_policy
 
 BUNDLE_VERSION = 14
 """Integer version of the state bundle layout.
@@ -57,6 +64,51 @@ host-loopback TCP ports (the broker / signer ports the supervisor
 binds), persisted at pre_start time.  Earlier shapes are recoverable
 via ``git log -L /^BUNDLE_VERSION/:src/terok_shield/state.py``.
 """
+
+
+# ── v15 tiered policy bundle ────────────────────────────
+# The ``policy/<NN>-<name>`` files replace the v14 split allow/deny files
+# (``profile.allowed``/``.domains``, ``live.allowed``/``.domains``,
+# ``deny.list``, ``denied.domains``).  Each is a unified ``+``/``-`` list
+# whose basename mirrors its nft tier set (``t<NN>_<name>``) 1:1.
+POLICY_DIR = "policy"
+TIER_FILES: dict[str, str] = {
+    "override": "10-override",  # t10 — authored break-glass
+    "security_deny": "20-security-deny",  # t20 — vault hosts + operator deny
+    "provider_allow": "30-provider-allow",  # t30 — executor roster projection
+    "project_allow": "40-project-allow",  # t40 — common sets + git remote + custom
+}
+LIVE_FILE = "live"  # runtime allow/deny, folded into its owning tiers
+
+
+@dataclass(frozen=True)
+class EffectivePolicy:
+    """Per-tier policy entries read from the bundle, in authority order.
+
+    ``live`` is the runtime overlay (``shield allow``/``deny``); the engine
+    folds its ``+`` entries into the project-allow set and its ``-`` entries
+    into the security-deny set.
+    """
+
+    override: list[PolicyEntry]
+    security_deny: list[PolicyEntry]
+    provider_allow: list[PolicyEntry]
+    project_allow: list[PolicyEntry]
+    live: list[PolicyEntry]
+
+    def all_entries(self) -> list[PolicyEntry]:
+        """Every entry across tiers, top-to-bottom in authority order."""
+        return [
+            *self.override,
+            *self.security_deny,
+            *self.provider_allow,
+            *self.project_allow,
+            *self.live,
+        ]
+
+    def localhost_ports(self) -> tuple[int, ...]:
+        """Host-service ports granted by ``+localhost:PORT`` across every tier."""
+        return localhost_ports(self.all_entries())
 
 
 STATE_DIR_MODE = 0o700
@@ -177,6 +229,36 @@ class StateBundle:
         """Path to the denied domains list (from deny_domain)."""
         return self.state_dir / "denied.domains"
 
+    # ── v15 tiered policy bundle ────────────────────────────
+
+    @property
+    def policy_dir(self) -> Path:
+        """Directory holding the per-tier ``+``/``-`` policy files."""
+        return self.state_dir / POLICY_DIR
+
+    def tier_path(self, tier: str) -> Path:
+        """Path to one tier's policy file (``tier`` is a [`TIER_FILES`][terok_shield.state.TIER_FILES] key)."""
+        return self.policy_dir / TIER_FILES[tier]
+
+    @property
+    def policy_live(self) -> Path:
+        """Path to the runtime overlay (``shield allow``/``deny`` append here)."""
+        return self.policy_dir / LIVE_FILE
+
+    def read_tier(self, path: Path) -> list[PolicyEntry]:
+        """Parse one policy file; an absent file is an empty tier."""
+        return parse_policy(path.read_text()) if path.is_file() else []
+
+    def read_effective(self) -> EffectivePolicy:
+        """Read and compose every tier into an [`EffectivePolicy`][terok_shield.state.EffectivePolicy]."""
+        return EffectivePolicy(
+            override=self.read_tier(self.tier_path("override")),
+            security_deny=self.read_tier(self.tier_path("security_deny")),
+            provider_allow=self.read_tier(self.tier_path("provider_allow")),
+            project_allow=self.read_tier(self.tier_path("project_allow")),
+            live=self.read_tier(self.policy_live),
+        )
+
     # ── dnsmasq runtime ────────────────────────────────────
 
     @property
@@ -278,3 +360,5 @@ class StateBundle:
         self.state_dir.chmod(STATE_DIR_MODE)
         self.hooks_dir.mkdir(parents=True, exist_ok=True)
         self.hooks_dir.chmod(STATE_DIR_MODE)
+        self.policy_dir.mkdir(parents=True, exist_ok=True)
+        self.policy_dir.chmod(STATE_DIR_MODE)
