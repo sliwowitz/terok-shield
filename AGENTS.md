@@ -15,7 +15,7 @@
 
 ## Repo layout
 
-- `src/terok_shield/`: Python package (CLI in `cli.py`, command registry in `registry.py`, engine modules at top level)
+- `src/terok_shield/`: Python package (CLI in `cli/main.py`, command registry in `commands.py`, nft ruleset engine in `nft/` — `rules.py` + `constants.py`, hook orchestration in `hooks/`, OCI hook entrypoint in `resources/nft_hook.py`)
 - `tests/`: `pytest` test suite
 - `src/terok_shield/resources/dns/`: Bundled DNS domain allowlists
 
@@ -210,4 +210,4 @@ Path functions in `state.py` derive all paths from `state_dir`. `BUNDLE_VERSION`
 - **Allowlisting**: Both IP addresses and DNS domains are supported in `.txt` allowlists; bundled defaults use DNS names because they are more stable and easier to audit
 - **Minimal changes**: Make surgical, focused changes
 - **Existing tests**: Never remove or modify unrelated tests
-- **Dependencies**: Use Poetry; the only runtime dependency is PyYAML
+- **Dependencies**: Use Poetry; runtime dependencies are PyYAML, pydantic, and terok-util

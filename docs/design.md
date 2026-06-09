@@ -12,8 +12,9 @@ Lifecycle: `Shield.pre_start()` installs the OCI hook (idempotent), resolves DNS
 writes `profile.allowed`, pre-generates the complete nft ruleset to `ruleset.nft`,
 and returns podman args with annotations. On each container start, the OCI hook
 reads `state_dir` from annotations, applies the pre-generated `ruleset.nft` inside
-the container's network namespace, discovers the gateway from `/proc/{pid}/net/route`,
-and optionally starts a per-container *dnsmasq* instance.
+the container's network namespace, and optionally starts a per-container *dnsmasq*
+instance.  Gateway addresses are baked into the ruleset at generation time — no
+runtime `/proc` discovery.
 
 ## Allowlisting
 
@@ -80,7 +81,6 @@ across state files are reliable regardless of input notation (e.g.
 │   └── terok-shield-poststop.json        # only if per-container hooks are supported
 ├── terok-shield-hook              # entrypoint script (stdlib-only), for per-container hooks
 ├── ruleset.nft                    # pre-generated nft ruleset (written by pre_start)
-├── gateway                        # discovered gateway IP (written by OCI hook)
 ├── profile.allowed                # IPs from DNS resolution (preset)
 ├── profile.domains                # domain names for dnsmasq config
 ├── live.allowed                   # IPs from manual allow/deny
@@ -188,8 +188,10 @@ operations.
 nftables log rules generate per-packet entries in dmesg/journald:
 
 - `TEROK_SHIELD_ALLOWED:` traffic hitting the allow set (rate-limited)
-- `TEROK_SHIELD_DENIED:` traffic rejected by the deny-all rule
+- `TEROK_SHIELD_DENIED:` traffic rejected by the explicit deny set (operator refused)
 - `TEROK_SHIELD_PRIVATE:` non-allowlisted private-range traffic rejected (RFC 1918/RFC 4193)
+- `TEROK_SHIELD_BLOCKED:` traffic rejected by the terminal default-deny rule (unclassified)
+- `TEROK_SHIELD_BYPASS:` traffic passing while the shield is bypassed
 
 ## Public API
 
