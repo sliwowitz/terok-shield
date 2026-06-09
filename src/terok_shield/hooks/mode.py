@@ -63,7 +63,7 @@ from ..podman_info.info import PodmanInfo, parse_podman_info
 from ..podman_info.network import parse_resolv_conf, slirp4netns_gateway
 from ..run import ExecError, ShieldNeedsSetup
 from ..state import StateBundle
-from ..util import is_ip as _is_ip, is_ipv4
+from ..util import is_ipv4
 from .install import install_hooks
 
 logger = logging.getLogger(__name__)
@@ -690,22 +690,6 @@ def _gateways_for_mode(network_mode: str) -> tuple[str, str]:
         f"Cannot determine gateways for network mode {network_mode!r}. "
         "Add support for this mode in _gateways_for_mode()."
     )
-
-
-def _split_domains_ips(entries: list[str]) -> tuple[list[str], list[str]]:
-    """Split profile entries into (domains, raw_ips).
-
-    Domains are forwarded to dnsmasq for runtime resolution via ``--nftset``.
-    Raw IPs are resolved/cached as before and loaded into nft sets at hook time.
-    """
-    domains: list[str] = []
-    raw_ips: list[str] = []
-    for entry in entries:
-        if _is_ip(entry):
-            raw_ips.append(entry)
-        else:
-            domains.append(entry)
-    return domains, raw_ips
 
 
 def _is_dnsmasq_tier(state_dir: Path) -> bool:
