@@ -162,11 +162,11 @@ class TestBypassModeSwitch:
 class TestBypassWithAllowDeny:
     """Verify allow/deny interactions during bypass."""
 
-    def test_allow_during_bypass_persists_via_live_allowed(self, shielded_container: str) -> None:
-        """IPs added via allow during bypass survive shield.up() via live.allowed.
+    def test_allow_during_bypass_persists_via_overlay(self, shielded_container: str) -> None:
+        """IPs added via allow during bypass survive shield.up() via the runtime overlay.
 
-        allow_ip() persists IPs to live.allowed, and shield.up() reads
-        them back via state.read_allowed_ips(). The IP survives the
+        allow_ip() records +ip in policy/live, and shield.up() reads
+        it back via state.read_effective_ips(). The IP survives the
         transition even though the nft ruleset is atomically replaced.
         """
         shield = _shield()
@@ -225,8 +225,8 @@ class TestBypassIPRestoration:
                 shield.allow(name, ip)
             assert_reachable(name, ALLOWED_TARGET_HTTP)
 
-            # Write these IPs to the profile.allowed (simulating DNS resolution)
-            StateBundle(sd).profile_allowed.write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
+            # Seed these IPs into resolved.ips (simulating DNS resolution)
+            StateBundle(sd).resolved_cache.write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
 
             # Go down (all traffic allowed regardless)
             shield.down(name, name)
@@ -325,7 +325,7 @@ class TestBypassFullE2E:
             assert_blocked(name, BLOCKED_TARGET_HTTP)
 
             # Persist to profile.allowed for restoration
-            StateBundle(sd).profile_allowed.write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
+            StateBundle(sd).resolved_cache.write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
 
             # Step 3: Down for discovery
             shield.down(name, name)
@@ -394,10 +394,10 @@ class TestBypassFullE2E:
         assert "terok_shield" in rules
 
     def test_allow_before_and_after_bypass(self, shielded_container: str) -> None:
-        """IPs allowed before bypass survive the bypass cycle via live.allowed.
+        """IPs allowed before bypass survive the bypass cycle via the runtime overlay.
 
-        allow_ip() persists IPs to live.allowed, and shield_up() reads
-        them back via state.read_allowed_ips(), so they survive the
+        allow_ip() records +ip in policy/live, and shield_up() reads
+        it back via state.read_effective_ips(), so they survive the
         down/up cycle without needing to re-allow.
         """
         shield = _shield()

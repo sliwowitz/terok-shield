@@ -27,18 +27,18 @@ class TestShieldResolve:
             assert isinstance(ip, str)
 
     def test_resolve_creates_cache(self, shield_env: Path) -> None:
-        """A profile.allowed file exists after ``Shield.resolve()``."""
+        """A resolved.ips cache file exists after ``Shield.resolve()``."""
         sd = shield_env / "containers" / "cache-test-ctr"
         Shield(ShieldConfig(state_dir=sd)).resolve()
 
-        allowed = StateBundle(sd).profile_allowed
-        assert allowed.is_file(), "profile.allowed should be created"
+        allowed = StateBundle(sd).resolved_cache
+        assert allowed.is_file(), "resolved.ips should be created"
 
     def test_resolve_force_bypasses_cache(self, shield_env: Path) -> None:
         """``force=True`` re-resolves even if cache is fresh."""
         sd = shield_env / "containers" / "force-test-ctr"
         sd.mkdir(parents=True, exist_ok=True)
-        cache_file = StateBundle(sd).profile_allowed
+        cache_file = StateBundle(sd).resolved_cache
         cache_file.write_text(f"{TEST_IP4}\n")
 
         ips = Shield(ShieldConfig(state_dir=sd)).resolve(force=True)

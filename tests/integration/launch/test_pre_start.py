@@ -37,24 +37,25 @@ class TestShieldPreStart:
     @pytest.mark.needs_internet
     @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
     def test_pre_start_resolves_dns(self, _hgh: mock.Mock, shield_env: Path) -> None:
-        """DNS preparation files are written after ``Shield.pre_start()``.
+        """DNS preparation is written after ``Shield.pre_start()``.
 
-        On the dnsmasq tier, domains go to ``profile.domains`` (not
-        ``profile.allowed``).  On the dig/getent tier, resolved IPs go to
-        ``profile.allowed``.  At least one of the two must have content.
+        pre_start composes the profiles into the ``policy/40-project-allow``
+        tier and resolves them into the ``resolved.ips`` cache; at least one
+        of the two must have content.
         """
         sd = shield_env / "containers" / "dns-test-ctr"
         shield = Shield(ShieldConfig(state_dir=sd))
         shield.pre_start("dns-test-ctr")
 
-        allowed = StateBundle(sd).profile_allowed
-        domains = StateBundle(sd).profile_domains
-        dns_prepared = (allowed.is_file() and allowed.stat().st_size > 0) or (
-            domains.is_file() and domains.stat().st_size > 0
+        bundle = StateBundle(sd)
+        project_allow = bundle.tier_path("project_allow")
+        cache = bundle.resolved_cache
+        dns_prepared = (project_allow.is_file() and project_allow.stat().st_size > 0) or (
+            cache.is_file() and cache.stat().st_size > 0
         )
         assert dns_prepared, (
-            "DNS preparation should write IPs to profile.allowed (dig/getent tier) "
-            "or domains to profile.domains (dnsmasq tier)"
+            "DNS preparation should write the composed policy to the project-allow "
+            "tier or resolved IPs to the resolved.ips cache"
         )
 
 
