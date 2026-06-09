@@ -9,6 +9,16 @@ Pure literals with no logic — safe for import by the nft.py security boundary.
 NFT_TABLE = "inet terok_shield"
 NFT_TABLE_NAME = "terok_shield"
 
+# ── Tier set base names ────────────────────────────────
+# One named set per tier per family (``<base>_v4`` / ``<base>_v6``).  Each base
+# mirrors its ``policy/<NN>-<name>`` bundle file 1:1 so the file→rule mapping is
+# self-evident.  Tier 00 (hard-deny) is static CIDR ranges, not a set.
+TIER_OVERRIDE = "t10_override"  # tier 10 — break-glass allow, above the deny
+TIER_SECURITY_DENY = "t20_security_deny"  # tier 20 — vault hosts + operator deny
+TIER_PROVIDER_ALLOW = "t30_provider_allow"  # tier 30 — agent/provider egress (executor)
+TIER_PROJECT_ALLOW = "t40_project_allow"  # tier 40 — common sets + git remote + custom
+SET_BYPASS_WINDOW = "bypass_window"  # timed allow-all (kernel-timeout elements)
+
 # ── Network defaults ────────────────────────────────────
 # Used as parameter defaults in nft.py and re-exported by config.py.
 

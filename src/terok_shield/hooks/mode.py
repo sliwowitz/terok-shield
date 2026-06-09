@@ -50,6 +50,7 @@ from ..nft.constants import (
     PASTA_HOST_LOOPBACK_MAP,
     SLIRP4NETNS_DNS,
     SLIRP4NETNS_GATEWAY_V6,
+    TIER_PROJECT_ALLOW,
 )
 from ..nft.rules import (
     RulesetBuilder,
@@ -462,8 +463,8 @@ class HookMode:
                 f.write(f"{ip}\n")
 
     def _set_for_ip(self, ip: str) -> str:
-        """Return the nft set name for an IP address."""
-        return "allow_v4" if is_ipv4(ip) else "allow_v6"
+        """Return the tier-40 project-allow nft set for an IP address (by family)."""
+        return f"{TIER_PROJECT_ALLOW}_v4" if is_ipv4(ip) else f"{TIER_PROJECT_ALLOW}_v6"
 
     def _live_path(self) -> Path:
         """Return the resolved path to live.allowed (prevents path traversal)."""

@@ -184,7 +184,7 @@ class TestBypassWithAllowDeny:
     def test_deny_during_bypass_blocks_traffic(self, shielded_container: str) -> None:
         """Deny is enforced even in bypass mode — deny sets shadow the accept policy.
 
-        The bypass ruleset retains the ``deny_v4``/``deny_v6`` sets so an
+        The bypass ruleset retains the ``t20_security_deny_v4``/``t20_security_deny_v6`` sets so an
         operator-driven deny still drops matching traffic.  See PR #230.
         """
         shield = _shield()

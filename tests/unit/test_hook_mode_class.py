@@ -233,9 +233,9 @@ def test_pre_start_includes_expected_annotations(
 @pytest.mark.parametrize(
     ("method", "ip", "expected_action", "expected_set"),
     [
-        pytest.param("allow_ip", TEST_IP1, "add", "allow_v4", id="allow-ipv4"),
-        pytest.param("allow_ip", IPV6_CLOUDFLARE, "add", "allow_v6", id="allow-ipv6"),
-        pytest.param("deny_ip", TEST_IP1, "delete", "allow_v4", id="deny-ipv4"),
+        pytest.param("allow_ip", TEST_IP1, "add", "t40_project_allow_v4", id="allow-ipv4"),
+        pytest.param("allow_ip", IPV6_CLOUDFLARE, "add", "t40_project_allow_v6", id="allow-ipv6"),
+        pytest.param("deny_ip", TEST_IP1, "delete", "t40_project_allow_v4", id="deny-ipv4"),
     ],
 )
 def test_allow_and_deny_use_expected_nft_set(
@@ -1117,7 +1117,7 @@ class TestPreStartDnsTierBranches:
         args = harness.mode.pre_start("test", ["dev-standard"])
 
         # dnsmasq tier: resolve_and_cache called with BOTH domains and raw IPs so
-        # the initial allow_v4/v6 sets have permanent seed entries.
+        # the initial t40_project_allow_v4/v6 sets have permanent seed entries.
         harness.dns.resolve_and_cache.assert_called_once()
         call_entries = harness.dns.resolve_and_cache.call_args[0][0]
         assert TEST_IP1 in call_entries
@@ -1351,7 +1351,7 @@ def test_pre_start_with_denied_ips_includes_deny_elements(
     harness.mode.pre_start("test", ["dev-standard"])
 
     ruleset = StateBundle(config.state_dir).ruleset.read_text()
-    assert "deny_v4" in ruleset
+    assert "t20_security_deny_v4" in ruleset
     assert TEST_IP1 in ruleset
 
 

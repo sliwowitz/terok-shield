@@ -36,7 +36,9 @@ class TestFirewallAllowing:
         """HTTP traffic to an allowed IP is permitted."""
         r = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert r.returncode == 0, f"Ruleset apply failed: {r.stderr}"
-        r = nsenter_nft(container_pid, stdin=add_elements("allow_v4", ALLOWED_TARGET_IPS))
+        r = nsenter_nft(
+            container_pid, stdin=add_elements("t40_project_allow_v4", ALLOWED_TARGET_IPS)
+        )
         assert r.returncode == 0, f"Add elements failed: {r.stderr}"
 
         post = _wget(container, ALLOWED_TARGET_HTTP, timeout=10)
@@ -46,7 +48,9 @@ class TestFirewallAllowing:
         """HTTPS traffic to an allowed IP is permitted."""
         r = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert r.returncode == 0, f"Ruleset apply failed: {r.stderr}"
-        r = nsenter_nft(container_pid, stdin=add_elements("allow_v4", ALLOWED_TARGET_IPS))
+        r = nsenter_nft(
+            container_pid, stdin=add_elements("t40_project_allow_v4", ALLOWED_TARGET_IPS)
+        )
         assert r.returncode == 0, f"Add elements failed: {r.stderr}"
 
         post = _wget(container, ALLOWED_TARGET_HTTPS, timeout=10)
@@ -56,7 +60,9 @@ class TestFirewallAllowing:
         """IPs not in the allow set remain blocked after adding others."""
         r = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert r.returncode == 0, f"Ruleset apply failed: {r.stderr}"
-        r = nsenter_nft(container_pid, stdin=add_elements("allow_v4", ALLOWED_TARGET_IPS))
+        r = nsenter_nft(
+            container_pid, stdin=add_elements("t40_project_allow_v4", ALLOWED_TARGET_IPS)
+        )
         assert r.returncode == 0, f"Add elements failed: {r.stderr}"
 
         blocked = _wget(container, BLOCKED_TARGET_HTTP, timeout=10)
@@ -66,7 +72,9 @@ class TestFirewallAllowing:
         """One IP allowed, another blocked — in the same container."""
         r = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert r.returncode == 0, f"Ruleset apply failed: {r.stderr}"
-        r = nsenter_nft(container_pid, stdin=add_elements("allow_v4", ALLOWED_TARGET_IPS))
+        r = nsenter_nft(
+            container_pid, stdin=add_elements("t40_project_allow_v4", ALLOWED_TARGET_IPS)
+        )
         assert r.returncode == 0, f"Add elements failed: {r.stderr}"
 
         allowed = _wget(container, ALLOWED_TARGET_HTTP, timeout=10)
@@ -92,16 +100,18 @@ class TestRFC1918Allow:
 
         applied = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert applied.returncode == 0, f"Ruleset apply failed: {applied.stderr}"
-        added = nsenter_nft(container_pid, stdin=add_elements("allow_v4", [RFC1918_HOST]))
+        added = nsenter_nft(
+            container_pid, stdin=add_elements("t40_project_allow_v4", [RFC1918_HOST])
+        )
         assert added.returncode == 0, f"Add elements failed: {added.stderr}"
 
         # Structural: allow set evaluates before RFC1918 reject
         listed = nsenter_nft(container_pid, "list", "ruleset")
         assert listed.returncode == 0, listed.stderr
         output = listed.stdout
-        allow_pos = output.find("@allow_v4")
+        allow_pos = output.find("@t40_project_allow_v4")
         rfc_pos = output.find(RFC1918[0])
-        assert allow_pos != -1, "allow_v4 set must be present"
+        assert allow_pos != -1, "t40_project_allow_v4 set must be present"
         assert rfc_pos != -1, "RFC1918 reject rules must be present"
         assert allow_pos < rfc_pos, "Allow set must precede RFC1918 reject rules"
 
