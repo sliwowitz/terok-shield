@@ -5,7 +5,13 @@
 
 import pytest
 
-from terok_shield.policy import PolicyEntry, parse_policy, render_policy
+from terok_shield.policy import (
+    LOCALHOST,
+    PolicyEntry,
+    localhost_ports,
+    parse_policy,
+    render_policy,
+)
 from tests.testfs import FORBIDDEN_TRAVERSAL
 from tests.testnet import (
     DEV_PYPI_DOMAIN,
@@ -85,6 +91,17 @@ def test_comment_bears_zero_load() -> None:
     assert entry == PolicyEntry("+", TEST_DOMAIN, None, {"reason": "keep"})
 
 
+def test_localhost_grant_parses_with_port() -> None:
+    """``+localhost:PORT`` parses as the reserved host-service grant."""
+    assert parse_policy("+localhost:8000") == [PolicyEntry("+", LOCALHOST, 8000)]
+
+
+def test_localhost_ports_extracts_grants() -> None:
+    """``localhost_ports`` collects every ``+localhost:PORT`` port, skipping other entries."""
+    entries = parse_policy(f"+localhost:8000\n+{TEST_DOMAIN}\n+localhost:9090\n")
+    assert localhost_ports(entries) == (8000, 9090)
+
+
 def test_round_trip_render_parse() -> None:
     """``parse_policy(render_policy(x)) == x`` — including bracketed IPv6 ports and metadata."""
     text = (
@@ -115,6 +132,8 @@ def test_round_trip_render_parse() -> None:
         f"+[{IPV6_VERBOSE_CANONICAL}]junk",  # trailing junk after ']'
         f"+{TEST_DOMAIN} bar",  # bare token without a '%' prefix
         f"+{TEST_DOMAIN} %nokey",  # metadata marker missing '=value'
+        "+localhost",  # reserved 'localhost' grant needs an explicit port
+        "-localhost:8000",  # 'localhost' is allow-only
     ],
 )
 def test_rejects_malformed(bad: str) -> None:
