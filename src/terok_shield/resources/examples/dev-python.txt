@@ -2,14 +2,14 @@
 # For projects that need broader Python infrastructure access
 
 # Package index (also in dev-standard)
-pypi.org
-files.pythonhosted.org
++pypi.org
++files.pythonhosted.org
 
 # Conda / Anaconda
-conda.anaconda.org
-repo.anaconda.com
++conda.anaconda.org
++repo.anaconda.com
 
 # Documentation
-docs.python.org
-readthedocs.org
-readthedocs.io
++docs.python.org
++readthedocs.org
++readthedocs.io

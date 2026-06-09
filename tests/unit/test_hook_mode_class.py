@@ -256,18 +256,18 @@ def test_allow_and_deny_use_expected_nft_set(
     )
 
 
-def test_allow_persists_and_deduplicates_live_allowed(
+def test_allow_persists_and_deduplicates_overlay(
     make_hook_mode: HookModeHarnessFactory,
     make_config: ConfigFactory,
 ) -> None:
-    """allow_ip() persists to live.allowed without duplicate lines."""
+    """allow_ip() records ``+ip`` in the overlay without duplicate lines."""
     harness = make_hook_mode(config=make_config())
 
     harness.mode.allow_ip("test-ctr", TEST_IP1)
     harness.mode.allow_ip("test-ctr", TEST_IP1)
 
-    lines = StateBundle(harness.config.state_dir).live_allowed.read_text().splitlines()
-    assert lines.count(TEST_IP1) == 1
+    lines = StateBundle(harness.config.state_dir).policy_live.read_text().splitlines()
+    assert lines.count(f"+{TEST_IP1}") == 1
 
 
 def test_allow_ip_uses_timeout_zero_in_dnsmasq_tier(
@@ -301,57 +301,44 @@ def test_allow_ip_no_timeout_zero_without_dnsmasq_tier(
 
 
 @pytest.mark.parametrize(
-    ("profile_lines", "live_lines", "expect_deny_file", "nft_side_effect"),
+    ("preallow", "nft_side_effect"),
     [
-        pytest.param([TEST_IP1], [], True, None, id="profile-ip-persists-to-deny-list"),
-        pytest.param([], [TEST_IP1], True, None, id="live-only-always-persists"),
-        pytest.param(
-            [TEST_IP1],
-            [TEST_IP1],
-            True,
-            ExecError(["nft"], 1, "not in set"),
-            id="nft-error-still-persists",
-        ),
+        pytest.param(True, None, id="allowed-ip-flips-to-deny"),
+        pytest.param(False, None, id="fresh-deny-persists"),
+        pytest.param(True, ExecError(["nft"], 1, "not in set"), id="nft-error-still-persists"),
     ],
 )
-def test_deny_updates_state_files(
+def test_deny_persists_to_overlay(
     make_hook_mode: HookModeHarnessFactory,
     make_config: ConfigFactory,
-    profile_lines: list[str],
-    live_lines: list[str],
-    expect_deny_file: bool,
+    preallow: bool,
     nft_side_effect: ExecError | None,
 ) -> None:
-    """deny_ip() removes live entries and optionally persists a deny.list record."""
+    """deny_ip() records ``-ip`` in the overlay regardless of source, even on nft error."""
     harness = make_hook_mode(config=make_config())
-    if profile_lines:
-        write_lines(StateBundle(harness.config.state_dir).profile_allowed, profile_lines)
-    if live_lines:
-        write_lines(StateBundle(harness.config.state_dir).live_allowed, live_lines)
+    bundle = StateBundle(harness.config.state_dir)
+    if preallow:
+        bundle.overlay_set("+", TEST_IP1)
     harness.runner.nft_via_nsenter.side_effect = nft_side_effect
 
     harness.mode.deny_ip("test-ctr", TEST_IP1)
 
-    live_path = StateBundle(harness.config.state_dir).live_allowed
-    live_content = live_path.read_text().splitlines() if live_path.exists() else []
-    assert TEST_IP1 not in live_content
-
-    deny_file = StateBundle(harness.config.state_dir).deny
-    assert deny_file.is_file() is expect_deny_file
-    if expect_deny_file:
-        assert TEST_IP1 in deny_file.read_text()
+    assert TEST_IP1 in bundle.read_denied_ips()
+    assert TEST_IP1 not in bundle.read_effective_ips()
 
 
-def test_allow_after_deny_clears_deny_list(
+def test_allow_after_deny_clears_deny(
     make_hook_mode: HookModeHarnessFactory,
     make_config: ConfigFactory,
 ) -> None:
-    """allow_ip() removes the IP from deny.list when re-allowing it."""
+    """allow_ip() flips a denied IP back to allowed in the overlay."""
     harness = make_hook_mode(config=make_config())
-    write_lines(StateBundle(harness.config.state_dir).deny, [TEST_IP1, TEST_IP2])
+    bundle = StateBundle(harness.config.state_dir)
+    bundle.overlay_set("-", TEST_IP1)
+    bundle.overlay_set("-", TEST_IP2)
 
     harness.mode.allow_ip("test-ctr", TEST_IP1)
-    denied = StateBundle(harness.config.state_dir).read_denied_ips()
+    denied = bundle.read_denied_ips()
     assert TEST_IP1 not in denied
     assert TEST_IP2 in denied
 
@@ -426,7 +413,7 @@ def test_shield_up_reapplies_hook_ruleset(
     """shield_up() restores hook mode, optionally re-adding effective IPs."""
     harness = make_hook_mode(config=make_config())
     if allowed_ips:
-        write_lines(StateBundle(harness.config.state_dir).profile_allowed, allowed_ips)
+        write_lines(StateBundle(harness.config.state_dir).resolved_cache, allowed_ips)
     # Mock DNS reading so _container_ruleset returns the mock ruleset
     harness.mode._container_ruleset = lambda _c: harness.ruleset
     # shield_state() call (list_rules) returns existing table (UP state)
@@ -953,7 +940,7 @@ class TestDomainOperations:
     def test_allow_domain_persists_and_reloads(
         self, make_hook_mode: HookModeHarnessFactory
     ) -> None:
-        """allow_domain() writes domain to live.domains and sends SIGHUP."""
+        """allow_domain() records ``+domain`` in the overlay and sends SIGHUP."""
         harness = make_hook_mode()
         sd = harness.config.state_dir.resolve()
         StateBundle(sd).ensure_dirs()
@@ -968,28 +955,30 @@ class TestDomainOperations:
         ):
             harness.mode.allow_domain(TEST_DOMAIN)
 
-        domains = StateBundle(sd).live_domains.read_text()
-        assert TEST_DOMAIN in domains
+        domains = StateBundle(sd).policy_live.read_text()
+        assert f"+{TEST_DOMAIN}" in domains
 
-    def test_allow_domain_skips_duplicate(self, make_hook_mode: HookModeHarnessFactory) -> None:
-        """allow_domain() is a no-op for already-present domains."""
+    def test_allow_domain_reloads_dnsmasq(self, make_hook_mode: HookModeHarnessFactory) -> None:
+        """allow_domain() records the overlay entry and reloads dnsmasq."""
         harness = make_hook_mode()
         sd = harness.config.state_dir.resolve()
         StateBundle(sd).ensure_dirs()
-        StateBundle(sd).profile_domains.write_text(f"{TEST_DOMAIN}\n")
+        StateBundle(sd).dns_tier.write_text("dnsmasq\n")
+        StateBundle(sd).upstream_dns.write_text("169.254.1.1\n")
 
         with mock.patch("terok_shield.dns.dnsmasq.reload") as mock_reload:
             harness.mode.allow_domain(TEST_DOMAIN)
-        mock_reload.assert_not_called()
+        mock_reload.assert_called_once()
 
     def test_deny_domain_removes_and_reloads(self, make_hook_mode: HookModeHarnessFactory) -> None:
-        """deny_domain() adds domain to denied.domains and reloads."""
+        """deny_domain() records ``-domain`` in the overlay and excludes it from the dnsmasq set."""
         harness = make_hook_mode()
         sd = harness.config.state_dir.resolve()
-        StateBundle(sd).ensure_dirs()
-        StateBundle(sd).profile_domains.write_text(f"{TEST_DOMAIN}\n")
-        StateBundle(sd).upstream_dns.write_text("169.254.1.1\n")
-        StateBundle(sd).dnsmasq_pid.write_text("12345\n")
+        bundle = StateBundle(sd)
+        bundle.ensure_dirs()
+        bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
+        bundle.upstream_dns.write_text("169.254.1.1\n")
+        bundle.dnsmasq_pid.write_text("12345\n")
 
         with (
             mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
@@ -997,11 +986,9 @@ class TestDomainOperations:
         ):
             harness.mode.deny_domain(TEST_DOMAIN)
 
-        # Domain is in denied.domains, excluded from merged set
         from terok_shield.dns.dnsmasq import read_merged_domains
 
-        denied = StateBundle(sd).denied_domains.read_text()
-        assert TEST_DOMAIN in denied
+        assert f"-{TEST_DOMAIN}" in bundle.policy_live.read_text()
         assert TEST_DOMAIN not in read_merged_domains(sd)
 
     def test_reload_raises_without_upstream_dns(
@@ -1039,8 +1026,8 @@ class TestDomainOperations:
 
         # Must not raise
         getattr(harness.mode, method_name)(TEST_DOMAIN)
-        # And must not have written any domain state files
-        assert not StateBundle(sd).live_domains.exists()
+        # And must not have written the runtime overlay
+        assert not StateBundle(sd).policy_live.exists()
 
     def test_allow_domain_passes_when_tier_absent(
         self, make_hook_mode: HookModeHarnessFactory
@@ -1059,8 +1046,8 @@ class TestDomainOperations:
         ):
             harness.mode.allow_domain(TEST_DOMAIN)
 
-        domains = StateBundle(sd).live_domains.read_text()
-        assert TEST_DOMAIN in domains
+        domains = StateBundle(sd).policy_live.read_text()
+        assert f"+{TEST_DOMAIN}" in domains
 
 
 class TestPreStartDnsTierBranches:
@@ -1122,11 +1109,11 @@ class TestPreStartDnsTierBranches:
         call_entries = harness.dns.resolve_and_cache.call_args[0][0]
         assert TEST_IP1 in call_entries
         assert TEST_DOMAIN in call_entries
-        # Domains also written to profile.domains so dnsmasq's --nftset can
-        # add on-demand as new A/AAAA records come back.
+        # The composed profiles are written to the project-allow tier (domains
+        # included) so dnsmasq's --nftset can add on-demand as new records arrive.
         sd = harness.config.state_dir.resolve()
-        domains_content = StateBundle(sd).profile_domains.read_text()
-        assert TEST_DOMAIN in domains_content
+        project_allow = StateBundle(sd).tier_path("project_allow").read_text()
+        assert f"+{TEST_DOMAIN}" in project_allow
         # No --dns flag (triggers pasta to bind host port 53, fails rootless).
         # Instead, resolv.conf is pre-written and bind-mounted :ro via --volume.
         assert "--dns" not in args
@@ -1197,13 +1184,15 @@ class TestDenyDomainWithReload:
     """deny_domain() removes domain and triggers dnsmasq reload."""
 
     def test_deny_domain_triggers_reload(self, make_hook_mode: HookModeHarnessFactory) -> None:
-        """deny_domain() removes domain from live.domains and reloads dnsmasq."""
+        """deny_domain() records ``-domain`` in the overlay and reloads dnsmasq."""
         harness = make_hook_mode()
         sd = harness.config.state_dir.resolve()
-        StateBundle(sd).ensure_dirs()
-        StateBundle(sd).live_domains.write_text(f"{TEST_DOMAIN}\n")
-        StateBundle(sd).upstream_dns.write_text("169.254.1.1\n")
-        StateBundle(sd).dnsmasq_pid.write_text("12345\n")
+        bundle = StateBundle(sd)
+        bundle.ensure_dirs()
+        bundle.dns_tier.write_text("dnsmasq\n")
+        bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
+        bundle.upstream_dns.write_text("169.254.1.1\n")
+        bundle.dnsmasq_pid.write_text("12345\n")
 
         with (
             mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
@@ -1211,20 +1200,22 @@ class TestDenyDomainWithReload:
         ):
             harness.mode.deny_domain(TEST_DOMAIN)
 
-        denied = StateBundle(sd).denied_domains.read_text()
-        assert TEST_DOMAIN in denied
+        assert f"-{TEST_DOMAIN}" in bundle.policy_live.read_text()
 
-    def test_deny_domain_noop_when_not_present(
+    def test_deny_domain_reloads_on_dnsmasq_tier(
         self, make_hook_mode: HookModeHarnessFactory
     ) -> None:
-        """deny_domain() is a no-op when the domain is not in any domain file."""
+        """deny_domain() reloads dnsmasq on the dnsmasq tier (no dedup skip)."""
         harness = make_hook_mode()
         sd = harness.config.state_dir.resolve()
-        StateBundle(sd).ensure_dirs()
+        bundle = StateBundle(sd)
+        bundle.ensure_dirs()
+        bundle.dns_tier.write_text("dnsmasq\n")
+        bundle.upstream_dns.write_text("169.254.1.1\n")
 
         with mock.patch("terok_shield.dns.dnsmasq.reload") as mock_reload:
             harness.mode.deny_domain(TEST_DOMAIN)
-        mock_reload.assert_not_called()
+        mock_reload.assert_called_once()
 
 
 class TestContainerRulesetDnsTier:
@@ -1346,7 +1337,9 @@ def test_pre_start_with_denied_ips_includes_deny_elements(
     harness.profiles.compose_profiles.return_value = []
 
     # Write a deny.list before pre_start
-    StateBundle(config.state_dir).deny.write_text(f"{TEST_IP1}\n")
+    _b = StateBundle(config.state_dir)
+    _b.ensure_dirs()
+    _b.write_tier("security_deny", f"-{TEST_IP1}\n")
 
     harness.mode.pre_start("test", ["dev-standard"])
 
@@ -1393,7 +1386,9 @@ def test_shield_up_repopulates_deny_sets(
     harness.ruleset.verify_bypass.return_value = ["not bypass"]
 
     # Write a deny.list
-    StateBundle(config.state_dir).deny.write_text(f"{TEST_IP1}\n")
+    _b = StateBundle(config.state_dir)
+    _b.ensure_dirs()
+    _b.write_tier("security_deny", f"-{TEST_IP1}\n")
 
     harness.mode.shield_up("test-ctr")
 
@@ -1415,7 +1410,9 @@ def test_shield_down_repopulates_deny_sets(
     harness.ruleset.verify_bypass.return_value = []
 
     # Write a deny.list before going down
-    StateBundle(config.state_dir).deny.write_text(f"{TEST_IP1}\n")
+    _b = StateBundle(config.state_dir)
+    _b.ensure_dirs()
+    _b.write_tier("security_deny", f"-{TEST_IP1}\n")
 
     harness.mode.shield_down("test-ctr", allow_all=False)
 

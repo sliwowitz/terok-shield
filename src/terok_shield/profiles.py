@@ -6,15 +6,21 @@
 Finds, reads, and merges ``.txt`` allowlist profiles from user and
 bundled directories.  User profiles override bundled ones with the
 same name, so site-specific customisation works without forking.
+
+Profiles are unified ``+``/``-`` policy files; a loaded profile yields
+its admitted (``+``) targets.  The bundled set ships under
+``resources/examples`` as low-value samples — the real default content
+is owned by terok-executor and terok.
 """
 # WAYPOINT: Shield (__init__), HookMode (hooks.mode)
 
 from importlib import resources as importlib_resources
 from pathlib import Path
 
-from .validation import parse_entries as _parse_entries, validate_safe_name
+from .policy import parse_policy
+from .validation import validate_safe_name
 
-_BUNDLED_PACKAGE = "terok_shield.resources.dns"
+_BUNDLED_PACKAGE = "terok_shield.resources.examples"
 
 
 class ProfileLoader:
@@ -40,7 +46,7 @@ class ProfileLoader:
         self._bundled_dir = bundled_dir or _bundled_dir()
 
     def load_profile(self, name: str) -> list[str]:
-        """Load a profile by name and return its entries.
+        """Load a profile by name and return its admitted (``+``) targets.
 
         User profiles take precedence over bundled profiles.
 
@@ -51,7 +57,7 @@ class ProfileLoader:
         path = self._find_profile(name)
         if path is None:
             raise FileNotFoundError(f"Profile not found: {name!r}")
-        return _parse_entries(path.read_text())
+        return [e.target for e in parse_policy(path.read_text()) if e.action == "+"]
 
     def compose_profiles(self, names: list[str]) -> list[str]:
         """Load and merge multiple profiles, deduplicating entries.

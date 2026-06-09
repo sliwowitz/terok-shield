@@ -475,9 +475,16 @@ class Shield:
         entries = self.profiles.compose_profiles(profiles)
         if not entries:
             return []
+        bundle = StateBundle(self.config.state_dir)
+        bundle.ensure_dirs()
+        bundle.write_tier("project_allow", "".join(f"+{e}\n" for e in entries))
         max_age = 0 if force else 3600
-        cache_path = StateBundle(self.config.state_dir).profile_allowed
-        return self.dns.resolve_and_cache(entries, cache_path, max_age=max_age)
+        return self.dns.resolve_and_cache(
+            bundle.read_effective().allow_targets(),
+            bundle.resolved_cache,
+            max_age=max_age,
+            source_mtime=bundle.policy_mtime(),
+        )
 
     def profiles_list(self) -> list[str]:
         """List available profile names."""

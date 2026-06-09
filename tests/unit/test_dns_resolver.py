@@ -141,7 +141,7 @@ def test_resolve_and_cache_writes_cache(
     harness = make_resolver()
     harness.runner.dig_all.return_value = [TEST_IP1]
 
-    cache_path = StateBundle(tmp_path).profile_allowed
+    cache_path = StateBundle(tmp_path).resolved_cache
     assert harness.resolver.resolve_and_cache([TEST_DOMAIN], cache_path) == [TEST_IP1]
     assert cache_path.is_file()
 
@@ -152,7 +152,7 @@ def test_resolve_and_cache_returns_fresh_cache(
 ) -> None:
     """resolve_and_cache() returns fresh cached IPs without re-resolving DNS."""
     harness = make_resolver()
-    cache_path = StateBundle(tmp_path).profile_allowed
+    cache_path = StateBundle(tmp_path).resolved_cache
     cache_path.write_text(f"{TEST_IP1}\n{TEST_IP2}\n")
 
     assert harness.resolver.resolve_and_cache([TEST_DOMAIN], cache_path, max_age=3600) == [
@@ -170,7 +170,7 @@ def test_resolve_and_cache_re_resolves_stale_cache(
     harness = make_resolver()
     harness.runner.dig_all.return_value = [TEST_IP2]
 
-    cache_path = StateBundle(tmp_path).profile_allowed
+    cache_path = StateBundle(tmp_path).resolved_cache
     cache_path.write_text(f"{TEST_IP1}\n")
     os.utime(cache_path, (0, 0))
 
@@ -223,7 +223,7 @@ def test_resolve_and_cache_mixed_entries(
     harness = make_resolver()
     harness.runner.dig_all.return_value = [TEST_IP2]
 
-    cache_path = StateBundle(tmp_path).profile_allowed
+    cache_path = StateBundle(tmp_path).resolved_cache
     result = harness.resolver.resolve_and_cache([TEST_IP1, TEST_DOMAIN], cache_path)
     assert TEST_IP1 in result
     assert TEST_IP2 in result
