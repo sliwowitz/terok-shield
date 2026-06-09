@@ -123,9 +123,16 @@ class EffectivePolicy:
         return localhost_ports(self.all_entries())
 
     def _allows(self) -> list[PolicyEntry]:
-        """Every admitting (``+``) entry: provider + project + live's ``+``."""
+        """Admitting (``+``) entries (provider + project + live) a deny tier does not refuse.
+
+        Subtracting the denied targets keeps a ``-domain`` from being resolved
+        into ``resolved.ips`` and re-admitted through the t40 set.  (Tier-10
+        break-glass overrides are a *separate* nft set, above the deny tier —
+        they are not composed here.)
+        """
+        denied = {e.target for e in self._denies()}
         pool = [*self.provider_allow, *self.project_allow, *self.live]
-        return [e for e in pool if e.action == "+"]
+        return [e for e in pool if e.action == "+" and e.target not in denied]
 
     def _denies(self) -> list[PolicyEntry]:
         """Every refusing (``-``) entry: security-deny + live's ``-``."""

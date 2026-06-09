@@ -92,14 +92,20 @@ def render_policy(entries: list[PolicyEntry]) -> str:
         # is indistinguishable from a longer IPv6 address on re-parse.
         host = f"[{e.target}]" if (e.port is not None and ":" in e.target) else e.target
         line = f"{e.action}{host}" + (f":{e.port}" if e.port is not None else "")
-        line += "".join(f" %{key}={value}" for key, value in e.meta.items())
+        line += "".join(f" %{key}={value}" for key, value in sorted(e.meta.items()))
         lines.append(line)
     return "\n".join(lines) + "\n" if lines else ""
 
 
 def localhost_ports(entries: list[PolicyEntry]) -> tuple[int, ...]:
-    """Ports from the ``+localhost:PORT`` host-service grants, fed to the builder's ``loopback_ports``."""
-    return tuple(e.port for e in entries if e.target == LOCALHOST and e.port is not None)
+    """Ports from the ``+localhost:PORT`` host-service grants, fed to the builder's ``loopback_ports``.
+
+    Only admitting (``+``) entries grant a port — a programmatically built
+    ``-localhost`` entry (which ``parse_policy`` would reject) is never a grant.
+    """
+    return tuple(
+        e.port for e in entries if e.action == "+" and e.target == LOCALHOST and e.port is not None
+    )
 
 
 def is_ip(target: str) -> bool:
