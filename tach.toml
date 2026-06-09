@@ -49,11 +49,17 @@ depends_on = [
     "terok_shield.nft.constants",
 ]
 
+# Unified +/- policy line format — stdlib-only parser, importable anywhere
+[[modules]]
+path = "terok_shield.policy"
+layer = "foundation"
+depends_on = []
+
 # Per-container state bundle layout — imports host-wide path constants
 [[modules]]
 path = "terok_shield.state"
 layer = "foundation"
-depends_on = ["terok_shield.paths"]
+depends_on = ["terok_shield.paths", "terok_shield.policy"]
 
 # Host-wide filesystem paths (reader script, hook entrypoint filename)
 [[modules]]
