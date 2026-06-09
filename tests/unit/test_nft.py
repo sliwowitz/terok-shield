@@ -26,7 +26,10 @@ from terok_shield.nft.rules import (
     add_deny_elements_dual,
     add_elements,
     add_elements_dual,
+    add_override_elements_dual,
+    arm_bypass_window,
     delete_deny_elements_dual,
+    disarm_bypass_window,
     safe_ip,
 )
 
@@ -483,6 +486,36 @@ def test_delete_deny_elements_dual_classifies_by_family(ips: list[str], expected
 def test_delete_deny_elements_dual_returns_empty_when_no_valid_ips(ips: list[str]) -> None:
     """delete_deny_elements_dual() returns empty when all inputs are invalid."""
     assert delete_deny_elements_dual(ips) == ""
+
+
+# ── override set + bypass window ─────────────────────────
+
+
+def test_add_override_elements_dual_targets_the_override_set() -> None:
+    """add_override_elements_dual() routes IPs to the tier-10 override sets."""
+    cmd = add_override_elements_dual([TEST_IP1, IPV6_CLOUDFLARE])
+    assert _add_element_command("t10_override_v4", TEST_IP1) in cmd
+    assert _add_element_command("t10_override_v6", IPV6_CLOUDFLARE) in cmd
+
+
+def test_arm_bypass_window_adds_default_routes_with_timeout() -> None:
+    """arm_bypass_window() adds 0.0.0.0/0 and ::/0 to the timed sets with the timeout."""
+    cmd = arm_bypass_window("30m")
+    assert f"add element {NFT_TABLE} bypass_window_v4 {{ 0.0.0.0/0 timeout 30m }}" in cmd
+    assert f"add element {NFT_TABLE} bypass_window_v6 {{ ::/0 timeout 30m }}" in cmd
+
+
+def test_arm_bypass_window_rejects_bad_timeout() -> None:
+    """arm_bypass_window() validates the timeout before interpolating it."""
+    with pytest.raises(ValueError):
+        arm_bypass_window("30m; drop")
+
+
+def test_disarm_bypass_window_flushes_both_families() -> None:
+    """disarm_bypass_window() flushes the v4 and v6 timed sets."""
+    cmd = disarm_bypass_window()
+    assert f"flush set {NFT_TABLE} bypass_window_v4" in cmd
+    assert f"flush set {NFT_TABLE} bypass_window_v6" in cmd
 
 
 # ── verify_hook() -----------------------------------------------------
