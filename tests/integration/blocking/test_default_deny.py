@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from terok_shield.nft.constants import IPV6_PRIVATE, RFC1918
+from terok_shield.nft.constants import HARD_DENY_RANGES, PRIVATE_RANGES
 from terok_shield.nft.rules import RulesetBuilder
 from tests.testnet import (
     ALLOWED_TARGET_HTTP,
@@ -126,8 +126,8 @@ class TestFirewallBlocking:
         # Structural: all RFC1918 reject rules present
         listed = nsenter_nft(container_pid, "list", "ruleset")
         assert listed.returncode == 0, listed.stderr
-        for net in RFC1918:
-            assert net in listed.stdout, f"Missing RFC1918 block for {net}"
+        for net in (n for n in HARD_DENY_RANGES + PRIVATE_RANGES if "." in n):
+            assert net in listed.stdout, f"Missing block for {net}"
 
 
 # ── IPv6 default-deny ───────────────────────────────────────────────
@@ -153,7 +153,7 @@ class TestFirewallBlockingIPv6:
         assert listed.returncode == 0, listed.stderr
         output = listed.stdout
         assert "allow_v6" in output, "allow_v6 set must be in applied ruleset"
-        for net in IPV6_PRIVATE:
+        for net in (n for n in HARD_DENY_RANGES + PRIVATE_RANGES if ":" in n):
             assert net in output, f"IPv6 private reject rule for {net} missing"
 
     def test_ipv6_icmp_blocked(self, container: str, container_pid: str) -> None:

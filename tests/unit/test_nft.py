@@ -14,11 +14,10 @@ import pytest
 from terok_shield.nft.constants import (
     BLOCKED_LOG_PREFIX,
     BYPASS_LOG_PREFIX,
-    IPV6_PRIVATE,
+    HARD_DENY_RANGES,
     NFT_TABLE,
     PASTA_HOST_LOOPBACK_MAP,
     PRIVATE_RANGES,
-    RFC1918,
 )
 from terok_shield.nft.rules import (
     RulesetBuilder,
@@ -153,11 +152,11 @@ def test_hook_ruleset_contains_required_fragments(fragment: str) -> None:
     assert fragment in RulesetBuilder().build_hook()
 
 
-def test_hook_ruleset_blocks_all_private_ranges() -> None:
-    """Every RFC1918 and IPv6 private/link-local range must be rejected in enforce mode."""
+def test_hook_ruleset_blocks_all_private_and_hard_deny_ranges() -> None:
+    """Every hard-deny (link-local/IMDS) and private (RFC1918/ULA) range is rejected."""
     rs = RulesetBuilder().build_hook()
-    for net in PRIVATE_RANGES:
-        assert net in rs, f"Private range {net!r} missing from hook ruleset"
+    for net in HARD_DENY_RANGES + PRIVATE_RANGES:
+        assert net in rs, f"Range {net!r} missing from hook ruleset"
 
 
 def test_hook_ruleset_accepts_dns_to_the_configured_forwarder() -> None:
@@ -208,19 +207,21 @@ def test_hook_ruleset_emits_one_rule_per_loopback_port(
         assert ruleset.index(rule) < ruleset.index("169.254.0.0/16")
 
 
-def test_hook_ruleset_places_allow_sets_before_private_range_rejects() -> None:
-    """Allow-set accepts must precede the private-range reject rules."""
-    ruleset = RulesetBuilder().build_hook()
-    assert ruleset.index("@allow_v4") < ruleset.index(RFC1918[0])
+def test_hook_ruleset_tier_order_is_authority_order() -> None:
+    """Tier order is the authority order: hard-deny < override < deny < private < allow.
 
-
-def test_hook_ruleset_places_deny_sets_between_allow_and_private() -> None:
-    """Deny-set reject rules appear after allow-set accepts and before private-range rejects."""
-    ruleset = RulesetBuilder().build_hook()
-    allow_pos = ruleset.index("@allow_v4")
-    deny_pos = ruleset.index("@deny_v4")
-    private_pos = ruleset.index(RFC1918[0])
-    assert allow_pos < deny_pos < private_pos
+    The deny tier sits ABOVE the allow tier, so an explicit deny wins over an
+    allow; the override tier sits above the deny (the only way past a
+    security-deny); and the hard-deny floor (link-local/IMDS) sits above the
+    override — absolute, not even override-able.
+    """
+    rs = RulesetBuilder().build_hook()
+    hard_deny = rs.index(HARD_DENY_RANGES[0])  # 169.254.0.0/16
+    override = rs.index("@override_v4")
+    deny = rs.index("@deny_v4")
+    private = rs.index(PRIVATE_RANGES[0])  # 10.0.0.0/8
+    allow = rs.index("@allow_v4")
+    assert hard_deny < override < deny < private < allow
 
 
 # ── Terminal deny rule (BLOCKED prefix) ───────────────
@@ -539,13 +540,16 @@ def test_verify_hook_reports_each_missing_private_range_rule() -> None:
 
 def test_verify_hook_reports_missing_ipv6_private_ranges_independently() -> None:
     """Missing IPv6 private-range rejects are reported separately from IPv4 ones."""
+    ipv4_private = tuple(n for n in PRIVATE_RANGES if "." in n)
+    ipv6_private = tuple(n for n in PRIVATE_RANGES if ":" in n)
     errors = _builder.verify_hook(
         "chain output { type filter hook output priority filter; policy drop;\n"
         "chain input { policy drop;\n"
-        f"{_DENY_LOG_PREFIX} {_ADMIN_PROHIBITED} allow_v4 allow_v6\n{_private_reject_rules(RFC1918)}\n@allow_v4 }}"
+        f"{_DENY_LOG_PREFIX} {_ADMIN_PROHIBITED} allow_v4 allow_v6\n"
+        f"{_private_reject_rules(ipv4_private)}\n@allow_v4 }}"
     )
-    ipv6_errors = [error for error in errors if "Private-range" in error and ":" in error]
-    assert len(ipv6_errors) == len(IPV6_PRIVATE)
+    ipv6_errors = [e for e in errors if "Private-range" in e and ":" in e]
+    assert len(ipv6_errors) == len(ipv6_private)
 
 
 def test_verify_hook_rejects_a_bypass_ruleset() -> None:
@@ -865,7 +869,7 @@ class TestGatewayPortRules:
         """Gateway accept rules appear before private-range reject rules."""
         rs = self._gw_builder().build_hook()
         gw_pos = rs.index(f"ip daddr {self._GW_V4} accept")
-        private_pos = rs.index(RFC1918[0])
+        private_pos = rs.index(PRIVATE_RANGES[0])
         assert gw_pos < private_pos
 
     def test_gateway_multiple_ports(self) -> None:
@@ -932,10 +936,15 @@ class TestSetTimeout:
     """nft set declarations with optional timeout for dnsmasq mode."""
 
     def test_hook_ruleset_without_timeout(self) -> None:
-        """Default rulesets have no timeout in set declarations."""
+        """Without set_timeout, the allow sets carry no element timeout.
+
+        (The bypass_window set always declares the ``timeout`` flag — its
+        elements expire to close the timed allow-all window — so a blanket
+        "timeout absent" assertion no longer holds.)
+        """
         rs = RulesetBuilder().build_hook()
-        assert "flags interval;" in rs
-        assert "timeout" not in rs
+        assert "set allow_v4 { type ipv4_addr; flags interval; }" in rs
+        assert "timeout 30m" not in rs  # no dnsmasq-tier default element timeout
 
     def test_hook_ruleset_with_timeout(self) -> None:
         """With set_timeout, sets get interval+timeout flags."""
