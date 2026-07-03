@@ -17,6 +17,7 @@ test: test-unit
 
 # Run linter and format checker (fast, run before commits)
 lint:
+	@if LC_ALL=C grep -nP '[^\x00-\x7F]' pyproject.toml; then echo "pyproject.toml must be ASCII-only"; exit 1; fi
 	mkdir -p $(REPORTS_DIR)
 	poetry run ruff check --exit-zero --output-format=json --output-file=$(RUFF_REPORT) .
 	poetry run ruff check .
@@ -63,7 +64,7 @@ test-integration:
 	mkdir -p $(REPORTS_DIR)
 	poetry run pytest tests/integration/ -v --junitxml=$(INTEGRATION_JUNIT_XML) -o junit_family=legacy
 
-# Multi-distro integration test matrix (Debian 12/13, Ubuntu 24.04/26.04, Fedora 43/44, podman:stable)
+# Multi-distro integration test matrix (Debian 12/13, Ubuntu 24.04/26.04, Fedora 43/44, Alpine (non-systemd), podman:stable)
 # Options (env vars):
 #   NO_CACHE=1    Rebuild images from scratch (ignore layer cache)
 #   BUILD_ONLY=1  Build images without running tests

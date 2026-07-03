@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from terok_shield.podman_info import has_global_hooks, parse_podman_info
-from terok_shield.run import find_nft
+from terok_shield.run import find_nft, which_sbin_aware
 from tests.testnet import ALLOWED_TARGET_IPS
 
 from .helpers import start_shielded_container
@@ -37,6 +37,36 @@ from .helpers import start_shielded_container
 IMAGE = "docker.io/library/alpine:latest"
 CTR_PREFIX = "shield-itest"
 _PODMAN_RM_TIMEOUT = 60
+
+
+class ShieldedContainer(str):
+    """A container name (``str``) that also carries its real podman id.
+
+    Behaves as the operator-facing container name everywhere a plain name
+    string is expected (``.name`` mirrors the ``str`` value), while also
+    exposing the full 64-hex podman container id via ``.id`` — the
+    ``--container-id`` routing key now required by
+    [`Shield.down`][terok_shield.Shield.down] /
+    [`Shield.up`][terok_shield.Shield.up].
+    """
+
+    _cid: str
+
+    def __new__(cls, name: str, cid: str) -> "ShieldedContainer":
+        """Create the name-string carrying container id ``cid``."""
+        obj = super().__new__(cls, name)
+        obj._cid = cid
+        return obj
+
+    @property
+    def name(self) -> str:
+        """The operator-facing container name (the ``str`` value)."""
+        return str(self)
+
+    @property
+    def id(self) -> str:
+        """The full 64-hex podman container id."""
+        return self._cid
 
 
 def _podman_rm(name: str) -> None:
@@ -87,6 +117,44 @@ nft_missing = pytest.mark.skipif(not find_nft(), reason="nft not installed")
 dig_missing = pytest.mark.skipif(not _has("dig"), reason="dig not installed")
 
 
+def _dig_functional() -> bool:
+    """Whether dig can execute at all — present-but-crashing builds exist.
+
+    Mageia's aarch64 bind (jemalloc built for 4K pages) SIGABRTs on
+    64K-page kernels before sending a single query; dig-tier tests must
+    skip there with the real reason, not fail on empty output.
+    """
+    if not _has("dig"):
+        return False
+    try:
+        return (
+            subprocess.run(["dig", "+short", ".", "NS"], capture_output=True, timeout=10).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+dig_broken = pytest.mark.skipif(
+    _has("dig") and not _dig_functional(),
+    reason="dig present but non-functional on this host",
+)
+
+
+def _infra_problem(message: str) -> None:
+    """Broken container infrastructure: skip locally, fail in the matrix.
+
+    The matrix images guarantee working nested podman, so a failed
+    pre-check there is a real finding that must turn the slot red —
+    skipping let a collapsed slot report green (95 skips in 5 seconds).
+    Outside the matrix (TEROK_MATRIX unset) a missing capability is a
+    legitimate host limitation and skipping stays correct.
+    """
+    if os.environ.get("TEROK_MATRIX"):
+        pytest.fail(message, pytrace=False)
+    pytest.skip(message)
+
+
 def _hooks_available() -> bool:
     """Return True if OCI hooks will fire on container start.
 
@@ -104,6 +172,53 @@ def _hooks_available() -> bool:
         ).stdout
         return parse_podman_info(output).hooks_dir_persists
     return False
+
+
+# -- Matrix capability contract ------------------------------
+# On a dev machine a missing binary is a host limitation, and the skip
+# guards above are the right degradation.  Inside the matrix the harness
+# BUILT the image, so every capability it declares (TEROK_EXPECT,
+# exported by run-matrix.sh) is a contract: absence means the slot is
+# broken and must fail at session start — not dissolve into skips that
+# read as green (a collapsed slot once reported PASS on 95 skips).
+# Presence-level probes only: host-dependent dysfunction (dig_broken on
+# 64K-page kernels) stays a visible skip, because the image cannot
+# control it.
+
+_CAPABILITY_PROBES = {
+    "podman": lambda: _has("podman"),
+    "nft": lambda: bool(find_nft()),
+    "dnsmasq": lambda: bool(which_sbin_aware("dnsmasq")),
+    "dig": lambda: _has("dig"),
+    "getent": lambda: _has("getent"),
+    "hooks": _hooks_available,
+    "internet": lambda: _tcp_reachable(ALLOWED_TARGET_IPS[0], 53),
+}
+
+
+def _tcp_reachable(ip: str, port: int, timeout: float = 5.0) -> bool:
+    """Whether a TCP connection to ``ip:port`` succeeds within *timeout*."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Fail the whole session when the matrix capability contract is broken."""
+    expected = {c for c in os.environ.get("TEROK_EXPECT", "").split(",") if c}
+    if not expected:
+        return
+    unknown = expected - _CAPABILITY_PROBES.keys()
+    if unknown:
+        pytest.exit(f"TEROK_EXPECT names unknown capabilities: {sorted(unknown)}", returncode=3)
+    missing = sorted(cap for cap in expected if not _CAPABILITY_PROBES[cap]())
+    if missing:
+        pytest.exit(
+            "matrix capability contract broken — expected but missing: " + ", ".join(missing),
+            returncode=3,
+        )
 
 
 _hooks_available_cached = _hooks_available()
@@ -213,9 +328,10 @@ def nft_in_netns(_pull_image: None, _verify_connectivity: None) -> None:
             timeout=10,
         )
         if r.returncode != 0:
-            pytest.skip(f"nft not usable inside container netns: {r.stderr.strip()}")
+            _infra_problem(f"nft not usable inside container netns: {r.stderr.strip()}")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        pytest.skip(f"nft pre-check failed: {e}")
+        stderr = getattr(e, "stderr", b"") or b""
+        _infra_problem(f"nft pre-check failed: {e}: {stderr.decode(errors='replace').strip()}")
     finally:
         _podman_rm(name)
 
@@ -225,12 +341,19 @@ def container(_pull_image: None) -> Iterator[str]:
     """Start a disposable Alpine container, yield its name, clean up after."""
     name = f"{CTR_PREFIX}-{os.getpid()}"
     _podman_rm(name)
-    subprocess.run(
-        ["podman", "run", "-d", "--name", name, IMAGE, "sleep", "120"],
-        check=True,
-        capture_output=True,
-        timeout=30,
-    )
+    try:
+        subprocess.run(
+            ["podman", "run", "-d", "--name", name, IMAGE, "sleep", "120"],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as e:
+        # CalledProcessError hides stderr — surface the runtime's actual
+        # complaint (this exact blindness cost a full matrix round).
+        raise RuntimeError(
+            f"podman run failed for {name}: {(e.stderr or b'').decode(errors='replace').strip()}"
+        ) from e
     yield name
     _podman_rm(name)
 
@@ -301,7 +424,7 @@ def nsenter_nft(pid: str, *args: str, stdin: str | None = None) -> subprocess.Co
 def shielded_container(
     _pull_image: None,
     shield_env: Path,
-) -> Iterator[str]:
+) -> Iterator[ShieldedContainer]:
     """Start a container with firewall applied via OCI hooks.
 
     Requires OCI hooks to be available — either global hooks installed
@@ -310,11 +433,13 @@ def shielded_container(
 
     1. ``Shield.pre_start()`` installs hooks, resolves DNS, returns podman args.
     2. ``podman run`` starts the container (OCI hooks apply the ruleset).
-    3. Yields the container name.
+    3. Yields a `ShieldedContainer` — the container name, with the real
+       podman id available via ``.id`` for the ``--container-id`` /
+       ``container_id`` argument that ``Shield.down`` / ``Shield.up`` require.
     4. Cleanup: ``podman rm -f``.
 
     Yields:
-        Container name with shield firewall applied.
+        `ShieldedContainer` name (with ``.id``) with shield firewall applied.
     """
     if not _hooks_available_cached:
         pytest.skip(
@@ -334,7 +459,7 @@ def shielded_container(
 
     try:
         extra_args = shield.pre_start(name)
-        start_shielded_container(name, extra_args, IMAGE)
-        yield name
+        cid = start_shielded_container(name, extra_args, IMAGE)
+        yield ShieldedContainer(name, cid)
     finally:
         _podman_rm(name)

@@ -6,8 +6,13 @@
 # (subuid/subgid, storage.conf, containers.conf, setuid newuidmap).
 FROM quay.io/podman/stable:latest
 
+# Ownership label: a Containerfile LABEL propagates into every
+# intermediate layer image, so the harness teardown can prune exactly
+# its own dangling generations (value = the harness IMAGE_PREFIX).
+LABEL "io.terok.matrix-test"="terok-shield-test"
+
 RUN dnf install -y \
-    nftables python3 python3-pip \
+    nftables dnsmasq slirp4netns python3 python3-pip \
     git curl bind-utils \
     && dnf clean all
 
@@ -19,6 +24,8 @@ RUN mkdir -p /run/user/$(id -u podman) && chown podman:podman /run/user/$(id -u 
 # main file, and TOML rejects a duplicate section header.
 RUN mkdir -p /etc/containers/containers.conf.d \
     && printf '[containers]\nkeyring = false\n' \
-        > /etc/containers/containers.conf.d/00-no-keyring.conf
+        > /etc/containers/containers.conf.d/00-no-keyring.conf \
+    && printf '# Align this image with the distro slots: its stock config uses\n# userns = "auto", which puts every container in its own sub-userns —\n# nsenter -n from podman unshare then fails with EPERM (the nft-in-netns\n# pre-check). userns = "host" matches how all other slots run.\n[containers]\nuserns = "host"\n\n[network]\ndefault_rootless_network_cmd = "slirp4netns"\n' \
+        > /etc/containers/containers.conf.d/01-matrix.conf
 
 WORKDIR /src

@@ -18,6 +18,8 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 
+from .run import which_sbin_aware
+
 #: Directories searched after ``PATH`` when probing daemon binaries.
 #: rootless users regularly have neither on their login PATH; probing
 #: them anyway lets the aggregator report a usable host rather than
@@ -76,20 +78,3 @@ def check_krun_binaries() -> tuple[BinaryCheck, ...]:
             "in-netns IP assignment for the krun runtime",
         ),
     )
-
-
-def which_sbin_aware(name: str) -> str:
-    """Resolve *name* like [`shutil.which`][shutil.which], falling back to sbin directories.
-
-    Returns the absolute path of the first match or an empty string
-    when the binary is not on ``PATH`` and not in ``/usr/sbin`` or
-    ``/sbin``.  The sbin fallback reuses [`shutil.which`][shutil.which] with an
-    explicit ``path=`` so executability (``os.X_OK``) is checked the
-    same way ``PATH`` resolution would — a regular non-executable file
-    in ``/usr/sbin`` shouldn't count as a hit.
-    """
-    for search_path in (None, *_SBIN_DIRS):
-        found = shutil.which(name, path=search_path)
-        if found:
-            return found
-    return ""
