@@ -33,7 +33,7 @@ make test-unit   # Run unit tests with coverage
 make tach       # Check module boundary rules (tach.toml)
 make docstrings # Check docstring coverage (minimum 95%)
 make reuse      # Check REUSE (SPDX license/copyright) compliance
-make check      # Run lint + test-unit + tach + security + docstrings + deadcode + reuse
+make check      # Run lint + test-unit + tach + typecheck + security + docstrings + deadcode + reuse
 ```
 
 **Integration tests (filtered by marker):**
@@ -101,15 +101,15 @@ make spdx NAME="Real Human Name" FILES="src/terok_shield/new_file.py"  # Add SPD
 
 ## Security Boundary
 
-`nft.py` is the auditable security boundary:
-- **Only stdlib + `nft_constants.py` imports** (`ipaddress`, `re`, `textwrap`, and the literals-only `nft_constants`)
-- All inputs validated (`safe_ip()`, `safe_name()`) before string interpolation
-- Allowlisting private-range addresses (RFC 1918/RFC 4193) or large CIDRs generates a notice in the audit log
+`nft/rules.py` is the auditable security boundary:
+- **Only stdlib + `nft/constants.py` imports** (`ipaddress`, `re`, `textwrap`, and the literals-only constants module)
+- All inputs validated (`safe_ip()`, `_safe_ident()`, `_safe_timeout()`) before string interpolation
+- Private-range addresses (RFC 1918/4193 + link-local) are rejected unless explicitly allowlisted
 - Enforced by AST import isolation test + bandit SAST
 
 ## Module Boundaries (tach)
 
-The project uses [tach](https://github.com/gauge-sh/tach) to enforce module boundary rules defined in `tach.toml`. The critical constraint: `nft.py` may only import from `nft_constants.py` (and stdlib). When adding new cross-module imports:
+The project uses [tach](https://github.com/gauge-sh/tach) to enforce module boundary rules defined in `tach.toml`. The critical constraint: `nft/rules.py` may only import from `nft/constants.py` (and stdlib). When adding new cross-module imports:
 
 - Check `tach.toml` for allowed dependencies
 - Run `make tach` to verify
@@ -132,7 +132,7 @@ Integration tests live in `tests/integration/` and are organized by **workflow/f
 | Directory | What it tests |
 |-----------|--------------|
 | `setup/` | Hook install, config paths, profiles, auto-detect |
-| `launch/` | pre_start, apply_hook, hook_main, nft apply |
+| `launch/` | pre_start, hook entrypoint, nft apply, restart lifecycle |
 | `blocking/` | Default-deny, IPv6 drop, private-range reject, ICMP probe |
 | `allow_deny/` | shield_allow/deny, CLI allow/deny, nft elements |
 | `dns/` | resolve, caching, force-refresh, profile→DNS pipeline |
@@ -167,7 +167,7 @@ The library is a pure function of its inputs. Given a `ShieldConfig` with `state
 - **`ShieldConfig`** (frozen dataclass) — per-container configuration with required `state_dir: Path`
 - **`Shield`** (facade) — public API; delegates to collaborators injected via constructor
 - **`HookMode`** (strategy) — nft-based hook mode implementation of `ShieldModeBackend` protocol
-- **`HookExecutor`** (command) — applies nft ruleset inside a container's netns
+- **`StateBundle`** — per-container state-file bundle; `read_effective_ips()` merges profile/live/deny into the effective allowlist
 - **`AuditLogger`** — writes JSONL audit events to a single file
 - **`DnsResolver`** — stateless DNS resolution; takes explicit `cache_path` parameter
 - **`ProfileLoader`** — loads `.txt` allowlists from bundled + user directories
@@ -177,32 +177,26 @@ The library is a pure function of its inputs. Given a `ShieldConfig` with `state
 
 Each container gets an isolated `state_dir` with this layout:
 
-```text
-{state_dir}/
-├── hooks/
-│   ├── terok-shield-createRuntime.json
-│   └── terok-shield-poststop.json
-├── terok-shield-hook              # entrypoint script
-├── profile.allowed                # IPs from DNS resolution
-├── live.allowed                   # IPs from allow/deny
-└── audit.jsonl                    # per-container audit log
-```
+The canonical layout lives in `state.py`'s module docstring (hooks/,
+the stdlib-only entrypoint, `ruleset.nft`, DNS-tier files, the
+profile/live/deny allowlist files, dnsmasq artifacts, `loopback.ports`,
+`container.id`, `audit.jsonl`) — mirror it from there rather than here.
 
 Path functions in `state.py` derive all paths from `state_dir`. `BUNDLE_VERSION` in `state.py` provides a cross-process contract between `pre_start()` and the OCI hook.
 
 ### Data flow
 
 1. **CLI / terok** constructs `ShieldConfig(state_dir=...)` and creates `Shield(config)`
-2. **`Shield.pre_start()`** installs hooks, resolves DNS → writes `profile.allowed`, sets OCI annotations (`state_dir`, `loopback_ports`, `version`), returns podman args
-3. **OCI hook** (`hook_main()`) reads annotations, constructs `HookExecutor(state_dir=...)`, reads `profile.allowed` + `live.allowed`, applies nft ruleset
+2. **`Shield.pre_start()`** installs hooks, resolves DNS → writes `profile.allowed`, generates `ruleset.nft`, sets OCI annotations (`state_dir`, `loopback_ports`, `version`), returns podman args
+3. **OCI hook** (the stdlib-only entrypoint from `resources/nft_hook.py`) reads annotations and applies the pre-generated `ruleset.nft` inside the container's netns
 4. **`Shield.allow()` / `deny()`** modify nft sets immediately + persist to `live.allowed`
 5. **`Shield.up()`** re-applies ruleset, restoring IPs from both allowlist files
 
 ### Configuration layer separation
 
 - **Library** (`config.py`): Pure data definitions — `ShieldConfig`, `ShieldMode`, `ShieldState`, `ShieldModeBackend` protocol, annotation constants
-- **Registry** (`registry.py`): Command definitions (`CommandDef`, `ArgDef`, `COMMANDS`) and reusable handler functions — single source of truth for all CLI subcommands
-- **CLI** (`cli.py`): Config construction — reads `config.yml`, env vars, XDG paths; builds `ShieldConfig` for each command; builds argparse from the registry
+- **Registry** (`commands.py`): Command definitions (`CommandDef`, `ArgDef`, `COMMANDS`) and reusable handler functions — single source of truth for all CLI subcommands
+- **CLI** (`cli/main.py`): Config construction — reads `config.yml`, env vars, XDG paths; builds `ShieldConfig` for each command; builds argparse from the registry
 
 ## Key Guidelines
 
