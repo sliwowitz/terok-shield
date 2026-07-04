@@ -103,7 +103,7 @@ with a default-deny firewall — only destinations in the
 `dev-standard` profile are reachable.  To use custom profiles:
 
 ```bash
-terok-shield run my-container --profiles dev-standard my-project -- alpine:latest sh
+terok-shield run my-container --profiles dev-standard,my-project -- alpine:latest sh
 ```
 
 ### 3. Allow a domain at runtime

@@ -24,7 +24,7 @@ Podman container, with or without the rest of terok.
 
 - **Default-deny egress** — containers start with no outbound access
 - **DNS-based allowlisting** — allowed destinations specified as domain names, resolved and cached automatically
-- **Private-range awareness** — allowlisting RFC 1918/RFC 4193 (private network) addresses generates a notice in the audit log
+- **Private-range blocking** — RFC 1918 / RFC 4193 and link-local destinations are rejected unless explicitly allowlisted
 - **Dual-stack** — full IPv4 and IPv6 support with separate allow sets
 - **Fail-closed** — if the firewall hook fails, the container is torn down
 - **Audit logging** — JSON-lines lifecycle logs + kernel-level per-packet nftables logs
@@ -61,7 +61,7 @@ default-deny firewall — only destinations in the `dev-standard`
 [allowlist profile](guide/profiles.md) are reachable. To use custom profiles:
 
 ```bash
-terok-shield run my-container --profiles dev-standard dev-python -- alpine:latest sh
+terok-shield run my-container --profiles dev-standard,dev-python -- alpine:latest sh
 ```
 
 !!! tip "Scripting"

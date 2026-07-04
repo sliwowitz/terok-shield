@@ -17,7 +17,7 @@ make format           # auto-fix lint issues
 
 # Before pushing
 make test-unit        # unit tests with coverage
-make check            # core local suite (lint + test-unit + tach + security + docstrings + deadcode + reuse)
+make check            # core local suite (lint + test-unit + tach + typecheck + security + docstrings + deadcode + reuse)
 
 # Integration tests (filtered by marker)
 make test-integration-host     # -m "needs_host_features" — host-only, no containers
@@ -41,7 +41,7 @@ make docs             # serve documentation locally
 - **ruff** for linting and formatting (100 char line length)
 - **SPDX headers** on all `.py` files — use `make spdx NAME="Real Human Name" FILES="path"`
 - **Docstrings** on all public functions (95% coverage enforced in CI)
-- **`nft.py` must not import non-stdlib modules** — auditable security boundary
+- **`nft/rules.py` must not import beyond stdlib + `nft/constants.py`** — auditable security boundary
 - **Module boundaries** enforced by tach (`tach.toml`) — run `make tach` after changing imports
 - **Documentation filenames** under `docs/` use `lowercase.md` (e.g. `getting_started.md`, `cli.md`) to match MkDocs convention; root-level files (`README.md`, `AGENTS.md`) stay UPPERCASE
 
