@@ -23,7 +23,7 @@ rotation live. The fallback is recorded in the per-container audit log.
 
 ## Keeping the dnsmasq tier
 
-[terok-sandbox](https://github.com/terok-ai/terok-sandbox) provides an [apparmor profile installer](https://github.com/terok-ai/terok-sandbox/blob/master/src/terok_sandbox/resources/apparmor/install_profile.sh). It needs to know the configured state root directory (by default `$HOME/.local/terok`). If you use the [terok](https://github.com/terok-ai/terok) orchestrator, `terok setup` will
+[terok-sandbox](https://github.com/terok-ai/terok-sandbox) provides an [apparmor profile installer](https://github.com/terok-ai/terok-sandbox/blob/master/src/terok_sandbox/resources/apparmor/install_profile.sh). It needs to know the configured state root directory (by default `$HOME/.local/share/terok`). If you use the [terok](https://github.com/terok-ai/terok) orchestrator, `terok setup` will
 point you to the right script to launch.
 
 ## If you can't install the profile
