@@ -25,7 +25,7 @@ from terok_util import ArgDef, CommandDef
 
 from .. import Shield, ShieldConfig, ShieldMode
 from ..commands import COMMANDS, needs_container
-from ..config import ShieldFileConfig
+from ..config_file import ShieldFileConfig
 from ..container import resolve_state_dir as resolve_container_state_dir
 from ..run import ExecError
 from ..validation import validate_container_name
@@ -448,7 +448,7 @@ def _resolve_state_dir(container: str | None, state_dir_override: Path | None) -
 
 
 def _load_config_file() -> ShieldFileConfig:
-    """Load and validate ``config.yml`` via [`ShieldFileConfig`][terok_shield.cli.main.ShieldFileConfig].
+    """Load and validate ``config.yml`` via [`ShieldFileConfig`][terok_shield.config_file.ShieldFileConfig].
 
     Returns defaults when the file is missing or contains invalid YAML.
     Validation errors (typos, wrong types) abort with a clear message.

@@ -215,7 +215,15 @@ depends_on = [
 # ── CLI ────────────────────────────────────────────────────
 # Presentation layer: argument parsing, command dispatch, tools.
 
+# config.yml schema — pydantic-backed, loaded only by the CLI.  Kept
+# out of foundation so importing the package's data vocabulary doesn't
+# pull in pydantic; the sole importer is cli/main.py.
+[[modules]]
+path = "terok_shield.config_file"
+layer = "cli"
+depends_on = []
+
 [[modules]]
 path = "terok_shield.cli"
 layer = "cli"
-depends_on = []
+depends_on = ["terok_shield.config_file"]

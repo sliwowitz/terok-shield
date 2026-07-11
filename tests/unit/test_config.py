@@ -14,12 +14,11 @@ from terok_shield.config import (
     ANNOTATION_NAME_KEY,
     ANNOTATION_STATE_DIR_KEY,
     ANNOTATION_VERSION_KEY,
-    AuditFileConfig,
     ShieldConfig,
-    ShieldFileConfig,
     ShieldMode,
     ShieldState,
 )
+from terok_shield.config_file import AuditFileConfig, ShieldFileConfig
 
 
 class TestShieldConfig:

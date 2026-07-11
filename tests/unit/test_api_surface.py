@@ -15,32 +15,26 @@ import pytest
 import terok_shield
 from terok_shield import (
     ExecError,
-    NftNotFoundError,
     ShieldConfig,
     ShieldMode,
     ShieldRuntime,
     ShieldState,
 )
+from terok_shield.run import NftNotFoundError
 
 EXPECTED_ALL = [
     "ArgDef",
-    "BinaryCheck",
     "COMMANDS",
     "CommandDef",
     "EnvironmentCheck",
     "ExecError",
     "HOOK_ENTRYPOINT_NAME",
     "HooksInstaller",
-    "NftNotFoundError",
     "Shield",
     "ShieldConfig",
     "ShieldMode",
-    "ShieldNeedsSetup",
     "ShieldRuntime",
     "ShieldState",
-    "check_firewall_binaries",
-    "check_krun_binaries",
-    "ensure_user_hooks_dir_configured",
 ]
 
 
