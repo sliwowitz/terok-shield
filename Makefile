@@ -19,36 +19,36 @@ test: test-unit
 lint:
 	@if LC_ALL=C grep -nP '[^\x00-\x7F]' pyproject.toml; then echo "pyproject.toml must be ASCII-only"; exit 1; fi
 	mkdir -p $(REPORTS_DIR)
-	poetry run ruff check --exit-zero --output-format=json --output-file=$(RUFF_REPORT) .
-	poetry run ruff check .
-	poetry run ruff format --check .
+	uv run ruff check --exit-zero --output-format=json --output-file=$(RUFF_REPORT) .
+	uv run ruff check .
+	uv run ruff format --check .
 
 # Auto-fix lint issues and format code
 format:
-	poetry run ruff check --fix .
-	poetry run ruff format .
+	uv run ruff check --fix .
+	uv run ruff format .
 
 # Fast dev loop: run only the tests affected by the branch diff (tach
 # impact analysis), no coverage.  Impact analysis follows the Python
 # import graph only — after touching non-Python inputs (resources/,
 # YAML, templates, scripts) run the full `make test` instead.
 test-fast:
-	poetry run pytest tests/unit/ --tach
+	uv run pytest tests/unit/ --tach
 
 # Run tests with coverage (excludes podman-dependent integration tests)
 test-unit:
 	mkdir -p $(REPORTS_DIR)
-	poetry run pytest tests/unit/ --cov=terok_shield --cov-report=term-missing --cov-report=xml:$(COVERAGE_XML) --cov-report=json:$(COVERAGE_JSON) --junitxml=$(UNIT_JUNIT_XML) -o junit_family=legacy
+	uv run pytest tests/unit/ --cov=terok_shield --cov-report=term-missing --cov-report=xml:$(COVERAGE_XML) --cov-report=json:$(COVERAGE_JSON) --junitxml=$(UNIT_JUNIT_XML) -o junit_family=legacy
 
 # Write Ruff's JSON report without failing on findings.
 ruff-report:
 	mkdir -p $(REPORTS_DIR)
-	poetry run ruff check --exit-zero --output-format=json --output-file=$(RUFF_REPORT) .
+	uv run ruff check --exit-zero --output-format=json --output-file=$(RUFF_REPORT) .
 
 # Write Bandit's JSON report without failing on findings.
 bandit-report:
 	mkdir -p $(REPORTS_DIR)
-	poetry run bandit -r src/terok_shield/ --exit-zero -f json -o $(BANDIT_REPORT)
+	uv run bandit -r src/terok_shield/ --exit-zero -f json -o $(BANDIT_REPORT)
 
 # Generate the files SonarQube Cloud imports from reports/.
 sonar-inputs: test-unit ruff-report bandit-report
@@ -56,20 +56,20 @@ sonar-inputs: test-unit ruff-report bandit-report
 # Integration tests by environment marker
 test-integration-host:
 	mkdir -p $(REPORTS_DIR)
-	poetry run pytest tests/integration/ -m "needs_host_features" -v --junitxml=$(INTEGRATION_HOST_JUNIT_XML) -o junit_family=legacy
+	uv run pytest tests/integration/ -m "needs_host_features" -v --junitxml=$(INTEGRATION_HOST_JUNIT_XML) -o junit_family=legacy
 
 test-integration-network:
 	mkdir -p $(REPORTS_DIR)
-	poetry run pytest tests/integration/ -m "needs_internet and not needs_podman" -v --junitxml=$(INTEGRATION_NETWORK_JUNIT_XML) -o junit_family=legacy
+	uv run pytest tests/integration/ -m "needs_internet and not needs_podman" -v --junitxml=$(INTEGRATION_NETWORK_JUNIT_XML) -o junit_family=legacy
 
 test-integration-podman:
 	mkdir -p $(REPORTS_DIR)
-	poetry run pytest tests/integration/ -m "needs_podman" -v --junitxml=$(INTEGRATION_PODMAN_JUNIT_XML) -o junit_family=legacy
+	uv run pytest tests/integration/ -m "needs_podman" -v --junitxml=$(INTEGRATION_PODMAN_JUNIT_XML) -o junit_family=legacy
 
 # All integration tests (all tiers)
 test-integration:
 	mkdir -p $(REPORTS_DIR)
-	poetry run pytest tests/integration/ -v --junitxml=$(INTEGRATION_JUNIT_XML) -o junit_family=legacy
+	uv run pytest tests/integration/ -v --junitxml=$(INTEGRATION_JUNIT_XML) -o junit_family=legacy
 
 # Multi-distro integration test matrix — slots declared in
 # tests/containers/matrix.yml, engine provided by terok-util (terok-matrix).
@@ -79,7 +79,7 @@ test-integration:
 #   SCOPE=unit    Run only unit tests (or: integ)
 #   SLOTS="fedora43 debian13"  Run specific slots only
 test-matrix:
-	poetry run terok-matrix \
+	uv run terok-matrix \
 		$(if $(NO_CACHE),--no-cache) \
 		$(if $(BUILD_ONLY),--build-only) \
 		$(if $(filter unit,$(SCOPE)),--unit-only) \
@@ -88,42 +88,42 @@ test-matrix:
 
 # Generate integration test map (Markdown table grouped by directory)
 test-integration-map:
-	poetry run python docs/test_map.py
+	uv run python docs/test_map.py
 
 # Generate CI workflow map (Markdown tables from .github/workflows/*.yml)
 ci-map:
-	poetry run python docs/ci_map.py
+	uv run python docs/ci_map.py
 
 # Check module boundary rules (tach.toml)
 tach:
-	poetry run tach check
+	uv run tach check
 
 # Run SAST security scan on shield module
 security:
 	mkdir -p $(REPORTS_DIR)
-	poetry run bandit -r src/terok_shield/ --exit-zero -f json -o $(BANDIT_REPORT)
-	poetry run bandit -r src/terok_shield/ -ll
+	uv run bandit -r src/terok_shield/ --exit-zero -f json -o $(BANDIT_REPORT)
+	uv run bandit -r src/terok_shield/ -ll
 
 # Check docstring coverage (minimum 95%)
 docstrings:
-	poetry run docstr-coverage src/terok_shield/ --fail-under=95
+	uv run docstr-coverage src/terok_shield/ --fail-under=95
 
 # Check cognitive complexity (advisory — lists functions exceeding threshold)
 complexity:
-	poetry run complexipy src/terok_shield/ --max-complexity-allowed 15 --failed; true
+	uv run complexipy src/terok_shield/ --max-complexity-allowed 15 --failed; true
 
 # Find dead code (cross-file, min 80% confidence)
 deadcode:
-	poetry run vulture src/terok_shield/ --min-confidence 80
+	uv run vulture src/terok_shield/ --min-confidence 80
 
 # Static type check with mypy.
 typecheck:
-	poetry run mypy src/terok_shield/ $(MYPYFLAGS)
+	uv run mypy src/terok_shield/ $(MYPYFLAGS)
 
 # Check REUSE (SPDX license/copyright) compliance
 reuse:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	poetry run reuse lint
+	uv run reuse lint
 
 # Add SPDX header to files.
 # NAME must be the real name of the person responsible for creating the file (not a project name).
@@ -132,27 +132,27 @@ spdx:
 ifndef NAME
 	$(error NAME is required — use the real name of the copyright holder, e.g. make spdx NAME="Real Human Name" FILES="src/terok_shield/foo.py")
 endif
-	poetry run reuse annotate --template compact --copyright "$(NAME)" --license Apache-2.0 $(FILES)
+	uv run reuse annotate --template compact --copyright "$(NAME)" --license Apache-2.0 $(FILES)
 
 # Run all checks (equivalent to CI)
 check: lint test-unit tach typecheck security docstrings deadcode reuse
 
 # Install runtime dependencies only
 install:
-	poetry install --only main
+	uv sync --no-default-groups
 
 # Install all dependencies (dev, test, docs) and activate pre-commit hooks
 install-dev:
-	poetry install --with dev,test,docs
-	poetry run pre-commit install
+	uv sync --all-groups
+	uv run pre-commit install
 
 # Build documentation locally
 docs:
-	poetry run properdocs serve
+	uv run properdocs serve
 
 # Build documentation for deployment
 docs-build:
-	poetry run properdocs build --strict
+	uv run properdocs build --strict
 
 # Clean build artifacts
 clean:

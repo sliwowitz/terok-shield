@@ -7,7 +7,7 @@
 ## Technology Stack
 
 - **Language**: Python 3.12+
-- **Package Manager**: Poetry
+- **Package Manager**: uv
 - **Testing**: pytest with coverage
 - **Linting/Formatting**: ruff
 - **Module Boundaries**: tach (enforced in CI via `tach.toml`)
@@ -50,7 +50,7 @@ make check      # Run lint + test-unit + tach + typecheck + security + docstring
 
 **Integration tests (filtered by marker):**
 ```bash
-poetry install --with test  # ensure terok-shield is installed in Poetry's venv
+uv sync                     # ensure terok-shield is installed in the project venv
 make test-integration-host    # -m "needs_host_features" (no containers, runs in CI)
 make test-integration-network # -m "needs_internet and not needs_podman" (dig + internet)
 make test-integration-podman  # -m "needs_podman" (podman + nft + internet)
@@ -156,7 +156,7 @@ Integration tests live in `tests/integration/` and are organized by **workflow/f
 Makefile targets filter by marker (not by directory):
 
 ```bash
-poetry install --with test  # install package + test deps into Poetry's venv
+uv sync                     # install package + test deps into the project venv
 make test-integration-host    # -m "needs_host_features" (fast, runs in CI)
 make test-integration-network # -m "needs_internet and not needs_podman" (dig + internet)
 make test-integration-podman  # -m "needs_podman" (podman + nft + internet)
@@ -216,7 +216,7 @@ Path functions in `state.py` derive all paths from `state_dir`. `BUNDLE_VERSION`
 - **Allowlisting**: Both IP addresses and DNS domains are supported in `.txt` allowlists; bundled defaults use DNS names because they are more stable and easier to audit
 - **Minimal changes**: Make surgical, focused changes
 - **Existing tests**: Never remove or modify unrelated tests
-- **Dependencies**: Use Poetry; runtime dependencies are PyYAML, pydantic, and terok-util
+- **Dependencies**: Use uv; runtime dependencies are PyYAML, pydantic, and terok-util
 
 ## Dependency Pinning & `pyproject.toml` Hygiene
 
@@ -241,10 +241,10 @@ version:
   the patch-series form is exactly right — do *not* exact-pin them (it
   would fight the multi-repo release/PR-chain flow).
 
-Dev / test / docs / tooling dependencies (the `[tool.poetry.group.*]` groups)
+Dev / test / docs / tooling dependencies (the `[dependency-groups]` tables)
 are **exempt** — they are not shipped to installers and exact-pinning them is
 an unwarranted maintenance burden the developers can absorb. After changing
-any pin, run `poetry lock` and commit `pyproject.toml` and `poetry.lock`
+any pin, run `uv lock` and commit `pyproject.toml` and `uv.lock`
 together.
 
 **Comment discipline in `pyproject.toml`.** The dependency tables stay

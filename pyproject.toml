@@ -1,6 +1,6 @@
 [build-system]
-requires = ["poetry-core>=2.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
-build-backend = "poetry_dynamic_versioning.backend"
+requires = ["hatchling>=1.27", "hatch-vcs>=0.5"]
+build-backend = "hatchling.build"
 
 [project]
 name = "terok-shield"
@@ -14,14 +14,29 @@ maintainers = [
     {name = "Jiri Vyskocil", email = "jiri@vyskocil.com"},
 ]
 keywords = ["podman", "containers", "firewall", "nftables", "security"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Firewalls",
+    "Typing :: Typed",
+]
 requires-python = ">=3.12,<4.0"
-dynamic = ["version", "classifiers"]
+dynamic = ["version"]
 # Dependency pins follow the policy in AGENTS.md ("Dependency Pinning &
 # pyproject.toml Hygiene").  Keep the dependency list comment-free.
 dependencies = [
     "PyYAML~=6.0",
     "pydantic~=2.13",
-    "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.2.2a1/terok_util-0.2.2a1-py3-none-any.whl",
+    "terok-util>=0.2.2a1,<0.3.0",
 ]
 
 [project.urls]
@@ -35,51 +50,44 @@ Security = "https://github.com/terok-ai/terok-shield/security/policy"
 [project.scripts]
 terok-shield = "terok_shield.cli.main:main"
 
-[tool.poetry]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Environment :: Console",
-    "Intended Audience :: Developers",
-    "Intended Audience :: System Administrators",
-    "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python",
-    "Topic :: Security",
-    "Topic :: System :: Networking :: Firewalls",
-    "Typing :: Typed",
+[dependency-groups]
+dev = [
+    "ruff>=0.15.20",
+    "bandit>=1.7",
+    "docstr-coverage>=2.3.2,<3",
+    "complexipy>=6.0.1",
+    "vulture>=2.12",
+    "reuse>=6.2.0,<7",
+    "tach>=0.35.0,<0.36",
+    "pre-commit>=4.0",
+    "mypy>=2.1.0,<3.0",
+]
+test = [
+    "pytest>=9.1.1",
+    "pytest-cov>=4.0",
+]
+docs = [
+    "properdocs>=1.6.7",
+    "mkdocs-material>=9.7.6",
+    "mkdocstrings[python]>=0.26",
+    "mkdocs-literate-nav>=0.6",
+    "mkdocs-section-index>=0.3",
+    "mkdocs-gen-files>=0.5",
+    "mkdocs-terok>=0.7.4,<0.8",
 ]
 
-packages = [
-  { include = "terok_shield", from = "src" },
-]
+[tool.uv]
+default-groups = ["dev", "test"]
 
-include = [
-  { path = "src/terok_shield/resources/nflog_reader.py", format = ["sdist", "wheel"] },
-]
-version = "0.7.3a1"
+[tool.uv.sources]
+terok-util = { git = "https://github.com/sliwowitz/terok-util", branch = "feat/matrix-uv-installer" }
 
-[tool.poetry.group.dev.dependencies]
-ruff = ">=0.15.20"
-bandit = ">=1.7"
-docstr-coverage = "^2.3.2"
-complexipy = ">=6.0.1"
-vulture = ">=2.12"
-reuse = "^6.2.0"
-tach = "^0.35.0"
-pre-commit = ">=4.0"
-mypy = ">=2.1.0,<3.0"
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.7.3a1"
 
-[tool.poetry.group.test.dependencies]
-pytest = ">=9.1.1"
-pytest-cov = ">=4.0"
-
-[tool.poetry.group.docs.dependencies]
-properdocs = ">=1.6.7"
-mkdocs-material = ">=9.7.6"
-mkdocstrings = {extras = ["python"], version = ">=0.26"}
-mkdocs-literate-nav = ">=0.6"
-mkdocs-section-index = ">=0.3"
-mkdocs-gen-files = ">=0.5"
-mkdocs-terok = "^0.7.4"
+[tool.hatch.build.targets.wheel]
+packages = ["src/terok_shield"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -150,12 +158,3 @@ disallow_incomplete_defs = true
 disable_error_code = ["import-untyped"]
 pretty = true
 show_error_codes = true
-
-[tool.poetry-dynamic-versioning]
-enable = true
-vcs = "git"
-pattern = "^v(?P<base>\\d+\\.\\d+\\.\\d+)(?:(?P<stage>a)(?P<revision>\\d+))?$"
-style = "pep440"
-
-[tool.poetry-dynamic-versioning.substitution]
-folders = [{path = "src"}]
