@@ -151,10 +151,17 @@ def assert_connectable(container: str, ip: str, port: int = 53, timeout: int = 5
     )
 
 
-def assert_not_connectable(container: str, ip: str, port: int = 53, timeout: int = 5) -> None:
+def assert_not_connectable(container: str, ip: str, port: int = 53, timeout: int = 1) -> None:
     """Assert that a TCP connection to ip:port is blocked from inside a container.
 
     Inverse of `assert_connectable`.  Uses ``nc -z`` and expects failure.
+
+    Shield's policy is *drop*, so a blocked probe gets no response and
+    ``nc`` waits out the full window — the timeout is a guaranteed burn
+    on every call, not a margin.  1s still carries the proof in the
+    controlled test environment: permitted paths there answer in
+    milliseconds, so a probe silent for a full second is blocked, not
+    slow.
 
     Args:
         container: Container name or ID.
@@ -228,11 +235,16 @@ def _assert_container_running(container: str) -> None:
     )
 
 
-def assert_blocked(container: str, url: str, timeout: int = 10) -> None:
+def assert_blocked(container: str, url: str, timeout: int = 2) -> None:
     """Assert that a URL is blocked (wget fails) from inside a container.
 
     Verifies the container is running first to avoid false positives from
     a dead container or failed ``podman exec``.
+
+    Like `assert_not_connectable`, the timeout is a guaranteed burn: a
+    dropped connection never answers, so wget always waits the full
+    window.  2s (not 1s) because the URL path also covers an in-container
+    DNS resolution before the blocked connect.
 
     Args:
         container: Container name or ID.
