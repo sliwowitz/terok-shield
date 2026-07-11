@@ -2124,13 +2124,14 @@ tomli-w = ">=1.0,<2.0"
 
 [[package]]
 name = "terok-util"
-version = "0.2.1"
+version = "0.2.2a1"
 description = "Shared utility library for the terok-* sibling packages"
 optional = false
 python-versions = ">=3.12,<4.0"
 groups = ["main"]
-files = []
-develop = false
+files = [
+    {file = "terok_util-0.2.2a1-py3-none-any.whl", hash = "sha256:fdc6c80eac2dc5db684bc20fead65caca88a0aa0a6e3a4cbba40fc4209c9cb7d"},
+]
 
 [package.dependencies]
 jinja2 = ">=3.1,<4.0"
@@ -2138,10 +2139,8 @@ platformdirs = ">=4.10,<5.0"
 "ruamel.yaml" = "0.19.1"
 
 [package.source]
-type = "git"
-url = "https://github.com/sliwowitz/terok-util.git"
-reference = "perf/lazy-command-handler"
-resolved_reference = "a01cfc3eb10dcc2f17f04c820404052a8bbebddf"
+type = "url"
+url = "https://github.com/terok-ai/terok-util/releases/download/v0.2.2a1/terok_util-0.2.2a1-py3-none-any.whl"
 
 [[package]]
 name = "tomli"
@@ -2396,4 +2395,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "3bc145f571cc978bf4bad3c5703d987b06a5fcf2a90237bdaf23486f46624486"
+content-hash = "9728ca432940f7a91198678a3b612890b13bc0c24f1ed9149f2f314cbc3dbe98"
