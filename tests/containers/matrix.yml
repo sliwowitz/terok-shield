@@ -40,7 +40,7 @@ phases:
     tolerate-failure: true
   - name: unit tests
     scope: unit
-    pytest: tests/unit/ -v --tb=short
+    pytest: tests/unit/ -v --tb=short --durations=25
   - name: integration tests (all markers)
     scope: integ
-    pytest: tests/integration/ -v --tb=short
+    pytest: tests/integration/ -v --tb=short --durations=25 --durations-min=1.0
