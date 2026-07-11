@@ -12,22 +12,27 @@ CLI logic are handled directly by ``_dispatch`` — ``setup`` and ``logs``
 to their registry handler via ``Shield`` (the public API facade).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import shlex
 import shutil
 import sys
+from collections.abc import Collection
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from terok_util import ArgDef, CommandDef
+from terok_util import CommandDef
 
 from .. import Shield, ShieldConfig, ShieldMode
 from ..commands import COMMANDS, needs_container
-from ..config_file import ShieldFileConfig
 from ..container import resolve_state_dir as resolve_container_state_dir
 from ..run import ExecError
+
+if TYPE_CHECKING:
+    from ..config_file import ShieldFileConfig
 from ..validation import validate_container_name
 
 # ── Entry point ──────────────────────────────────────────
@@ -47,7 +52,7 @@ def main(argv: list[str] | None = None) -> None:
         run_trailing = argv[sep + 1 :]
         argv = argv[:sep]
 
-    parser = _build_parser()
+    parser = _build_parser(argv)
     args = parser.parse_args(argv)
 
     if saw_separator and args.command != "run":
@@ -69,12 +74,18 @@ def main(argv: list[str] | None = None) -> None:
 
 # ── Command dispatch ─────────────────────────────────────
 
-# Command lookup for dispatch
-_CMD_LOOKUP: dict[str, CommandDef] = {cmd.name: cmd for cmd in COMMANDS}
-
 
 def _dispatch(args: argparse.Namespace) -> None:
-    """Dispatch to the appropriate subcommand handler."""
+    """Dispatch to the appropriate subcommand handler.
+
+    The verb's resolved [`CommandDef`][terok_util.cli_types.CommandDef] is
+    stamped on ``args._cmd`` by
+    [`CommandTree.wire`][terok_util.cli_types.CommandTree.wire]; the
+    generic branch reads its handler and ``needs_container`` marker.  Five
+    verbs with standalone CLI concerns (``setup`` / ``logs`` bypass
+    Shield; ``prepare`` / ``run`` / ``resolve`` carry custom output) are
+    handled directly.
+    """
     cmd_name = args.command
     state_dir_override = getattr(args, "state_dir", None)
 
@@ -105,46 +116,46 @@ def _dispatch(args: argparse.Namespace) -> None:
     elif cmd_name == "resolve":
         _cmd_resolve(shield, args.container, force=args.force)
     else:
-        # Generic registry dispatch
-        cmd_def = _CMD_LOOKUP[cmd_name]
-        if cmd_def.handler is None:
+        # Generic registry dispatch — handler resolved lazily by wire().
+        cmd_def: CommandDef | None = getattr(args, "_cmd", None)
+        if cmd_def is None or cmd_def.handler is None:
             raise RuntimeError(f"Command {cmd_name!r} has no handler (standalone-only)")
-        kwargs = _extract_handler_kwargs(args, cmd_def)
         if needs_container(cmd_def):
+            kwargs = _extract_handler_kwargs(args, cmd_def, exclude={"container"})
             cmd_def.handler(shield, container, **kwargs)
         else:
-            cmd_def.handler(shield, **kwargs)
+            cmd_def.handler(shield, **_extract_handler_kwargs(args, cmd_def))
 
 
-def _extract_handler_kwargs(args: argparse.Namespace, cmd: CommandDef) -> dict:
-    """Extract keyword arguments for a registry handler from parsed args."""
+def _extract_handler_kwargs(
+    args: argparse.Namespace, cmd: CommandDef, *, exclude: Collection[str] = ()
+) -> dict:
+    """Extract keyword arguments for a registry handler from parsed args.
+
+    *exclude* names args consumed positionally (the ``container`` a
+    ``needs_container`` verb passes as the handler's first argument), so
+    they don't also arrive as keywords.
+    """
     kwargs: dict = {}
     for arg in cmd.args:
         key = arg.dest or arg.name.lstrip("-").replace("-", "_")
-        if hasattr(args, key):
+        if key not in exclude and hasattr(args, key):
             kwargs[key] = getattr(args, key)
     return kwargs
 
 
 # ── Argument parser ──────────────────────────────────────
 
-# Custom descriptions for standalone-only commands
-_DESCRIPTIONS: dict[str, str] = {
-    "prepare": (
-        "Resolve DNS, install hooks, and print the podman flags needed to "
-        "launch a shielded container.  Use with eval:\n\n"
-        '  eval "podman run $(terok-shield prepare my-ctr) alpine:latest sh"'
-    ),
-    "run": (
-        "Prepare shield and exec into podman run with the correct flags.  "
-        "Everything after '--' is passed to podman run as-is:\n\n"
-        "  terok-shield run my-container -- alpine:latest sh"
-    ),
-}
 
+def _build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
+    """Build the argument parser from the command registry.
 
-def _build_parser() -> argparse.ArgumentParser:
-    """Build the argument parser from the command registry."""
+    Passing *argv* lets [`COMMANDS`][terok_shield.commands.COMMANDS] wire
+    only the invoked verb's subparser in full — resolving just that verb's
+    module — while the rest stay name+help placeholders for the top-level
+    ``--help`` listing.  Omitting *argv* (the default, used by tests) wires
+    every verb eagerly, so the returned parser accepts any subcommand.
+    """
     parser = argparse.ArgumentParser(
         prog="terok-shield",
         description="nftables-based egress firewalling for Podman containers",
@@ -170,22 +181,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override state root directory",
     )
     sub = parser.add_subparsers(dest="command")
-
-    for cmd in COMMANDS:
-        kwargs: dict = {"help": cmd.help}
-        if cmd.name in _DESCRIPTIONS:
-            kwargs["description"] = _DESCRIPTIONS[cmd.name]
-        p = sub.add_parser(cmd.name, **kwargs)
-
-        # Container arg: `logs` uses --container (optional) in CLI for aggregated mode
-        if needs_container(cmd):
-            if cmd.name == "logs":
-                p.add_argument("--container", default=None, help="Filter by container name")
-            else:
-                p.add_argument("container", help="Container name or ID")
-
-        for arg in cmd.args:
-            _add_argdef(p, arg)
+    COMMANDS.wire(sub, argv=argv)
 
     # Inject "status CONTAINER" as a visible second line in help output
     _orig_format_help = parser.format_help
@@ -203,29 +199,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.format_help = _format_help  # type: ignore[method-assign]
     return parser
-
-
-def _add_argdef(parser: argparse.ArgumentParser, arg: ArgDef) -> None:
-    """Add an [`ArgDef`][terok_util.cli_types.ArgDef] to an argparse parser."""
-    kwargs: dict = {}
-    if arg.help:
-        kwargs["help"] = arg.help
-    if arg.type is not None:
-        kwargs["type"] = arg.type
-    if arg.default is not None:
-        kwargs["default"] = arg.default
-    if arg.action is not None:
-        kwargs["action"] = arg.action
-    if arg.dest is not None:
-        kwargs["dest"] = arg.dest
-    if arg.nargs is not None:
-        kwargs["nargs"] = arg.nargs
-    # argparse only accepts ``required`` on optional (``--``) arguments —
-    # positionals are required by definition.  Guard so the registry can
-    # mark optional flags like ``--container-id`` as mandatory.
-    if arg.required and arg.name.startswith("-"):
-        kwargs["required"] = True
-    parser.add_argument(arg.name, **kwargs)
 
 
 # ── CLI-only command handlers ────────────────────────────
@@ -455,6 +428,8 @@ def _load_config_file() -> ShieldFileConfig:
     """
     import yaml
     from pydantic import ValidationError
+
+    from ..config_file import ShieldFileConfig
 
     config_file = _resolve_config_root() / "config.yml"
     if not config_file.is_file():
