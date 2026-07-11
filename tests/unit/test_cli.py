@@ -16,7 +16,7 @@ from unittest import mock
 
 import pytest
 
-from terok_shield import ExecError, NftNotFoundError, ShieldState
+from terok_shield import ExecError, ShieldState
 from terok_shield.cli.main import (
     _auto_detect_mode,
     _build_config,
@@ -27,7 +27,9 @@ from terok_shield.cli.main import (
     _resolve_state_root,
     main,
 )
-from terok_shield.config import ShieldFileConfig, ShieldMode
+from terok_shield.config import ShieldMode
+from terok_shield.config_file import ShieldFileConfig
+from terok_shield.run import NftNotFoundError
 
 from ..testfs import (
     AUDIT_FILENAME,

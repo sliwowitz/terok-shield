@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the command registry module."""
+"""Tests for the command registry and the per-verb handler modules."""
 
 import json
 from collections.abc import Callable
@@ -9,39 +9,67 @@ from unittest import mock
 
 import pytest
 
-from terok_shield.commands import (
-    COMMANDS,
+from terok_shield.commands import COMMANDS, needs_container, standalone_only
+from terok_shield.verbs.control import (
     _handle_allow,
     _handle_deny,
-    _handle_logs,
     _handle_preview,
-    _handle_profiles,
     _handle_quarantine,
-    _handle_status,
-    _handle_watch,
-    standalone_only,
 )
+from terok_shield.verbs.observe import _handle_logs, _handle_profiles, _handle_status
+from terok_shield.verbs.stream import _handle_watch
 
 
 class TestCommandDefs:
-    """Test COMMANDS tuple structure and invariants."""
+    """Test the COMMANDS registry structure and invariants.
+
+    The roots are lazy references (name + help + ``source``); their full
+    shape lives in the verb modules, so each is
+    [resolved][terok_util.cli_types.CommandDef.resolve] before its
+    handler/extras are inspected.
+    """
+
+    def test_roots_are_lazy(self) -> None:
+        """Every top-level root defers to a source module."""
+        assert COMMANDS.roots, "registry must not be empty"
+        for cmd in COMMANDS:
+            assert cmd.is_lazy, f"{cmd.name} should be a lazy root"
+            assert cmd.help, f"{cmd.name} lazy root must carry help text"
 
     def test_names_unique(self) -> None:
         """All command names are unique."""
         names = [cmd.name for cmd in COMMANDS]
         assert len(names) == len(set(names))
 
-    def test_handler_present_when_not_standalone_only(self) -> None:
-        """Non-standalone commands have a handler."""
+    def test_sources_resolve(self) -> None:
+        """Each lazy root resolves to a full CommandDef with the same name."""
         for cmd in COMMANDS:
-            if not standalone_only(cmd):
-                assert cmd.handler is not None, f"{cmd.name} missing handler"
+            resolved = cmd.resolve()
+            assert resolved.name == cmd.name
+
+    def test_handler_present_when_not_standalone_only(self) -> None:
+        """Non-standalone commands resolve to a handler."""
+        for cmd in COMMANDS:
+            resolved = cmd.resolve()
+            if not standalone_only(resolved):
+                assert resolved.handler is not None, f"{cmd.name} missing handler"
 
     def test_standalone_only_have_no_handler(self) -> None:
-        """Standalone-only commands have handler=None."""
+        """Standalone-only commands resolve to handler=None."""
         for cmd in COMMANDS:
-            if standalone_only(cmd):
-                assert cmd.handler is None, f"{cmd.name} should have handler=None"
+            resolved = cmd.resolve()
+            if standalone_only(resolved):
+                assert resolved.handler is None, f"{cmd.name} should have handler=None"
+
+    def test_needs_container_verbs_carry_container_arg(self) -> None:
+        """Every ``needs_container`` verb defines a ``container`` argument."""
+        for cmd in COMMANDS:
+            resolved = cmd.resolve()
+            if needs_container(resolved):
+                dests = {
+                    arg.dest or arg.name.lstrip("-").replace("-", "_") for arg in resolved.args
+                }
+                assert "container" in dests, f"{cmd.name} needs_container but has no container arg"
 
 
 class TestHandlers:

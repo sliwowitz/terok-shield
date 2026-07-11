@@ -477,8 +477,8 @@ class TestCheckEnvironment:
             json.dumps({"hook": {"path": str(script_path), "args": []}})
         )
 
-    @mock.patch("terok_shield.find_hooks_dirs", return_value=[Path("/fake/hooks")])
-    @mock.patch("terok_shield.has_global_hooks", return_value=True)
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[Path("/fake/hooks")])
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_dig_missing_reports_issue(
         self,
         _has_hooks: mock.Mock,
@@ -493,8 +493,8 @@ class TestCheckEnvironment:
         assert any("dig" in i for i in env.issues)
         assert env.dns_tier == "getent"
 
-    @mock.patch("terok_shield.find_hooks_dirs", return_value=[Path("/fake/hooks")])
-    @mock.patch("terok_shield.has_global_hooks", return_value=True)
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[Path("/fake/hooks")])
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_apparmor_confined_dnsmasq_reports_issue(
         self,
         _has_hooks: mock.Mock,
@@ -520,8 +520,8 @@ class TestCheckEnvironment:
         assert env.dns_tier == "dig"
         assert any("AppArmor" in i for i in env.issues)
 
-    @mock.patch("terok_shield.find_hooks_dirs", return_value=[])
-    @mock.patch("terok_shield.has_global_hooks", return_value=False)
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[])
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=False)
     def test_no_global_hooks(
         self,
         _has_hooks: mock.Mock,
@@ -538,8 +538,8 @@ class TestCheckEnvironment:
         assert env.needs_setup
         assert env.setup_hint
 
-    @mock.patch("terok_shield.find_hooks_dirs", return_value=[Path("/fake/hooks")])
-    @mock.patch("terok_shield.has_global_hooks", return_value=True)
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[Path("/fake/hooks")])
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_stale_hooks_on_persistent_podman(
         self,
         _has_hooks: mock.Mock,
@@ -558,8 +558,8 @@ class TestCheckEnvironment:
         assert any("Stale" in i for i in env.issues)
 
     @mock.patch("terok_shield._read_installed_hook_version", return_value=state.BUNDLE_VERSION)
-    @mock.patch("terok_shield.find_hooks_dirs", return_value=[Path("/fake/hooks")])
-    @mock.patch("terok_shield.has_global_hooks", return_value=True)
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[Path("/fake/hooks")])
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_global_hooks_installed(
         self,
         _has_hooks: mock.Mock,
@@ -575,8 +575,8 @@ class TestCheckEnvironment:
         assert env.health == "ok"
         assert env.hooks == "global"
 
-    @mock.patch("terok_shield.find_hooks_dirs")
-    @mock.patch("terok_shield.has_global_hooks", return_value=True)
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs")
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_stale_hook_version_detected(
         self,
         _has_hooks: mock.Mock,
@@ -595,8 +595,8 @@ class TestCheckEnvironment:
         assert env.health == "stale-hooks"
         assert any("version" in i.lower() for i in env.issues)
 
-    @mock.patch("terok_shield.find_hooks_dirs")
-    @mock.patch("terok_shield.has_global_hooks", return_value=True)
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs")
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_unreadable_hook_version_treated_as_stale(
         self,
         _has_hooks: mock.Mock,

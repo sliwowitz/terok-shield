@@ -14,9 +14,7 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
-
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Protocol, runtime_checkable
 
 # ── OCI annotation keys ─────────────────────────────────
 
@@ -163,45 +161,6 @@ class ShieldConfig:
     audit_enabled: bool = True
     profiles_dir: Path | None = None
     runtime: ShieldRuntime = ShieldRuntime.DEFAULT
-
-
-# ── Config-file schema (Pydantic) ───────────────────────
-
-
-class AuditFileConfig(BaseModel):
-    """Audit section of ``config.yml``."""
-
-    enabled: bool = Field(default=True, description="Enable JSON-lines audit logging")
-    model_config = ConfigDict(extra="forbid")
-
-
-class ShieldFileConfig(BaseModel):
-    """Validated schema for ``config.yml``.
-
-    Loaded by the CLI at startup.  ``extra="forbid"`` rejects unknown
-    keys so typos (e.g. ``mod: hook``) produce a clear error instead
-    of being silently ignored.
-    """
-
-    mode: Literal["auto", "hook"] = Field(
-        default="auto", description="Firewall mode (``auto`` selects the best available)"
-    )
-    default_profiles: list[str] = Field(
-        default_factory=lambda: ["dev-standard"],
-        description="Profiles applied when no explicit list is given",
-    )
-    audit: AuditFileConfig = Field(
-        default_factory=AuditFileConfig, description="Audit logging settings"
-    )
-    model_config = ConfigDict(extra="forbid")
-
-    @field_validator("default_profiles")
-    @classmethod
-    def _profiles_non_empty(cls, v: list[str]) -> list[str]:
-        """Ensure every profile name is a non-empty string."""
-        if not v or not all(isinstance(p, str) and p for p in v):
-            raise ValueError("each profile must be a non-empty string")
-        return v
 
 
 # ── ShieldModeBackend protocol ──────────────────────────

@@ -17,7 +17,7 @@ import pytest
 
 from terok_shield.audit import AuditLogger
 from terok_shield.cli.main import _load_config_file
-from terok_shield.config import ShieldFileConfig
+from terok_shield.config_file import ShieldFileConfig
 from terok_shield.dns.dnsmasq import generate_config, read_domains
 from terok_shield.nft.constants import DNSMASQ_BIND_DEFAULT, PASTA_DNS
 from terok_shield.run import ExecError

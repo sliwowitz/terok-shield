@@ -35,12 +35,6 @@ from .config import (
     ShieldState,
 )
 from .paths import HOOK_ENTRYPOINT_NAME
-from .podman_info import (
-    find_hooks_dirs,
-    global_hooks_hint,
-    has_global_hooks,
-    parse_podman_info,
-)
 from .state import StateBundle
 from .util import is_ip as _is_ip
 
@@ -264,6 +258,12 @@ class Shield:
         """
         from . import state
         from .dns import apparmor
+        from .podman_info import (
+            find_hooks_dirs,
+            global_hooks_hint,
+            has_global_hooks,
+            parse_podman_info,
+        )
 
         output = self.runner.run(["podman", "info", "-f", "json"], check=False)
         info = parse_podman_info(output)
@@ -492,23 +492,26 @@ class Shield:
         return self.profiles.compose_profiles(names)
 
 
+# The stable public contract.  Kept deliberately small: a symbol earns
+# its place here only when consumed cross-package from the top-level
+# ``terok_shield`` namespace.  Names still reachable via ``_LAZY_IMPORTS``
+# but absent here (``BinaryCheck``, ``NftNotFoundError``,
+# ``ShieldNeedsSetup``, ``check_firewall_binaries``,
+# ``check_krun_binaries``, ``ensure_user_hooks_dir_configured``) are
+# internal: their only consumers import them from the owning submodule
+# (``terok_shield.prereqs`` / ``.run`` / ``.hooks.install``) for concrete
+# types, so they need not be part of the stable facade.
 __all__ = [
     "ArgDef",
-    "BinaryCheck",
     "COMMANDS",
     "CommandDef",
     "EnvironmentCheck",
     "ExecError",
     "HOOK_ENTRYPOINT_NAME",
     "HooksInstaller",
-    "NftNotFoundError",
     "Shield",
     "ShieldConfig",
     "ShieldMode",
-    "ShieldNeedsSetup",
     "ShieldRuntime",
     "ShieldState",
-    "check_firewall_binaries",
-    "check_krun_binaries",
-    "ensure_user_hooks_dir_configured",
 ]
