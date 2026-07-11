@@ -1470,8 +1470,8 @@ test = [
 
 [[package]]
 name = "terok-util"
-version = "0.0.0.post42.dev0+c0767d9"
-source = { git = "https://github.com/sliwowitz/terok-util?branch=feat%2Fmatrix-uv-installer#c0767d9b3ddac9803ef09d2b6420f343e0c1fc51" }
+version = "0.0.0.post44.dev0+0f34d63"
+source = { git = "https://github.com/sliwowitz/terok-util?branch=feat%2Fmatrix-uv-installer#0f34d63c925db3e3c885400b3f8cd01b4008de8a" }
 dependencies = [
     { name = "jinja2" },
     { name = "platformdirs" },
