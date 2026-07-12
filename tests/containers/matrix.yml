@@ -14,7 +14,7 @@
 image-prefix: terok-shield-test
 flavor: podman
 expect: [podman, nft, dnsmasq, dig, getent, internet]
-poetry-groups: [test]
+groups: [test]
 
 slots:
   debian12:

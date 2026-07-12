@@ -80,7 +80,7 @@ docs = [
 default-groups = ["dev", "test"]
 
 [tool.uv.sources]
-terok-util = { git = "https://github.com/sliwowitz/terok-util", branch = "feat/matrix-uv-installer" }
+terok-util = { git = "https://github.com/sliwowitz/terok-util", branch = "feat/uv-port" }
 
 [tool.hatch.version]
 source = "vcs"

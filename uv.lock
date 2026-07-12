@@ -1439,7 +1439,7 @@ test = [
 requires-dist = [
     { name = "pydantic", specifier = "~=2.13" },
     { name = "pyyaml", specifier = "~=6.0" },
-    { name = "terok-util", git = "https://github.com/sliwowitz/terok-util?branch=feat%2Fmatrix-uv-installer" },
+    { name = "terok-util", git = "https://github.com/sliwowitz/terok-util?branch=feat%2Fuv-port" },
 ]
 
 [package.metadata.requires-dev]
@@ -1470,8 +1470,8 @@ test = [
 
 [[package]]
 name = "terok-util"
-version = "0.0.0.post47.dev0+264070a"
-source = { git = "https://github.com/sliwowitz/terok-util?branch=feat%2Fmatrix-uv-installer#264070a4b06fd2c7219c95923a85eb450ae31c8e" }
+version = "0.2.2a2.dev51+gcf63e62e5"
+source = { git = "https://github.com/sliwowitz/terok-util?branch=feat%2Fuv-port#cf63e62e5f61c07dcfefba7f475eebe9feff15f8" }
 dependencies = [
     { name = "jinja2" },
     { name = "platformdirs" },
