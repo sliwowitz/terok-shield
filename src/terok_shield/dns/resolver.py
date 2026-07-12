@@ -95,6 +95,17 @@ class DnsResolver:
                 # not batch-wide: one genuinely dead domain must not demote
                 # the resolver for the rest.
                 ips = self._resolve_one(domain, use_getent=True)
+                if ips:
+                    # NSS resolving what dig could not is the proof that dig
+                    # itself is broken here (crashed, EDNS-hostile forwarder)
+                    # -- worth a warning, since dig's own stderr is not
+                    # surfaced (the mageia/64K jemalloc SIGABRT hid behind
+                    # this exact silence, terok#1119).
+                    logger.warning(
+                        "dig returned nothing for %r but NSS resolved it — "
+                        "dig is broken in this environment",
+                        domain,
+                    )
             if not ips:
                 logger.warning("Domain %r resolved to no IPs (typo or DNS failure?)", domain)
             for ip in ips:

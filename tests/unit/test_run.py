@@ -382,26 +382,34 @@ def test_subprocess_runner_stores_nft_path() -> None:
 # ── getent_hosts tests ───────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    ("stdout", "expected"),
-    [
-        pytest.param(f"{TEST_IP1}       {TEST_DOMAIN}\n", [TEST_IP1], id="single-ip"),
-        pytest.param(
-            f"{TEST_IP1}       host1\n{TEST_IP2}       host2\n",
-            [TEST_IP1, TEST_IP2],
-            id="multiple-lines",
-        ),
-        pytest.param("", [], id="empty-output"),
-        pytest.param("not-an-ip    host\n", [], id="invalid-ip-skipped"),
-        pytest.param(f"\n{TEST_IP1}       {TEST_DOMAIN}\n\n", [TEST_IP1], id="blank-lines-skipped"),
-    ],
-)
-def test_getent_hosts(
+def test_getent_hosts_queries_both_families(
     runner: SubprocessRunner,
     subprocess_run: mock.Mock,
-    stdout: str,
-    expected: list[str],
 ) -> None:
-    """getent_hosts() parses IP addresses from getent output."""
-    subprocess_run.return_value = _completed(stdout=stdout)
-    assert runner.getent_hosts(TEST_DOMAIN) == expected
+    """Both address families are queried explicitly and results merge.
+
+    Plain ``getent hosts`` stops at the first family glibc resolves
+    (AAAA for dual-stack names), which left allow_v4 empty when dig was
+    broken (terok#1119) -- the fallback must ask v4 and v6 separately.
+    """
+    subprocess_run.side_effect = [
+        _completed(stdout=f"{TEST_IP1}   STREAM {TEST_DOMAIN}\n{TEST_IP1}   DGRAM  \n"),
+        _completed(stdout=f"2606:4700:4700::1111 STREAM {TEST_DOMAIN}\n"),
+    ]
+    assert runner.getent_hosts(TEST_DOMAIN) == [TEST_IP1, "2606:4700:4700::1111"]
+    databases = [call.args[0][1] for call in subprocess_run.call_args_list]
+    assert databases == ["ahostsv4", "ahostsv6"]
+
+
+def test_getent_hosts_skips_non_stream_and_junk_lines(
+    runner: SubprocessRunner,
+    subprocess_run: mock.Mock,
+) -> None:
+    """Only STREAM rows with valid addresses count; duplicates collapse."""
+    subprocess_run.side_effect = [
+        _completed(
+            stdout=f"{TEST_IP1} STREAM a\n{TEST_IP1} STREAM b\nnot-an-ip STREAM c\nbare-line\n"
+        ),
+        _completed(stdout=""),
+    ]
+    assert runner.getent_hosts(TEST_DOMAIN) == [TEST_IP1]

@@ -201,22 +201,27 @@ class SubprocessRunner:
         return result
 
     def getent_hosts(self, domain: str) -> list[str]:
-        """Resolve domain via ``getent hosts`` (fallback when dig is missing).
+        """Resolve domain via NSS (fallback when dig is missing or broken).
 
-        Returns validated IP addresses from NSS resolution.  Typically
-        returns fewer results than ``dig`` (often a single address).
+        Queries both address families explicitly: plain ``getent hosts``
+        stops at the first family glibc resolves (AAAA for dual-stack
+        names), which left ``allow_v4`` empty on the one host whose dig
+        crashes -- an allowed literal-IPv4 target then hit the terminal
+        reject as "Host is unreachable" (terok#1119).
         """
-        out = self.run(["getent", "hosts", domain], check=False, timeout=10)
         result: list[str] = []
-        for line in out.splitlines():
-            parts = line.strip().split()
-            if not parts:
-                continue
-            try:
-                _ipaddress.ip_address(parts[0])
-                result.append(parts[0])
-            except ValueError:
-                continue
+        for database in ("ahostsv4", "ahostsv6"):
+            out = self.run(["getent", database, domain], check=False, timeout=10)
+            for line in out.splitlines():
+                parts = line.strip().split()
+                if len(parts) < 2 or parts[1] != "STREAM":
+                    continue
+                try:
+                    _ipaddress.ip_address(parts[0])
+                except ValueError:
+                    continue
+                if parts[0] not in result:
+                    result.append(parts[0])
         return result
 
 
