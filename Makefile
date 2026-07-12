@@ -79,6 +79,11 @@ test-integration:
 #   SCOPE=unit    Run only unit tests (or: integ)
 #   SLOTS="fedora43 debian13"  Run specific slots only
 #   JOBS=4        Run up to N slots concurrently (live output, [slot]-tagged lines)
+# `make -j 4 test-matrix` works too: GNU make >= 4.3 exposes -jN in MAKEFLAGS,
+# and JOBS defaults to it.  An explicit JOBS= always wins; bare -j (unlimited)
+# carries no number and falls back to serial.
+MAKE_JOBS = $(patsubst -j%,%,$(filter -j%,$(MAKEFLAGS)))
+JOBS ?= $(MAKE_JOBS)
 test-matrix:
 	uv run terok-matrix \
 		$(if $(NO_CACHE),--no-cache) \
