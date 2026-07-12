@@ -78,7 +78,7 @@ test-integration:
 #   BUILD_ONLY=1  Build images without running tests
 #   SCOPE=unit    Run only unit tests (or: integ)
 #   SLOTS="fedora43 debian13"  Run specific slots only
-#   JOBS=4        Run up to N slots concurrently (logs print en bloc per slot)
+#   JOBS=4        Run up to N slots concurrently (live output, [slot]-tagged lines)
 test-matrix:
 	uv run terok-matrix \
 		$(if $(NO_CACHE),--no-cache) \
