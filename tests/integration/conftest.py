@@ -33,7 +33,7 @@ from terok_shield.podman_info import has_global_hooks, parse_podman_info
 from terok_shield.run import find_nft, which_sbin_aware
 from tests.testnet import ALLOWED_TARGET_IPS
 
-from .helpers import start_shielded_container
+from .helpers import keepalive, start_shielded_container
 
 IMAGE = "docker.io/library/alpine:latest"
 CTR_PREFIX = "shield-itest"
@@ -78,7 +78,7 @@ def _podman_rm(name: str) -> None:
     """
     try:
         subprocess.run(
-            ["podman", "rm", "-f", name], capture_output=True, timeout=_PODMAN_RM_TIMEOUT
+            ["podman", "rm", "-f", "-t", "0", name], capture_output=True, timeout=_PODMAN_RM_TIMEOUT
         )
     except subprocess.TimeoutExpired:
         warnings.warn(
@@ -291,7 +291,7 @@ def nft_in_netns(_pull_image: None, _verify_connectivity: None) -> None:
     _podman_rm(name)
     try:
         subprocess.run(
-            ["podman", "run", "-d", "--name", name, IMAGE, "sleep", "30"],
+            ["podman", "run", "-d", "--name", name, IMAGE, *keepalive(30)],
             check=True,
             capture_output=True,
             timeout=30,
@@ -325,7 +325,7 @@ def container(_pull_image: None) -> Iterator[str]:
     _podman_rm(name)
     try:
         subprocess.run(
-            ["podman", "run", "-d", "--name", name, IMAGE, "sleep", "120"],
+            ["podman", "run", "-d", "--name", name, IMAGE, *keepalive(120)],
             check=True,
             capture_output=True,
             timeout=30,
@@ -355,7 +355,7 @@ def probe_container(_pull_image: None) -> Iterator[str]:
     _podman_rm(name)
     try:
         subprocess.run(
-            ["podman", "run", "-d", "--name", name, IMAGE, "sleep", "120"],
+            ["podman", "run", "-d", "--name", name, IMAGE, *keepalive(120)],
             check=True,
             capture_output=True,
             timeout=30,
