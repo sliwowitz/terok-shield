@@ -89,6 +89,21 @@ def _hook_diagnostics(extra_args: list[str]) -> str:
     return f"{diag}\n  [diag] no hook JSON found in any hooks directory"
 
 
+def keepalive(seconds: int) -> list[str]:
+    """A TERM-responsive keep-the-container-alive command.
+
+    Bare ``sleep`` as PID 1 installs no SIGTERM handler and PID 1 ignores
+    unhandled signals, so every ``podman stop``/``restart``/``rm -f`` of
+    such a container burns the full stop timeout (10s by default) before
+    the SIGKILL.  Trapping TERM makes teardown and the restart-path tests
+    complete in milliseconds — and is the more realistic workload shape.
+
+    Args:
+        seconds: Upper bound on the container's lifetime.
+    """
+    return ["sh", "-c", f"trap 'exit 0' TERM; sleep {seconds} & wait"]
+
+
 def start_shielded_container(
     name: str, extra_args: list[str], image: str, timeout: int = 30
 ) -> str:
@@ -113,7 +128,7 @@ def start_shielded_container(
         RuntimeError: If podman run exits non-zero, with stderr/stdout details.
     """
     result = subprocess.run(
-        ["podman", "run", "-d", "--name", name, *extra_args, image, "sleep", "120"],
+        ["podman", "run", "-d", "--name", name, *extra_args, image, *keepalive(120)],
         capture_output=True,
         text=True,
         timeout=timeout,
