@@ -36,7 +36,7 @@ dynamic = ["version"]
 dependencies = [
     "PyYAML~=6.0",
     "pydantic~=2.13",
-    "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.2.2a1/terok_util-0.2.2a1-py3-none-any.whl",
+    "terok-util @ git+https://github.com/sliwowitz/terok-util.git@feat/uv-port",
 ]
 
 [project.urls]
@@ -73,7 +73,7 @@ docs = [
     "mkdocs-literate-nav>=0.6",
     "mkdocs-section-index>=0.3",
     "mkdocs-gen-files>=0.5",
-    "mkdocs-terok>=0.7.4,<0.8",
+    "mkdocs-terok @ https://github.com/terok-ai/mkdocs-terok/releases/download/v0.8.0a1/mkdocs_terok-0.8.0a1-py3-none-any.whl",
 ]
 
 [tool.uv]
