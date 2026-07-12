@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 #
-# Multi-distro integration test matrix.
-# Requires a self-hosted runner with podman, --privileged support, and
-# uv.  Will NOT work on GitHub-hosted runners (no nested containers).
-#
-# The slot list is derived from tests/containers/matrix.yml (the single
-# source of truth the local runs use) via `terok-matrix --slots-json`.
+# Multi-distro integration test matrix on the self-hosted runner.
+# Thin caller: the jobs live in terok-util's reusable
+# fleet-test-matrix.yml; the slot list is derived from this repo's
+# tests/containers/matrix.yml via `terok-matrix --slots-json`.
 name: Test Matrix
 
 on:
@@ -21,30 +19,7 @@ permissions:
   contents: read
 
 jobs:
-  slots:
-    if: github.repository == 'terok-ai/terok-shield'
-    runs-on: self-hosted
-    outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install the matrix engine (terok-util via uv)
-        run: uv sync --locked --no-default-groups --no-install-project
-      - id: gen
-        run: echo "matrix=$(uv run --no-sync terok-matrix --slots-json ${{ inputs.slots }})" >> "$GITHUB_OUTPUT"
-
   matrix:
-    needs: slots
-    runs-on: self-hosted
-    strategy:
-      fail-fast: false
-      matrix:
-        slot: ${{ fromJSON(needs.slots.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Install the matrix engine (terok-util via uv)
-        run: uv sync --locked --no-default-groups --no-install-project
-      - name: Run test matrix (${{ matrix.slot }})
-        run: uv run --no-sync terok-matrix ${{ matrix.slot }}
+    uses: terok-ai/terok-util/.github/workflows/fleet-test-matrix.yml@v0.3.0a5
+    with:
+      slots: ${{ inputs.slots }}
