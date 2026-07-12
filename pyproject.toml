@@ -36,7 +36,7 @@ dynamic = ["version"]
 dependencies = [
     "PyYAML~=6.0",
     "pydantic~=2.13",
-    "terok-util>=0.2.2a1,<0.3.0",
+    "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.2.2a1/terok_util-0.2.2a1-py3-none-any.whl",
 ]
 
 [project.urls]
@@ -79,8 +79,11 @@ docs = [
 [tool.uv]
 default-groups = ["dev", "test"]
 
-[tool.uv.sources]
-terok-util = { git = "https://github.com/sliwowitz/terok-util", branch = "feat/uv-port" }
+# The sibling terok-* wheels are URL-pinned during gh-only alpha cycles
+# (see the pinning policy in AGENTS.md); hatchling requires an explicit
+# opt-in for direct references in [project.dependencies].
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
