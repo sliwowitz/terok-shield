@@ -31,4 +31,5 @@ class TestFindNft:
 
     def test_result_is_stable(self) -> None:
         """Repeated calls return the same path."""
-        assert find_nft() == find_nft()
+        first, second = find_nft(), find_nft()
+        assert first == second
