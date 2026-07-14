@@ -57,6 +57,10 @@ from .constants import (
 
 _SAFE_TIMEOUT_RE = re.compile(r"^\d+[smhd]$")
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# ``nft list`` prints element timeouts as compound durations (``1h22m10s``);
+# authored timeouts stay restricted to the single-unit _SAFE_TIMEOUT_RE.
+_ELEMENT_TIMEOUT_RE = re.compile(r"^(?:\d+[dhms])+$")
+_ELEMENTS_BLOCK_RE = re.compile(r"elements = \{(.*?)\}", re.DOTALL)
 
 # Cross-family reject (auto-selects ICMP / ICMPv6 in an ``inet`` table).
 _REJECT = "reject with icmpx admin-prohibited"
@@ -490,6 +494,62 @@ def disarm_bypass_window() -> str:
         f"flush set {NFT_TABLE} {SET_BYPASS_WINDOW}_v4\n"
         f"flush set {NFT_TABLE} {SET_BYPASS_WINDOW}_v6\n"
     )
+
+
+def parse_set_elements(nft_output: str) -> list[tuple[str, str]]:
+    """Parse ``nft list set`` output into ``(ip, timeout)`` pairs.
+
+    *timeout* is the element's printed timeout token (``"30m"``, ``"0s"``,
+    compound ``"1h22m"``) or ``""`` when the element carries none.  The
+    remaining ``expires`` countdown is deliberately dropped — a restore via
+    [`restore_elements`][terok_shield.nft.rules.restore_elements] re-grants
+    the full timeout.  Atoms that fail validation are skipped rather than
+    raised: the snapshot/restore path is best-effort by design (a dropped
+    learned IP is re-learned on the workload's next DNS answer), and a
+    parse quirk must never abort a shield state transition.
+    """
+    block = _ELEMENTS_BLOCK_RE.search(nft_output)
+    if not block:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for atom in block.group(1).split(","):
+        tokens = atom.split()
+        if not tokens:
+            continue
+        try:
+            ip = safe_ip(tokens[0])
+        except ValueError:
+            continue
+        timeout = ""
+        if len(tokens) >= 3 and tokens[1] == "timeout" and _ELEMENT_TIMEOUT_RE.fullmatch(tokens[2]):
+            timeout = tokens[2]
+        pairs.append((ip, timeout))
+    return pairs
+
+
+def restore_elements(set_name: str, elements: list[tuple[str, str]], table: str = NFT_TABLE) -> str:
+    """Generate an nft command re-adding dumped ``(ip, timeout)`` elements.
+
+    Counterpart of [`parse_set_elements`][terok_shield.nft.rules.parse_set_elements]:
+    every input is re-validated before interpolation (the snapshot crosses a
+    subprocess boundary, so it is treated as untrusted like any other input).
+    Timed elements are re-granted their full timeout.  Returns ``""`` when
+    there is nothing to restore.
+    """
+    set_name = _safe_ident(set_name)
+    table = " ".join(_safe_ident(part) for part in table.split())
+    parts: list[str] = []
+    for ip, timeout in elements:
+        ip = safe_ip(ip)
+        if not timeout:
+            parts.append(ip)
+            continue
+        if not _ELEMENT_TIMEOUT_RE.fullmatch(timeout):
+            raise ValueError(f"Invalid element timeout: {timeout!r}")
+        parts.append(f"{ip} timeout {timeout}")
+    if not parts:
+        return ""
+    return f"add element {table} {set_name} {{ {', '.join(parts)} }}\n"
 
 
 def add_elements(

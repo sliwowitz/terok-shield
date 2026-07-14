@@ -30,6 +30,8 @@ from terok_shield.nft.rules import (
     arm_bypass_window,
     delete_deny_elements_dual,
     disarm_bypass_window,
+    parse_set_elements,
+    restore_elements,
     safe_ip,
 )
 
@@ -1008,3 +1010,91 @@ class TestSetTimeout:
         """Invalid set_timeout in RulesetBuilder is rejected."""
         with pytest.raises(ValueError):
             RulesetBuilder(set_timeout="bad")
+
+
+# ── Set-element snapshot parsing / restore ──────────────
+
+
+def _list_set_output(elements: str) -> str:
+    """Wrap an elements block in realistic ``nft list set`` output."""
+    return (
+        "table inet terok_shield {\n"
+        "\tset t40_project_allow_v4 {\n"
+        "\t\ttype ipv4_addr\n"
+        "\t\tflags interval,timeout\n"
+        "\t\ttimeout 30m\n"
+        f"\t\telements = {{ {elements} }}\n"
+        "\t}\n"
+        "}\n"
+    )
+
+
+class TestParseSetElements:
+    """parse_set_elements() — snapshotting a live allow set."""
+
+    def test_parses_timed_permanent_and_bare_elements(self) -> None:
+        """Learned (timed), seeded (0s), and untimed elements all round out."""
+        out = _list_set_output(
+            f"{TEST_IP1} timeout 30m expires 22m10s,\n"
+            f"\t\t\t     {TEST_IP2} timeout 0s,\n"
+            f"\t\t\t     {TEST_NET1} }}"
+        )
+        assert parse_set_elements(out) == [
+            (TEST_IP1, "30m"),
+            (TEST_IP2, "0s"),
+            (TEST_NET1, ""),
+        ]
+
+    def test_compound_timeout_is_preserved(self) -> None:
+        """nft prints compound durations (1h22m10s) — kept verbatim."""
+        out = _list_set_output(f"{TEST_IP1} timeout 1h22m10s expires 5s")
+        assert parse_set_elements(out) == [(TEST_IP1, "1h22m10s")]
+
+    def test_invalid_atoms_are_skipped(self) -> None:
+        """Garbage atoms never abort the snapshot (best-effort by design)."""
+        out = _list_set_output(f"not-an-ip timeout 5m, {TEST_IP1}")
+        assert parse_set_elements(out) == [(TEST_IP1, "")]
+
+    def test_no_elements_block_yields_empty(self) -> None:
+        """A set without elements (or non-set output) snapshots to nothing."""
+        assert parse_set_elements("table inet terok_shield {\n\tset x {\n\t}\n}") == []
+        assert parse_set_elements("") == []
+
+
+class TestRestoreElements:
+    """restore_elements() — replaying a snapshot into a rebuilt table."""
+
+    def test_emits_single_grouped_add(self) -> None:
+        """All elements of one set land in one add command, timeouts intact."""
+        cmd = restore_elements(
+            "t40_project_allow_v4", [(TEST_IP1, "30m"), (TEST_IP2, "0s"), (TEST_NET1, "")]
+        )
+        assert cmd == (
+            f"add element inet terok_shield t40_project_allow_v4 "
+            f"{{ {TEST_IP1} timeout 30m, {TEST_IP2} timeout 0s, {TEST_NET1} }}\n"
+        )
+
+    def test_round_trips_a_parsed_snapshot(self) -> None:
+        """parse → restore reproduces every element with its timeout."""
+        out = _list_set_output(f"{TEST_IP1} timeout 30m expires 2m, {TEST_IP2} timeout 0s")
+        cmd = restore_elements("t40_project_allow_v4", parse_set_elements(out))
+        assert f"{TEST_IP1} timeout 30m" in cmd
+        assert f"{TEST_IP2} timeout 0s" in cmd
+        assert "expires" not in cmd  # a restore re-grants the full timeout
+
+    def test_empty_snapshot_restores_nothing(self) -> None:
+        """No elements → no command."""
+        assert restore_elements("t40_project_allow_v4", []) == ""
+
+    @pytest.mark.parametrize("timeout", ["30m; drop", "abc", "5"])
+    def test_rejects_unsafe_timeouts(self, timeout: str) -> None:
+        """A timeout that is not a pure nft duration never reaches the shell."""
+        with pytest.raises(ValueError):
+            restore_elements("t40_project_allow_v4", [(TEST_IP1, timeout)])
+
+    def test_rejects_unsafe_identifiers_and_ips(self) -> None:
+        """Set names and IPs are validated like every other nft input."""
+        with pytest.raises(ValueError):
+            restore_elements("bad; flush ruleset", [(TEST_IP1, "")])
+        with pytest.raises(ValueError):
+            restore_elements("t40_project_allow_v4", [("not-an-ip", "")])
