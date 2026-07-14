@@ -36,7 +36,7 @@ dynamic = ["version"]
 dependencies = [
     "PyYAML~=6.0",
     "pydantic~=2.13",
-    "terok-util @ git+https://github.com/sliwowitz/terok-util.git@feat/supervisor-process-split",
+    "terok-util @ https://github.com/terok-ai/terok-util/releases/download/v0.3.1a1/terok_util-0.3.1a1-py3-none-any.whl",
 ]
 
 [project.urls]
@@ -87,7 +87,7 @@ allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
-fallback-version = "0.8.0a3"
+fallback-version = "0.8.0a4"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terok_shield"]
