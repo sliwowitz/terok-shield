@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import signal
+from collections.abc import Sequence
 from pathlib import Path
 
 from ..nft.constants import DNSMASQ_BIND_DEFAULT, NFT_TABLE_NAME, TIER_PROJECT_ALLOW
@@ -37,7 +38,12 @@ _DOMAIN_RE = re.compile(r"^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-
 # ── Lifecycle ──────────────────────────────────────────
 
 
-def reload(state_dir: Path, upstream_dns: str, domains: list[str]) -> None:
+def reload(
+    state_dir: Path,
+    upstream_dns: str,
+    domains: list[str],
+    deny_domains: Sequence[str] = (),
+) -> None:
     """Regenerate dnsmasq config and signal the daemon to reload.
 
     Sends SIGHUP to the running dnsmasq, which re-reads its config file.
@@ -47,6 +53,7 @@ def reload(state_dir: Path, upstream_dns: str, domains: list[str]) -> None:
         state_dir: Per-container state directory.
         upstream_dns: Upstream DNS forwarder address.
         domains: Updated domain names for nftset auto-population.
+        deny_domains: Denied domain names for DNS-plane NXDOMAIN sinkholes.
 
     Raises:
         RuntimeError: If dnsmasq PID exists but the process is gone
@@ -79,6 +86,7 @@ def reload(state_dir: Path, upstream_dns: str, domains: list[str]) -> None:
             pid_path,
             listen_address=listen_address,
             log_path=log_path,
+            deny_domains=deny_domains,
         )
     )
     try:
@@ -103,6 +111,16 @@ def read_merged_domains(state_dir: Path) -> list[str]:
     return StateBundle(state_dir).read_effective().dnsmasq_domains()
 
 
+def read_denied_domains(state_dir: Path) -> list[str]:
+    """Denied (``-``) domains from the composed policy bundle.
+
+    Fed to [`generate_config`][terok_shield.dns.dnsmasq.generate_config] as
+    DNS-plane sinkholes, so a denied name stops resolving at all instead of
+    resolving and then timing out against the packet filter.
+    """
+    return StateBundle(state_dir).read_effective().deny_domains()
+
+
 # ── Container DNS setup ────────────────────────────────
 
 
@@ -116,8 +134,16 @@ def generate_config(
     *,
     listen_address: str,
     log_path: Path | None = None,
+    deny_domains: Sequence[str] = (),
 ) -> str:
     """Generate a complete dnsmasq configuration.
+
+    ``cache-size=0`` is deliberate: dnsmasq only performs the ``--nftset``
+    add while processing an *upstream* reply, so a cached answer would hand
+    the workload an IP without re-arming its (timeout-carrying) allow-set
+    element.  With caching off, every query re-arms the element right before
+    the connection that needs it; the upstream forwarder sits one hop away
+    and caches on the host side.
 
     Args:
         upstream_dns: Upstream DNS forwarder (pasta or slirp4netns address).
@@ -128,6 +154,9 @@ def generate_config(
             /
             [`DNSMASQ_BIND_KRUN`][terok_shield.nft.constants.DNSMASQ_BIND_KRUN].
         log_path: If set, enable query logging to this file (for ``shield watch``).
+        deny_domains: Denied domains, sinkholed in the DNS plane (NXDOMAIN)
+            so they fail fast and observably instead of resolving and then
+            timing out against the packet filter.
 
     Raises:
         ValueError: If *upstream_dns* or *listen_address* is not a valid IP address.
@@ -141,6 +170,7 @@ def generate_config(
         "bind-interfaces",
         "no-resolv",
         "no-hosts",
+        "cache-size=0",
         f"server={upstream_dns}",
         f"pid-file={pid_path}",
     ]
@@ -152,7 +182,55 @@ def generate_config(
         except ValueError:
             logger.warning("generate_config: skipping invalid domain entry")
             continue
+    lines += deny_config_lines(domains, deny_domains, upstream_dns)
     return "\n".join(lines) + "\n"
+
+
+def deny_config_lines(
+    allow_domains: Sequence[str], deny_domains: Sequence[str], upstream_dns: str
+) -> list[str]:
+    """DNS-plane deny: NXDOMAIN sinkholes for denied domains, with punch-throughs.
+
+    Emits ``local=/dom/`` (never forwarded, answered NXDOMAIN) for each
+    denied domain.  dnsmasq matches domain directives by longest suffix, so
+    an *allowed* strict subdomain of a denied ancestor gets an explicit
+    ``server=/sub/upstream`` punch-through — mirroring the policy engine,
+    where the more specific allow entry survives the ancestor deny.
+
+    Two deliberate asymmetries with the packet filter:
+
+    - A deny at exactly an allowed domain's own name emits **no** sinkhole
+      (a same-specificity directive conflict has no defined winner in
+      dnsmasq); the IP tiers still govern actual connectivity.
+    - The sinkhole stops the *name*, not the address — an IP learned via a
+      legitimately allowed co-hosted domain remains reachable.  That gap is
+      intrinsic to L3/L4 enforcement; the DNS plane just fails the common
+      case fast and visibly.
+
+    Invalid entries are skipped with a warning, matching the nftset path.
+    """
+    allows = set()
+    for domain in allow_domains:
+        try:
+            allows.add(_strip_wildcard(_validate_domain(domain)))
+        except ValueError:
+            continue  # the nftset loop already warned about it
+    lines: list[str] = []
+    for domain in deny_domains:
+        try:
+            base = _strip_wildcard(_validate_domain(domain))
+        except ValueError:
+            logger.warning("deny_config_lines: skipping invalid deny entry")
+            continue
+        if base in allows:
+            continue  # same-specificity conflict — leave it to the IP tiers
+        lines.append(f"local=/{base}/")
+        lines += (
+            f"server=/{allowed}/{upstream_dns}"
+            for allowed in sorted(allows)
+            if allowed.endswith(f".{base}")
+        )
+    return list(dict.fromkeys(lines))
 
 
 def _extract_listen_address(conf_text: str) -> str | None:
@@ -179,10 +257,7 @@ def nftset_entry(domain: str) -> str:
 
         nftset=/github.com/4#inet#terok_shield#t40_project_allow_v4,6#inet#terok_shield#t40_project_allow_v6
     """
-    domain = _validate_domain(domain)
-    # Strip leading wildcard — dnsmasq nftset inherently matches subdomains.
-    if domain.startswith("*."):
-        domain = domain[2:]
+    domain = _strip_wildcard(_validate_domain(domain))
     return (
         f"nftset=/{domain}"
         f"/4#inet#{NFT_TABLE_NAME}#{TIER_PROJECT_ALLOW}_v4"
@@ -206,6 +281,11 @@ def has_nftset_support(runner: CommandRunner) -> bool:
 
 
 # ── Private helpers ────────────────────────────────────
+
+
+def _strip_wildcard(domain: str) -> str:
+    """Drop a leading ``*.`` — dnsmasq domain directives inherently match subdomains."""
+    return domain.removeprefix("*.")
 
 
 def _validate_domain(domain: str) -> str:

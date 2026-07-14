@@ -748,3 +748,13 @@ class TestReadInstalledHookVersion:
 
 
 from terok_shield.state import StateBundle
+
+
+def test_reset_dispatches_and_logs(make_shield: ShieldHarnessFactory) -> None:
+    """reset() delegates to the backend and writes a shield_reset audit event."""
+    harness = make_shield()
+
+    harness.shield.reset("test-ctr")
+
+    harness.mode.shield_reset.assert_called_once_with("test-ctr")
+    harness.audit.log_event.assert_called_once_with("test-ctr", "shield_reset")

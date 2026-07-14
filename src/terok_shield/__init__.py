@@ -435,6 +435,17 @@ class Shield:
         self.audit.log_event(container, "shield_up")
         self.hub_events.shield_up(container, container_id, dossier=self._read_dossier())
 
+    def reset(self, container: str) -> None:
+        """Forget DNS-learned allow state, keeping the authored policy seeds.
+
+        The dnsmasq tier accumulates every IP the workload legitimately
+        resolved; ``reset`` returns the allow sets to their just-launched
+        contents (policy literals only) without touching the deny tier or
+        the operator's runtime overlay.
+        """
+        self._mode.shield_reset(container)
+        self.audit.log_event(container, "shield_reset")
+
     def _read_dossier(self) -> dict[str, str]:
         """Resolve the wire dossier for this container by reading the orchestrator's task meta.
 

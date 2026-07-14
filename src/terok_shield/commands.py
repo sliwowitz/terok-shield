@@ -71,6 +71,11 @@ COMMANDS: CommandTree = CommandTree(
         _lazy("down", "Switch container to bypass mode (accept-all + log)", "control:DOWN"),
         _lazy("up", "Restore deny-all mode for a container", "control:UP"),
         _lazy(
+            "reset",
+            "Forget DNS-learned allow state (back to authored policy seeds)",
+            "control:RESET",
+        ),
+        _lazy(
             "quarantine",
             "Total network blackout (drop all, log dropped traffic)",
             "control:QUARANTINE",

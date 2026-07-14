@@ -29,12 +29,14 @@ own network namespace.
    [Per-container state bundle](#per-container-state-bundle) for where they
    land), processes the allowlist profiles, and pre-generates the complete nft
    ruleset to `ruleset.nft`. DNS handling differs by tier:
-   - **dnsmasq tier**: domain names are written to `profile.domains` for dnsmasq
-     `--nftset` runtime resolution; only raw IP entries are resolved and written
-     to `profile.allowed`. dnsmasq populates the nft allow sets at runtime as
-     the container makes DNS queries.
-   - **dig / getent tier**: all entries (domains and raw IPs) are resolved to IPs
-     at pre-start time and written to `profile.allowed`; no runtime resolution.
+   - **dnsmasq tier**: no pre-resolution at all — the composed policy lands in
+     `policy/40-project-allow`, literal IP entries seed the allow sets via the
+     generated ruleset, and dnsmasq `--nftset` populates the sets at runtime,
+     per DNS query, *before* the answer reaches the workload. Launch cost stays
+     O(1) in allowlist size and CDN rotation is tracked for free.
+   - **dig / getent tier**: all entries (domains and raw IPs) are statically
+     resolved at pre-start time into the `resolved.ips` cache; no runtime
+     resolution or rotation tracking.
 
    Returns podman args with OCI annotations (`state_dir`, `loopback_ports`,
    `version`, `upstream_dns`, `dns_tier`)

@@ -10,9 +10,10 @@ prefer domain names over raw IPs because CDN addresses rotate.
 Falls back to ``getent hosts`` when ``dig`` is not installed, and
 per-domain when ``dig`` runs but yields nothing (some environments break
 ``dig`` while glibc resolution still works) — fewer IPs are captured
-(no parallel A + AAAA query), but resolution still works.  When the
-dnsmasq tier is active, domain resolution happens at runtime via
-``--nftset``; this module then only handles raw IPs.
+(no parallel A + AAAA query), but resolution still works.  The dnsmasq tier does not use this module at launch at all —
+domain resolution happens at runtime via ``--nftset``; static resolution
+is the fallback tiers' (dig/getent) enforcement mechanism and the
+``shield resolve`` warm-up path.
 """
 # WAYPOINT: Shield (__init__), HookMode (hooks.mode)
 

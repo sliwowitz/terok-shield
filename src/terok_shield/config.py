@@ -211,6 +211,10 @@ class ShieldModeBackend(Protocol):
         """Restore normal deny-all mode for a container."""
         ...
 
+    def shield_reset(self, container: str) -> None:
+        """Forget learned allow-set state, keeping the authored policy seeds."""
+        ...
+
     def shield_state(self, container: str) -> ShieldState:
         """Query a container's shield state from the live ruleset."""
         ...

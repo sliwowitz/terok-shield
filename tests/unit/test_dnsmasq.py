@@ -10,9 +10,11 @@ import pytest
 
 from terok_shield.dns.dnsmasq import (
     _validate_domain,
+    deny_config_lines,
     generate_config,
     has_nftset_support,
     nftset_entry,
+    read_denied_domains,
     read_merged_domains,
     reload,
 )
@@ -22,6 +24,7 @@ from terok_shield.nft.constants import (
     NFT_TABLE_NAME,
     PASTA_DNS,
 )
+from terok_shield.state import StateBundle
 
 from ..testnet import TEST_DOMAIN, TEST_DOMAIN2
 
@@ -444,4 +447,97 @@ def test_has_nftset_support_missing_dnsmasq() -> None:
     assert has_nftset_support(runner) is False
 
 
-from terok_shield.state import StateBundle
+# ── cache-size + DNS-plane deny ─────────────────────────
+
+
+def test_generate_config_disables_dnsmasq_cache(tmp_path: Path) -> None:
+    """cache-size=0: a cached answer would skip the --nftset add and hand the
+    workload an IP whose (timed) allow-set element was never re-armed."""
+    pid_path = StateBundle(tmp_path).dnsmasq_pid
+    config = generate_config(PASTA_DNS, [], pid_path, listen_address=DNSMASQ_BIND_DEFAULT)
+    assert "cache-size=0" in config
+
+
+def test_generate_config_sinkholes_denied_domains(tmp_path: Path) -> None:
+    """A denied domain gets a local=/dom/ NXDOMAIN sinkhole line."""
+    pid_path = StateBundle(tmp_path).dnsmasq_pid
+    config = generate_config(
+        PASTA_DNS,
+        [TEST_DOMAIN],
+        pid_path,
+        listen_address=DNSMASQ_BIND_DEFAULT,
+        deny_domains=[TEST_DOMAIN2],
+    )
+    assert f"local=/{TEST_DOMAIN2}/" in config
+    assert f"nftset=/{TEST_DOMAIN}/" in config
+
+
+class TestDenyConfigLines:
+    """deny_config_lines() — sinkholes, punch-throughs, and their edge cases."""
+
+    def test_denied_domain_is_sinkholed(self) -> None:
+        """Plain deny → one local=/dom/ line, nothing else."""
+        assert deny_config_lines([], [TEST_DOMAIN], PASTA_DNS) == [f"local=/{TEST_DOMAIN}/"]
+
+    def test_allowed_subdomain_of_denied_ancestor_gets_punch_through(self) -> None:
+        """dnsmasq matches by longest suffix — the specific allow must outrank
+        the ancestor sinkhole, mirroring the policy engine's composition."""
+        sub = f"api.{TEST_DOMAIN}"
+        lines = deny_config_lines([sub], [TEST_DOMAIN], PASTA_DNS)
+        assert f"local=/{TEST_DOMAIN}/" in lines
+        assert f"server=/{sub}/{PASTA_DNS}" in lines
+
+    def test_wildcards_are_stripped_on_both_sides(self) -> None:
+        """*.dom deny and *.sub allow behave as their base domains."""
+        sub = f"api.{TEST_DOMAIN}"
+        lines = deny_config_lines([f"*.{sub}"], [f"*.{TEST_DOMAIN}"], PASTA_DNS)
+        assert f"local=/{TEST_DOMAIN}/" in lines
+        assert f"server=/{sub}/{PASTA_DNS}" in lines
+
+    def test_same_name_conflict_emits_no_sinkhole(self) -> None:
+        """Deny at exactly an allowed name: a same-specificity dnsmasq directive
+        conflict has no defined winner — leave the verdict to the IP tiers."""
+        assert deny_config_lines([TEST_DOMAIN], [TEST_DOMAIN], PASTA_DNS) == []
+
+    def test_unrelated_allow_gets_no_punch_through(self) -> None:
+        """Only strict subdomains of the denied base punch through."""
+        lines = deny_config_lines([TEST_DOMAIN2], [TEST_DOMAIN], PASTA_DNS)
+        assert lines == [f"local=/{TEST_DOMAIN}/"]
+
+    def test_invalid_deny_entries_are_skipped(self) -> None:
+        """Malformed deny entries are dropped with a warning, like the nftset path."""
+        assert deny_config_lines([], ["not a domain!"], PASTA_DNS) == []
+
+    def test_duplicate_lines_are_deduplicated(self) -> None:
+        """Two denied ancestors of one allow yield a single punch-through."""
+        sub_base = f"sub.{TEST_DOMAIN}"
+        allowed = f"api.{sub_base}"
+        lines = deny_config_lines([allowed], [TEST_DOMAIN, sub_base], PASTA_DNS)
+        assert lines.count(f"server=/{allowed}/{PASTA_DNS}") == 1
+
+
+def test_read_denied_domains_composes_from_policy(tmp_path: Path) -> None:
+    """read_denied_domains() surfaces '-' domains from the tiered bundle."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
+    bundle.overlay_set("-", TEST_DOMAIN2)
+    assert read_denied_domains(tmp_path) == [TEST_DOMAIN2]
+
+
+def test_reload_writes_deny_sinkholes(tmp_path: Path) -> None:
+    """reload() regenerates the config with the deny sinkholes included."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.dnsmasq_pid.write_text("12345\n")
+    bundle.dnsmasq_conf.write_text(f"listen-address={DNSMASQ_BIND_DEFAULT}\n")
+
+    with (
+        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.dns.dnsmasq.os.kill"),
+    ):
+        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], [TEST_DOMAIN2])
+
+    conf = bundle.dnsmasq_conf.read_text()
+    assert f"nftset=/{TEST_DOMAIN}/" in conf
+    assert f"local=/{TEST_DOMAIN2}/" in conf

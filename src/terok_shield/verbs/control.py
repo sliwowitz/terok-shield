@@ -66,6 +66,12 @@ def _handle_up(shield: Shield, container: str, *, container_id: str) -> None:
     print(f"Shield up for {container}")
 
 
+def _handle_reset(shield: Shield, container: str) -> None:
+    """Forget DNS-learned allow state."""
+    shield.reset(container)
+    print(f"Shield reset for {container} — learned allow state forgotten")
+
+
 def _handle_quarantine(shield: Shield, container: str) -> None:
     """Total network blackout."""
     shield.quarantine(container)
@@ -134,6 +140,14 @@ UP = CommandDef(
     handler=_handle_up,
     extras=NEEDS_CTR,
     args=(CONTAINER_ARG, CONTAINER_ID_ARG),
+)
+
+RESET = CommandDef(
+    name="reset",
+    help="Forget DNS-learned allow state (back to authored policy seeds)",
+    handler=_handle_reset,
+    extras=NEEDS_CTR,
+    args=(CONTAINER_ARG,),
 )
 
 QUARANTINE = CommandDef(

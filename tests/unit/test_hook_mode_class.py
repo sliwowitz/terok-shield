@@ -4,6 +4,7 @@
 """Tests for the HookMode class."""
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ from ..testnet import (
     TEST_DOMAIN,
     TEST_IP1,
     TEST_IP2,
+    TEST_IP3,
+    TEST_IP4,
 )
 from .helpers import write_lines
 
@@ -376,9 +379,11 @@ def test_shield_down_builds_bypass_ruleset(
     harness = make_hook_mode()
     # Mock DNS reading so _container_ruleset returns the mock ruleset
     harness.mode._container_ruleset = lambda _c: harness.ruleset
-    # shield_state() call (list_rules) + apply + verify
+    # shield_state() call (list_rules) + allow-set snapshot (v4+v6) + apply + verify
     harness.runner.nft_via_nsenter.side_effect = [
         "table inet terok_shield {}",  # shield_state() → list_rules
+        "",  # snapshot t40_project_allow_v4 (empty)
+        "",  # snapshot t40_project_allow_v6 (empty)
         "",  # apply bypass ruleset
         "bad output" if verify_errors else "valid output",  # verify
     ]
@@ -389,7 +394,7 @@ def test_shield_down_builds_bypass_ruleset(
 
     if expected_message is None:
         harness.mode.shield_down("test-ctr", allow_all=allow_all)
-        assert harness.runner.nft_via_nsenter.call_count == 3
+        assert harness.runner.nft_via_nsenter.call_count == 5
     else:
         with pytest.raises(RuntimeError, match=expected_message):
             harness.mode.shield_down("test-ctr", allow_all=allow_all)
@@ -398,9 +403,9 @@ def test_shield_down_builds_bypass_ruleset(
 @pytest.mark.parametrize(
     ("allowed_ips", "verify_errors", "expected_calls"),
     [
-        pytest.param([], [], 3, id="no-cached-ips"),
-        pytest.param([TEST_IP1], [], 4, id="readds-cached-ips"),
-        pytest.param([], ["error"], 3, id="verification-failure"),
+        pytest.param([], [], 5, id="no-cached-ips"),
+        pytest.param([TEST_IP1], [], 6, id="readds-cached-ips"),
+        pytest.param([], ["error"], 5, id="verification-failure"),
     ],
 )
 def test_shield_up_reapplies_hook_ruleset(
@@ -410,7 +415,12 @@ def test_shield_up_reapplies_hook_ruleset(
     verify_errors: list[str],
     expected_calls: int,
 ) -> None:
-    """shield_up() restores hook mode, optionally re-adding effective IPs."""
+    """shield_up() restores hook mode, optionally re-adding effective IPs.
+
+    Call sequence: shield_state list, allow-set snapshot (v4+v6), apply,
+    optional element re-add, verify list — the empty snapshot yields no
+    restore call.
+    """
     harness = make_hook_mode(config=make_config())
     if allowed_ips:
         write_lines(StateBundle(harness.config.state_dir).resolved_cache, allowed_ips)
@@ -419,7 +429,9 @@ def test_shield_up_reapplies_hook_ruleset(
     # shield_state() call (list_rules) returns existing table (UP state)
     harness.runner.nft_via_nsenter.side_effect = [
         "table inet terok_shield {}",  # shield_state() → list_rules
-        *[""] * (expected_calls - 2),  # apply + optional elements
+        "",  # snapshot t40_project_allow_v4 (empty)
+        "",  # snapshot t40_project_allow_v6 (empty)
+        *[""] * (expected_calls - 4),  # apply + optional elements
         "valid output" if not verify_errors else "bad output",  # verify
     ]
     harness.ruleset.build_hook.return_value = "hook ruleset"
@@ -436,6 +448,148 @@ def test_shield_up_reapplies_hook_ruleset(
     else:
         harness.mode.shield_up("test-ctr")
     assert harness.runner.nft_via_nsenter.call_count == expected_calls
+
+
+def _snapshot_output(elements: str) -> str:
+    """Realistic ``nft list set`` output carrying *elements*."""
+    return (
+        "table inet terok_shield {\n"
+        "\tset t40_project_allow_v4 {\n"
+        "\t\ttype ipv4_addr\n"
+        "\t\tflags interval,timeout\n"
+        "\t\ttimeout 30m\n"
+        f"\t\telements = {{ {elements} }}\n"
+        "\t}\n"
+        "}\n"
+    )
+
+
+def _restore_stdins(runner_mock: mock.Mock) -> list[str]:
+    """Every non-empty stdin batch passed to nft_via_nsenter."""
+    calls = runner_mock.nft_via_nsenter.call_args_list
+    return [s for c in calls if (s := c.kwargs.get("stdin"))]
+
+
+def test_shield_up_restores_learned_elements(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """A down/up round trip must never forget dnsmasq-learned allow-set state.
+
+    The snapshot taken before the table rebuild is replayed after it, minus
+    entries the rebuild re-adds itself (effective seeds) and minus denied
+    entries (deny_ip() evicted them from the allow set deliberately).
+    """
+    harness = make_hook_mode(config=make_config())
+    bundle = StateBundle(harness.config.state_dir)
+    write_lines(bundle.resolved_cache, [TEST_IP1])  # effective seed
+    bundle.overlay_set("-", TEST_IP4)  # denied during bypass
+    harness.mode._container_ruleset = lambda _c: harness.ruleset
+    harness.runner.nft_via_nsenter.side_effect = [
+        "table inet terok_shield {}",  # shield_state()
+        _snapshot_output(
+            f"{TEST_IP1} timeout 0s, {TEST_IP3} timeout 30m expires 2m, {TEST_IP4} timeout 30m"
+        ),  # snapshot v4
+        "",  # snapshot v6
+        "",  # apply hook ruleset
+        "",  # re-add effective IPs
+        "",  # repopulate deny sets
+        "",  # restore learned elements
+        "valid output",  # verify
+    ]
+    harness.ruleset.build_hook.return_value = "hook ruleset"
+    harness.ruleset.verify_hook.return_value = []
+    harness.ruleset.verify_bypass.return_value = ["not bypass"]
+    harness.ruleset.add_elements_dual.return_value = f"add element {TEST_IP1}"
+
+    harness.mode.shield_up("test-ctr")
+
+    restore = next(s for s in _restore_stdins(harness.runner) if "t40_project_allow_v4" in s)
+    assert f"{TEST_IP3} timeout 30m" in restore  # learned survives, full timeout re-granted
+    assert TEST_IP1 not in restore  # seed re-added by the rebuild, not the restore
+    assert TEST_IP4 not in restore  # denied stays evicted
+
+
+def test_shield_down_carries_allow_sets_into_bypass(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """shield_down() replays the full allow-set snapshot into the bypass table.
+
+    Bypass mode does not evaluate the sets, but the later ``shield up``
+    snapshots this table — dropping them here would forget every learned IP
+    after one down/up round trip.
+    """
+    harness = make_hook_mode(config=make_config())
+    harness.mode._container_ruleset = lambda _c: harness.ruleset
+    harness.runner.nft_via_nsenter.side_effect = [
+        "table inet terok_shield {}",  # shield_state()
+        _snapshot_output(f"{TEST_IP1} timeout 0s, {TEST_IP3} timeout 30m"),  # snapshot v4
+        "",  # snapshot v6
+        "",  # apply bypass ruleset
+        "",  # restore allow sets
+        "valid output",  # verify
+    ]
+    harness.ruleset.build_bypass.return_value = "bypass ruleset"
+    harness.ruleset.verify_bypass.return_value = []
+    harness.ruleset.verify_hook.return_value = []
+
+    harness.mode.shield_down("test-ctr")
+
+    restore = next(s for s in _restore_stdins(harness.runner) if "t40_project_allow_v4" in s)
+    assert f"{TEST_IP1} timeout 0s" in restore
+    assert f"{TEST_IP3} timeout 30m" in restore
+
+
+def test_shield_up_survives_restore_failure(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed allow-set restore is logged, never raised.
+
+    Coming up with a cold allow set (the workload re-learns via DNS) beats
+    staying in bypass because a restore batch was rejected.
+    """
+    harness = make_hook_mode(config=make_config())
+    harness.mode._container_ruleset = lambda _c: harness.ruleset
+    harness.runner.nft_via_nsenter.side_effect = [
+        "table inet terok_shield {}",  # shield_state()
+        _snapshot_output(f"{TEST_IP3} timeout 30m"),  # snapshot v4
+        "",  # snapshot v6
+        "",  # apply hook ruleset
+        ExecError(["nft"], 1, "conflict"),  # restore fails
+        "valid output",  # verify
+    ]
+    harness.ruleset.build_hook.return_value = "hook ruleset"
+    harness.ruleset.verify_hook.return_value = []
+    harness.ruleset.verify_bypass.return_value = ["not bypass"]
+    harness.ruleset.add_elements_dual.return_value = ""
+
+    with caplog.at_level(logging.WARNING):
+        harness.mode.shield_up("test-ctr")  # must not raise
+
+    assert any("restore failed" in r.message for r in caplog.records)
+
+
+def test_shield_reset_flushes_and_reseeds_allow_sets(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """shield_reset() drops learned state and re-seeds literals in one transaction."""
+    harness = make_hook_mode(config=make_config())
+    write_lines(StateBundle(harness.config.state_dir).resolved_cache, [TEST_IP1])
+    harness.mode._container_ruleset = lambda _c: harness.ruleset
+    harness.ruleset.add_elements_dual.return_value = f"add element {TEST_IP1}\n"
+
+    harness.mode.shield_reset("test-ctr")
+
+    harness.ruleset.add_elements_dual.assert_called_once_with([TEST_IP1])
+    (stdin,) = _restore_stdins(harness.runner)
+    assert "flush set inet terok_shield t40_project_allow_v4" in stdin
+    assert "flush set inet terok_shield t40_project_allow_v6" in stdin
+    # Re-seed rides the same transaction — literals never blink out.
+    assert stdin.index("flush set") < stdin.index(f"add element {TEST_IP1}")
 
 
 @pytest.mark.parametrize(
@@ -1079,19 +1233,19 @@ class TestPreStartDnsTierBranches:
         assert "--dns" not in args
 
     @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
-    def test_pre_start_dnsmasq_tier_seeds_domains_and_ips(
+    def test_pre_start_dnsmasq_tier_skips_pre_resolution(
         self,
         _has_hooks: mock.Mock,
         monkeypatch: pytest.MonkeyPatch,
         make_hook_mode: HookModeHarnessFactory,
     ) -> None:
-        """DNSMASQ tier: write domains to profile.domains AND pre-resolve them for profile.allowed.
+        """DNSMASQ tier: no pre-resolution — dnsmasq populates the allow sets per query.
 
-        Pre-resolving the domains at pre_start is what keeps the initial allow
-        set populated with permanent IPs before dnsmasq starts servicing
-        container traffic — without it, the first connection for an
-        allowlisted domain hits the default-deny before dnsmasq's first
-        ``--nftset`` add lands.
+        dnsmasq commits every answered A/AAAA record to the sets before
+        forwarding the reply, so the workload cannot race its own answer;
+        launch stays O(1) in allowlist size.  A stale ``resolved.ips`` from
+        an earlier fallback-tier run is removed so the ruleset seeds from
+        literal IPs only.
         """
         _set_euid(monkeypatch, 0)
         harness = make_hook_mode()
@@ -1100,18 +1254,18 @@ class TestPreStartDnsTierBranches:
         )
         harness.runner.has.return_value = True  # dnsmasq available (nftset probed via run)
         harness.profiles.compose_profiles.return_value = [TEST_DOMAIN, TEST_IP1]
+        sd = harness.config.state_dir.resolve()
+        stale_cache = StateBundle(sd)
+        stale_cache.ensure_dirs()
+        stale_cache.resolved_cache.write_text(f"{TEST_IP2}\n")
 
         args = harness.mode.pre_start("test", ["dev-standard"])
 
-        # dnsmasq tier: resolve_and_cache called with BOTH domains and raw IPs so
-        # the initial t40_project_allow_v4/v6 sets have permanent seed entries.
-        harness.dns.resolve_and_cache.assert_called_once()
-        call_entries = harness.dns.resolve_and_cache.call_args[0][0]
-        assert TEST_IP1 in call_entries
-        assert TEST_DOMAIN in call_entries
+        # dnsmasq tier: no static resolution, and the stale cache is gone.
+        harness.dns.resolve_and_cache.assert_not_called()
+        assert not StateBundle(sd).resolved_cache.exists()
         # The composed profiles are written to the project-allow tier (domains
         # included) so dnsmasq's --nftset can add on-demand as new records arrive.
-        sd = harness.config.state_dir.resolve()
         project_allow = StateBundle(sd).tier_path("project_allow").read_text()
         assert f"+{TEST_DOMAIN}" in project_allow
         # No --dns flag (triggers pasta to bind host port 53, fails rootless).
