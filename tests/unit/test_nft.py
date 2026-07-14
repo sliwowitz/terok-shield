@@ -1060,6 +1060,11 @@ class TestParseSetElements:
         assert parse_set_elements("table inet terok_shield {\n\tset x {\n\t}\n}") == []
         assert parse_set_elements("") == []
 
+    def test_empty_atoms_are_skipped(self) -> None:
+        """A trailing comma or blank atom contributes nothing."""
+        out = _list_set_output(f"{TEST_IP1}, ")
+        assert parse_set_elements(out) == [(TEST_IP1, "")]
+
 
 class TestRestoreElements:
     """restore_elements() — replaying a snapshot into a rebuilt table."""

@@ -21,7 +21,7 @@ from terok_shield.config import (
     ShieldState,
 )
 from terok_shield.hooks.install import install_hooks
-from terok_shield.hooks.mode import HookMode
+from terok_shield.hooks.mode import HookMode, _covered
 from terok_shield.nft.constants import DNSMASQ_BIND_KRUN, PASTA_HOST_LOOPBACK_MAP
 from terok_shield.nft.rules import RulesetBuilder
 from terok_shield.run import ExecError
@@ -36,6 +36,7 @@ from ..testnet import (
     TEST_IP2,
     TEST_IP3,
     TEST_IP4,
+    TEST_NET1,
 )
 from .helpers import write_lines
 
@@ -570,6 +571,42 @@ def test_shield_up_survives_restore_failure(
         harness.mode.shield_up("test-ctr")  # must not raise
 
     assert any("restore failed" in r.message for r in caplog.records)
+
+
+def test_shield_down_tolerates_unsnapshottable_sets(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """A failed set listing (older ruleset, missing set) yields an empty snapshot.
+
+    The transition proceeds with nothing to restore — never an error.
+    """
+    harness = make_hook_mode(config=make_config())
+    harness.mode._container_ruleset = lambda _c: harness.ruleset
+    harness.runner.nft_via_nsenter.side_effect = [
+        "table inet terok_shield {}",  # shield_state()
+        ExecError(["nft"], 1, "No such file or directory"),  # snapshot v4 fails
+        ExecError(["nft"], 1, "No such file or directory"),  # snapshot v6 fails
+        "",  # apply bypass ruleset
+        "valid output",  # verify
+    ]
+    harness.ruleset.build_bypass.return_value = "bypass ruleset"
+    harness.ruleset.verify_bypass.return_value = []
+    harness.ruleset.verify_hook.return_value = []
+
+    harness.mode.shield_down("test-ctr")
+
+    assert not [s for s in _restore_stdins(harness.runner) if "add element" in s]
+
+
+def test_covered_matches_overlap_and_ignores_garbage() -> None:
+    """_covered(): interval overlap in either direction counts; unparseable
+    skip entries and family mismatches are ignored."""
+    assert _covered(TEST_IP1, [TEST_IP1])
+    assert _covered(TEST_IP1, [TEST_NET1])  # inside a skip CIDR
+    assert _covered(TEST_NET1, [TEST_IP1])  # skip IP inside the element
+    assert not _covered(TEST_IP1, ["not-an-ip", IPV6_CLOUDFLARE])
+    assert not _covered(TEST_IP1, [TEST_IP3])
 
 
 def test_shield_reset_flushes_and_reseeds_allow_sets(
