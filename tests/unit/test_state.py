@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from terok_shield.state import BUNDLE_VERSION, STATE_DIR_MODE, StateBundle
+from terok_shield.state import (
+    BUNDLE_VERSION,
+    STATE_DIR_MODE,
+    StateBundle,
+    migrate_legacy_policy,
+)
 
 from ..testfs import FAKE_STATE_DIR, READER_PID_FILENAME
 from ..testnet import TEST_DOMAIN, TEST_DOMAIN2, TEST_IP1, TEST_IP2, TEST_IP3
@@ -337,3 +342,73 @@ def test_ensure_dirs_creates_policy_dir_owner_only(tmp_path: Path) -> None:
     bundle.ensure_dirs()
     assert bundle.policy_dir.is_dir()
     assert stat.S_IMODE(bundle.policy_dir.stat().st_mode) == STATE_DIR_MODE
+
+
+# ── bundle.version + v14 → v15 migration ────────────────
+
+
+class TestBundleVersion:
+    """The bundle.version stamp — the OCI hook's restart gate."""
+
+    def test_round_trips(self, tmp_path: Path) -> None:
+        """write_bundle_version() stamps the current generation, read returns it."""
+        bundle = StateBundle(tmp_path)
+        assert bundle.read_bundle_version() is None  # never prepared / pre-v15
+        bundle.write_bundle_version()
+        assert bundle.read_bundle_version() == BUNDLE_VERSION
+
+    def test_garbage_reads_as_none(self, tmp_path: Path) -> None:
+        """A corrupted stamp is treated like a missing one (fail toward migrate)."""
+        bundle = StateBundle(tmp_path)
+        bundle.bundle_version.write_text("not-a-number\n")
+        assert bundle.read_bundle_version() is None
+
+
+class TestMigrateLegacyPolicy:
+    """One-way v14 split-file → v15 tiered-policy translation."""
+
+    @staticmethod
+    def _make_v14(tmp_path: Path) -> Path:
+        """A populated v14 bundle: authored domains + runtime allow/deny state."""
+        (tmp_path / "profile.domains").write_text(f"{TEST_DOMAIN}\n")
+        (tmp_path / "profile.allowed").write_text(f"{TEST_IP1}\n{TEST_IP2}\n")
+        (tmp_path / "live.allowed").write_text(f"{TEST_IP3}\n")
+        (tmp_path / "live.domains").write_text(f"{TEST_DOMAIN2}\n")
+        (tmp_path / "deny.list").write_text(f"{TEST_IP2}\n")
+        (tmp_path / "denied.domains").write_text("")
+        return tmp_path
+
+    def test_translates_and_removes_legacy_files(self, tmp_path: Path) -> None:
+        """Authored domains land in tier 40, runtime state in the overlay
+        (denies last, so the v14 deny-set precedence survives composition),
+        resolved IPs in the derived cache; the six v14 files are gone."""
+        sd = self._make_v14(tmp_path)
+
+        assert migrate_legacy_policy(sd) is True
+
+        bundle = StateBundle(sd)
+        assert f"+{TEST_DOMAIN}" in bundle.tier_path("project_allow").read_text()
+        overlay = bundle.policy_live.read_text().splitlines()
+        assert overlay.index(f"+{TEST_IP3}") < overlay.index(f"-{TEST_IP2}")
+        assert f"+{TEST_DOMAIN2}" in overlay
+        assert bundle.resolved_cache.read_text().splitlines() == [TEST_IP1, TEST_IP2]
+        assert not any((sd / name).exists() for name in ("profile.domains", "deny.list"))
+        # The composed result enforces the deny over the migrated allows.
+        assert TEST_IP2 in bundle.read_effective().deny_ips()
+
+    def test_noop_without_legacy_files(self, tmp_path: Path) -> None:
+        """A v15-native (or empty) bundle is left untouched."""
+        assert migrate_legacy_policy(tmp_path) is False
+        assert not StateBundle(tmp_path).policy_dir.exists()
+
+    def test_malformed_legacy_entry_aborts_before_deleting(self, tmp_path: Path) -> None:
+        """Validation runs before the point of no return — a garbage legacy
+        line raises and every v14 file survives for inspection."""
+        sd = self._make_v14(tmp_path)
+        (sd / "live.allowed").write_text("not a valid target!\n")
+
+        with pytest.raises(ValueError):
+            migrate_legacy_policy(sd)
+
+        assert (sd / "profile.domains").is_file()
+        assert (sd / "deny.list").is_file()

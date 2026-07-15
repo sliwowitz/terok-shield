@@ -154,6 +154,7 @@ class HookMode:
         self._write_policy_and_resolve(sd, entries, tier)
         StateBundle(sd).upstream_dns.write_text(f"{upstream_dns}\n")
         StateBundle(sd).dns_tier.write_text(f"{tier.value}\n")
+        StateBundle(sd).write_bundle_version()
         StateBundle(sd).loopback_ports.write_text(
             "".join(f"{p}\n" for p in self._config.loopback_ports)
         )
@@ -597,6 +598,42 @@ class HookMode:
         )
         stdin += ruleset.add_elements_dual(StateBundle(sd).read_effective_ips())
         self._runner.nft_via_nsenter(container, stdin=stdin)
+
+    def migrate_state(self) -> bool:
+        """One-way migration of a pre-v15 state bundle to the current layout.
+
+        Called before restarting a task container that predates the current
+        terok-shield: translates the legacy policy files
+        ([`migrate_legacy_policy`][terok_shield.state.migrate_legacy_policy]),
+        regenerates the artifacts the OCI hook consumes (``ruleset.nft``,
+        ``dnsmasq.conf``, ``resolv.conf``) from the persisted tier/upstream/
+        ports, and stamps ``bundle.version`` so the hook's restart gate opens.
+        Rules reset to the migrated policy — dnsmasq-learned state and (on the
+        dnsmasq tier) previously resolved seeds are not carried over.
+
+        Returns True when a migration ran, False when the bundle is already
+        current.  Raises RuntimeError when the bundle was never prepared
+        (no persisted upstream DNS) — there is nothing to migrate.
+        """
+        sd = self._config.state_dir.resolve()
+        bundle = StateBundle(sd)
+        if bundle.read_bundle_version() == state.BUNDLE_VERSION:
+            return False
+        state.migrate_legacy_policy(sd)
+        upstream = bundle.upstream_dns.read_text().strip() if bundle.upstream_dns.is_file() else ""
+        if not upstream:
+            raise RuntimeError(
+                "Cannot migrate: upstream DNS not persisted — this state dir was never prepared."
+            )
+        tier_txt = bundle.dns_tier.read_text().strip() if bundle.dns_tier.is_file() else ""
+        tier = DnsTier(tier_txt) if tier_txt else DnsTier.DIG
+        if tier == DnsTier.DNSMASQ:
+            bundle.resolved_cache.unlink(missing_ok=True)  # learned-first: no seed
+        gw_v4, gw_v6 = _gateways_for_mode(self._get_podman_info().network_mode or "pasta")
+        self._write_ruleset(sd, tier, upstream, gw_v4, gw_v6)
+        self._write_dnsmasq_config_or_scrub(sd, tier, upstream)
+        bundle.write_bundle_version()
+        return True
 
     # ── Allow-set snapshot/restore (down/up round trips) ─
 

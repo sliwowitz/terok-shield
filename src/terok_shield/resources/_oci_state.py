@@ -17,8 +17,8 @@ virtualenv, so a dependency on ``terok_shield`` would fail to import.
 Keep in sync with the package-side definitions:
 
 * ``BUNDLE_VERSION``     ↔ ``terok_shield.state.BUNDLE_VERSION``
+* ``BUNDLE_VERSION_FILE_NAME`` ↔ ``terok_shield.state.BUNDLE_VERSION_FILE``
 * ``ANN_STATE_DIR``      ↔ ``terok_shield.config.ANNOTATION_STATE_DIR_KEY``
-* ``ANN_VERSION``        ↔ ``terok_shield.config.ANNOTATION_VERSION_KEY``
 * ``META_PATH_FILE_NAME`` ↔ ``terok_shield.state.meta_path_file``
 """
 
@@ -38,15 +38,15 @@ from pathlib import Path
 ANN_STATE_DIR = "terok.shield.state_dir"
 """OCI annotation carrying the per-container shield state directory."""
 
-ANN_VERSION = "terok.shield.version"
-"""OCI annotation carrying the bundle version this container was prepared with."""
-
 BUNDLE_VERSION = 15
 """Wire-protocol version for the hook ↔ pre_start state-bundle contract.
 
 Bumped whenever the on-disk file layout, the hook → reader argv
 shape, or the wire payload changes incompatibly.  The nft hook hard-
-fails on an unsupported version — operator must re-run ``terok setup``.
+fails when the state dir's ``bundle.version`` file does not match —
+the remedy is a one-way bundle migration (``terok-shield migrate``,
+run automatically by terok's task restart), or ``terok setup`` when
+the hooks themselves are stale.
 
 v14: per-container host-loopback TCP ports are persisted at pre_start
 time as ``state_dir/loopback.ports`` (newline-separated list) — the
@@ -69,21 +69,16 @@ all dossier consumers project the live JSON to ``{project, task,
 name}``.
 """
 
-COMPAT_BUNDLE_VERSIONS = ("14", "15")
-"""Bundle versions this hook can serve at createRuntime (restart grandfathering).
+BUNDLE_VERSION_FILE_NAME = "bundle.version"
+"""State-dir file carrying the bundle's layout generation — the hook's gate.
 
-A container's shield artifacts are frozen at creation time, and at
-createRuntime the hook consumes only the format-stable subset —
-``ruleset.nft`` applied verbatim via nsenter stdin and ``dnsmasq.conf``
-handed to dnsmasq via ``--conf-file`` — never the policy bundle itself.
-The v14→v15 bundle rewrite (tiered ``policy/`` files) did not touch that
-surface, so tasks created under a v14 terok-shield restart cleanly under
-this hook with their own creation-time rules.
-
-Upgrade contract: an updated global hooks dir must never brick existing
-task containers.  Drop a version from this tuple only when the artifact
-surface the hook actually reads changes shape — not on every
-``BUNDLE_VERSION`` bump.
+The ``terok.shield.version`` *annotation* is frozen at container creation,
+so it records provenance but cannot gate restarts: after an upgrade, a
+one-way ``terok-shield migrate`` (run automatically by terok's task
+restart) translates the bundle and moves this file forward, letting the
+same container start again.  A missing or stale file fails closed with
+that instruction — an upgraded hooks dir must warn, never silently apply
+an old-layout bundle.
 """
 
 META_PATH_FILE_NAME = "meta_path"

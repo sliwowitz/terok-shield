@@ -72,6 +72,14 @@ def _handle_reset(shield: Shield, container: str) -> None:
     print(f"Shield reset for {container} — learned allow state forgotten")
 
 
+def _handle_migrate(shield: Shield, container: str) -> None:
+    """Migrate a pre-current state bundle (restart path for old tasks)."""
+    if shield.migrate(container):
+        print(f"Shield state bundle migrated for {container} — the container can start again")
+    else:
+        print(f"Shield state bundle for {container} is already current")
+
+
 def _handle_quarantine(shield: Shield, container: str) -> None:
     """Total network blackout."""
     shield.quarantine(container)
@@ -146,6 +154,14 @@ RESET = CommandDef(
     name="reset",
     help="Forget DNS-learned allow state (back to authored policy seeds)",
     handler=_handle_reset,
+    extras=NEEDS_CTR,
+    args=(CONTAINER_ARG,),
+)
+
+MIGRATE = CommandDef(
+    name="migrate",
+    help="Migrate an old task's shield state bundle to the current layout (one-way)",
+    handler=_handle_migrate,
     extras=NEEDS_CTR,
     args=(CONTAINER_ARG,),
 )

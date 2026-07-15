@@ -446,6 +446,20 @@ class Shield:
         self._mode.shield_reset(container)
         self.audit.log_event(container, "shield_reset")
 
+    def migrate(self, container: str) -> bool:
+        """One-way migration of *container*'s state bundle to the current layout.
+
+        The restart path for tasks created under an older terok-shield: the
+        OCI hook refuses a stale ``bundle.version``, and this call moves the
+        bundle forward (translating legacy policy files and regenerating the
+        hook artifacts) so the same container can start again.  Rules reset
+        to the migrated policy.  Returns True when a migration ran.
+        """
+        migrated = self._mode.migrate_state()
+        if migrated:
+            self.audit.log_event(container, "shield_migrate")
+        return migrated
+
     def _read_dossier(self) -> dict[str, str]:
         """Resolve the wire dossier for this container by reading the orchestrator's task meta.
 

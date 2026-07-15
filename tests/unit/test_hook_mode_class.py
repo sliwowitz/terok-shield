@@ -30,6 +30,7 @@ from ..testfs import BIN_DIR_NAME, HOOK_ENTRYPOINT_NAME, HOOKS_DIR_NAME
 from ..testnet import (
     CONTAINER_HOSTNAME,
     IPV6_CLOUDFLARE,
+    PASTA_LINK_LOCAL_DNS,
     SLIRP4NETNS_GATEWAY,
     TEST_DOMAIN,
     TEST_IP1,
@@ -627,6 +628,61 @@ def test_shield_reset_flushes_and_reseeds_allow_sets(
     assert "flush set inet terok_shield t40_project_allow_v6" in stdin
     # Re-seed rides the same transaction — literals never blink out.
     assert stdin.index("flush set") < stdin.index(f"add element {TEST_IP1}")
+
+
+class TestMigrateState:
+    """HookMode.migrate_state() — the restart path for pre-v15 task containers."""
+
+    @staticmethod
+    def _make_v14(harness: HookModeHarness) -> Path:
+        """A v14-shaped state dir: legacy policy files + persisted runtime facts."""
+        sd = harness.config.state_dir.resolve()
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "profile.domains").write_text(f"{TEST_DOMAIN}\n")
+        (sd / "profile.allowed").write_text(f"{TEST_IP1}\n")
+        (sd / "deny.list").write_text(f"{TEST_IP4}\n")
+        StateBundle(sd).upstream_dns.write_text(f"{PASTA_LINK_LOCAL_DNS}\n")
+        StateBundle(sd).dns_tier.write_text(f"{DnsTier.DNSMASQ.value}\n")
+        return sd
+
+    def test_migrates_a_v14_bundle_end_to_end(
+        self, make_hook_mode: HookModeHarnessFactory, make_config: ConfigFactory
+    ) -> None:
+        """Legacy files translate, hook artifacts regenerate, the gate opens.
+
+        On the dnsmasq tier the old resolved seed is dropped (learned-first)
+        and the regenerated dnsmasq.conf feeds the current tier-set names —
+        the exact mismatch that made in-place upgrades unsafe before.
+        """
+        harness = make_hook_mode(config=make_config())
+        harness.runner.run.return_value = _MODERN_PODMAN_INFO
+        sd = self._make_v14(harness)
+
+        assert harness.mode.migrate_state() is True
+
+        bundle = StateBundle(sd)
+        assert bundle.read_bundle_version() == BUNDLE_VERSION
+        assert not bundle.resolved_cache.exists()  # learned-first: no stale seed
+        ruleset = bundle.ruleset.read_text()
+        assert "t40_project_allow_v4" in ruleset
+        assert f"-{TEST_IP4}" in bundle.policy_live.read_text()
+        conf = bundle.dnsmasq_conf.read_text()
+        assert f"nftset=/{TEST_DOMAIN}/" in conf
+        assert "t40_project_allow_v4" in conf
+        # One-way and idempotent: a second call is a no-op.
+        assert harness.mode.migrate_state() is False
+
+    def test_refuses_a_never_prepared_dir(
+        self, make_hook_mode: HookModeHarnessFactory, make_config: ConfigFactory
+    ) -> None:
+        """No persisted upstream DNS = nothing to migrate — fail loudly."""
+        harness = make_hook_mode(config=make_config())
+        sd = harness.config.state_dir.resolve()
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "profile.domains").write_text(f"{TEST_DOMAIN}\n")
+
+        with pytest.raises(RuntimeError, match="never prepared"):
+            harness.mode.migrate_state()
 
 
 @pytest.mark.parametrize(
@@ -1301,6 +1357,8 @@ class TestPreStartDnsTierBranches:
         # dnsmasq tier: no static resolution, and the stale cache is gone.
         harness.dns.resolve_and_cache.assert_not_called()
         assert not StateBundle(sd).resolved_cache.exists()
+        # The bundle is stamped so the OCI hook's restart gate opens.
+        assert StateBundle(sd).read_bundle_version() == BUNDLE_VERSION
         # The composed profiles are written to the project-allow tier (domains
         # included) so dnsmasq's --nftset can add on-demand as new records arrive.
         project_allow = StateBundle(sd).tier_path("project_allow").read_text()
@@ -1612,7 +1670,7 @@ def test_shield_down_repopulates_deny_sets(
     assert any(TEST_IP1 in (c.kwargs.get("stdin", "") or "") for c in deny_calls)
 
 
-from terok_shield.state import StateBundle
+from terok_shield.state import BUNDLE_VERSION, StateBundle
 
 
 def test_detect_dns_tier_audits_advisory_when_apparmor_blocks(

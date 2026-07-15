@@ -76,6 +76,11 @@ COMMANDS: CommandTree = CommandTree(
             "control:RESET",
         ),
         _lazy(
+            "migrate",
+            "Migrate an old task's shield state bundle to the current layout (one-way)",
+            "control:MIGRATE",
+        ),
+        _lazy(
             "quarantine",
             "Total network blackout (drop all, log dropped traffic)",
             "control:QUARANTINE",

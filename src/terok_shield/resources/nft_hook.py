@@ -89,12 +89,20 @@ def _nft_main(oci: dict, sd: Path, stage: str, log_path: Path) -> int:
         _oci_state.log(f"terok-shield hook: unknown stage {stage!r}", log_path)
         return 1
 
-    ann = oci.get("annotations") or {}
-    ver = ann.get(_oci_state.ANN_VERSION, "")
-    if str(ver) not in _oci_state.COMPAT_BUNDLE_VERSIONS:
+    # Gate on the state-dir version file, not the annotation: annotations are
+    # frozen at container creation, but a one-way bundle migration moves this
+    # file forward so the same container can restart after an upgrade.
+    try:
+        ver = (sd / _oci_state.BUNDLE_VERSION_FILE_NAME).read_text().strip()
+    except OSError:
+        ver = ""
+    if ver != str(_oci_state.BUNDLE_VERSION):
         _oci_state.log(
-            f"terok-shield hook: bundle version {ver!r} not in supported "
-            f"{_oci_state.COMPAT_BUNDLE_VERSIONS}. Re-run pre_start().",
+            f"terok-shield hook: state bundle version {ver or 'pre-v15'!r} != "
+            f"{_oci_state.BUNDLE_VERSION} — restart the task via terok (migrates "
+            "automatically) or run 'terok-shield migrate <container>' and start the "
+            "container again; if the hooks are older than the package, re-run "
+            "'terok-shield setup'.",
             log_path,
         )
         return 1

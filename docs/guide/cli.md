@@ -217,6 +217,23 @@ that learned state in one transaction while re-seeding the authored policy
 literals, and touches neither the deny tier nor runtime `allow`/`deny`
 overlay entries. The workload re-earns its state on its next DNS queries.
 
+## migrate
+
+Migrate an old task's shield state bundle to the current layout (one-way).
+
+```bash
+terok-shield migrate <container>
+```
+
+After a terok-shield upgrade, containers created under an older release
+carry a state bundle the OCI hook refuses to serve (their restart fails
+with a message pointing here). `migrate` translates the old policy files,
+regenerates the hook artifacts, and stamps the bundle so **the same
+container** can start again — rules reset to the migrated policy. terok's
+task restart runs this automatically; the command exists for manual
+`podman start` workflows. Idempotent: an already-current bundle is left
+untouched.
+
 ## preview
 
 Show the nftables ruleset that would be applied.
