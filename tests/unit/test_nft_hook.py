@@ -750,6 +750,38 @@ def test_main_dispatches_poststop_on_version_mismatch(tmp_path: Path) -> None:
     mock_ps.assert_called_once_with(sd)
 
 
+def test_main_grandfathers_v14_containers(tmp_path: Path) -> None:
+    """main() serves createRuntime for a v14-annotated container.
+
+    Upgrade contract: the global hooks dir is upgraded in place, but a
+    task container's shield artifacts are frozen at creation time and the
+    hook only consumes the format-stable subset (ruleset.nft verbatim,
+    dnsmasq.conf via --conf-file).  A terok-shield upgrade must never
+    brick the restart of an existing task.
+    """
+    sd = tmp_path / "sd"
+    sd.mkdir(mode=0o700)
+    sd.chmod(0o700)
+    oci = _oci_json(pid=42, state_dir=str(sd), version=14)
+
+    with mock.patch("terok_shield.resources.nft_hook._createruntime") as mock_cr:
+        rc = _run_main(oci)
+
+    assert rc == 0
+    mock_cr.assert_called_once_with("42", sd)
+
+
+def test_main_rejects_versions_outside_the_compat_floor(tmp_path: Path) -> None:
+    """main() fails createRuntime for pre-floor (v13) and unknown versions."""
+    sd = tmp_path / "sd"
+    sd.mkdir(mode=0o700)
+    sd.chmod(0o700)
+
+    with mock.patch("terok_shield.resources.nft_hook._createruntime") as mock_cr:
+        assert _run_main(_oci_json(pid=42, state_dir=str(sd), version=13)) == 1
+    mock_cr.assert_not_called()
+
+
 def test_main_returns_1_on_createruntime_exception(tmp_path: Path) -> None:
     """main() returns 1 when _createruntime() raises any exception."""
     sd = tmp_path / "sd"

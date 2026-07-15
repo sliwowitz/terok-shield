@@ -91,9 +91,10 @@ def _nft_main(oci: dict, sd: Path, stage: str, log_path: Path) -> int:
 
     ann = oci.get("annotations") or {}
     ver = ann.get(_oci_state.ANN_VERSION, "")
-    if not ver or str(ver) != str(_oci_state.BUNDLE_VERSION):
+    if str(ver) not in _oci_state.COMPAT_BUNDLE_VERSIONS:
         _oci_state.log(
-            f"terok-shield hook: bundle version {ver!r} != {_oci_state.BUNDLE_VERSION}. Re-run pre_start().",
+            f"terok-shield hook: bundle version {ver!r} not in supported "
+            f"{_oci_state.COMPAT_BUNDLE_VERSIONS}. Re-run pre_start().",
             log_path,
         )
         return 1

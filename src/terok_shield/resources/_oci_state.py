@@ -46,7 +46,7 @@ BUNDLE_VERSION = 15
 
 Bumped whenever the on-disk file layout, the hook → reader argv
 shape, or the wire payload changes incompatibly.  The nft hook hard-
-fails on a version mismatch — operator must re-run ``terok setup``.
+fails on an unsupported version — operator must re-run ``terok setup``.
 
 v14: per-container host-loopback TCP ports are persisted at pre_start
 time as ``state_dir/loopback.ports`` (newline-separated list) — the
@@ -67,6 +67,23 @@ on every block emit.  Single source of truth: the orchestrator's
 meta JSON.  No snapshot file, no second copy of project/task IDs;
 all dossier consumers project the live JSON to ``{project, task,
 name}``.
+"""
+
+COMPAT_BUNDLE_VERSIONS = ("14", "15")
+"""Bundle versions this hook can serve at createRuntime (restart grandfathering).
+
+A container's shield artifacts are frozen at creation time, and at
+createRuntime the hook consumes only the format-stable subset —
+``ruleset.nft`` applied verbatim via nsenter stdin and ``dnsmasq.conf``
+handed to dnsmasq via ``--conf-file`` — never the policy bundle itself.
+The v14→v15 bundle rewrite (tiered ``policy/`` files) did not touch that
+surface, so tasks created under a v14 terok-shield restart cleanly under
+this hook with their own creation-time rules.
+
+Upgrade contract: an updated global hooks dir must never brick existing
+task containers.  Drop a version from this tuple only when the artifact
+surface the hook actually reads changes shape — not on every
+``BUNDLE_VERSION`` bump.
 """
 
 META_PATH_FILE_NAME = "meta_path"
