@@ -230,9 +230,9 @@ carry a state bundle the OCI hook refuses to serve (their restart fails
 with a message pointing here). `migrate` translates the old policy files,
 regenerates the hook artifacts, and stamps the bundle so **the same
 container** can start again — rules reset to the migrated policy. terok's
-task restart runs this automatically; the command exists for manual
-`podman start` workflows. Idempotent: an already-current bundle is left
-untouched.
+task restart offers this (a warning plus a quick confirm; automatic in
+headless runs); the command exists for manual `podman start` workflows.
+Idempotent: an already-current bundle is left untouched.
 
 ## preview
 
