@@ -13,7 +13,6 @@ from terok_shield.commands import COMMANDS, needs_container, standalone_only
 from terok_shield.verbs.control import (
     _handle_allow,
     _handle_deny,
-    _handle_migrate,
     _handle_preview,
     _handle_quarantine,
     _handle_reset,
@@ -162,17 +161,6 @@ class TestHandlers:
         output = capsys.readouterr().out
         assert "reset" in output
         assert "test-ctr" in output
-
-    def test_handle_migrate_reports_both_outcomes(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """_handle_migrate prints migrated vs already-current."""
-        shield = mock.MagicMock()
-        shield.migrate.return_value = True
-        _handle_migrate(shield, "test-ctr")
-        assert "migrated" in capsys.readouterr().out
-
-        shield.migrate.return_value = False
-        _handle_migrate(shield, "test-ctr")
-        assert "already current" in capsys.readouterr().out
 
     def test_handle_preview_all_without_down_raises(self) -> None:
         """_handle_preview raises ValueError when allow_all without down."""

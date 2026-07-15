@@ -215,10 +215,6 @@ class ShieldModeBackend(Protocol):
         """Forget learned allow-set state, keeping the authored policy seeds."""
         ...
 
-    def migrate_state(self) -> bool:
-        """One-way migration of a pre-current state bundle; True when it ran."""
-        ...
-
     def shield_state(self, container: str) -> ShieldState:
         """Query a container's shield state from the live ruleset."""
         ...

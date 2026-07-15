@@ -651,6 +651,18 @@ def _run_main(json_str: str, *, stage: str = "createRuntime") -> int:
             json.dumps({"pid": 42, "annotations": {"terok.shield.version": "11"}}),
             id="state-dir-missing",
         ),
+        pytest.param(
+            json.dumps(
+                {
+                    "pid": 42,
+                    "annotations": {
+                        "terok.shield.state_dir": "/tmp/sd",
+                        "terok.shield.version": "999",
+                    },
+                }
+            ),
+            id="version-mismatch",
+        ),
     ],
 )
 def test_main_returns_1_for_invalid_input(payload: str) -> None:
@@ -672,22 +684,11 @@ def test_main_returns_1_when_pid_missing_for_createruntime(tmp_path: Path) -> No
     assert _run_main(oci) == 1
 
 
-def _mk_sd(tmp_path: Path, *, version: str = str(_oci_state.BUNDLE_VERSION)) -> Path:
-    """State dir passing the hook's checks: 0700 mode + a bundle.version stamp.
-
-    ``version=""`` leaves the stamp out (a pre-v15 or never-prepared bundle).
-    """
+def test_main_dispatches_createruntime_and_returns_0(tmp_path: Path) -> None:
+    """main() calls _createruntime() and returns 0 on success."""
     sd = tmp_path / "sd"
     sd.mkdir(mode=0o700)
     sd.chmod(0o700)  # state_dir_from_oci() rejects group/world-writable dirs
-    if version:
-        (sd / _oci_state.BUNDLE_VERSION_FILE_NAME).write_text(f"{version}\n")
-    return sd
-
-
-def test_main_dispatches_createruntime_and_returns_0(tmp_path: Path) -> None:
-    """main() calls _createruntime() and returns 0 on success."""
-    sd = _mk_sd(tmp_path)
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
 
     oci = _oci_json(pid=42, state_dir=str(sd))
@@ -701,7 +702,9 @@ def test_main_dispatches_createruntime_and_returns_0(tmp_path: Path) -> None:
 
 def test_main_persists_container_id(tmp_path: Path) -> None:
     """main() writes the short container ID to state_dir/container.id."""
-    sd = _mk_sd(tmp_path)
+    sd = tmp_path / "sd"
+    sd.mkdir(mode=0o700)
+    sd.chmod(0o700)  # state_dir_from_oci() rejects group/world-writable dirs
     full_id = "abc123def456789abcdef0123456789abcdef0123456789abcdef0123456789a"
     oci = _oci_json(pid=42, state_dir=str(sd), container_id=full_id)
 
@@ -747,42 +750,10 @@ def test_main_dispatches_poststop_on_version_mismatch(tmp_path: Path) -> None:
     mock_ps.assert_called_once_with(sd)
 
 
-def test_main_gates_on_bundle_version_file_not_annotation(tmp_path: Path) -> None:
-    """A migrated container starts: current bundle.version, frozen old annotation.
-
-    The ``terok.shield.version`` annotation is frozen at container creation
-    and cannot reflect a one-way bundle migration — the state-dir
-    ``bundle.version`` file is the gate, so the same container restarts
-    after ``terok-shield migrate`` moved its bundle forward.
-    """
-    sd = _mk_sd(tmp_path)
-    oci = _oci_json(pid=42, state_dir=str(sd), version=14)  # creation-time annotation
-
-    with mock.patch("terok_shield.resources.nft_hook._createruntime") as mock_cr:
-        rc = _run_main(oci)
-
-    assert rc == 0
-    mock_cr.assert_called_once_with("42", sd)
-
-
-@pytest.mark.parametrize("version", ["", "14"], ids=["missing-file", "stale-v14"])
-def test_main_refuses_an_unmigrated_bundle(tmp_path: Path, version: str) -> None:
-    """main() fails closed for a missing or stale bundle.version.
-
-    The failure message names the remedy (restart via terok / run
-    ``terok-shield migrate``) — warn and refuse, never silently apply an
-    old-layout bundle under a new hook.
-    """
-    sd = _mk_sd(tmp_path, version=version)
-
-    with mock.patch("terok_shield.resources.nft_hook._createruntime") as mock_cr:
-        assert _run_main(_oci_json(pid=42, state_dir=str(sd))) == 1
-    mock_cr.assert_not_called()
-
-
 def test_main_returns_1_on_createruntime_exception(tmp_path: Path) -> None:
     """main() returns 1 when _createruntime() raises any exception."""
-    sd = _mk_sd(tmp_path)
+    sd = tmp_path / "sd"
+    sd.mkdir()
     oci = _oci_json(pid=42, state_dir=str(sd))
 
     with mock.patch(

@@ -63,45 +63,23 @@ BUNDLE_VERSION = 15
 """Integer version of the state bundle layout.
 
 Bumped whenever the file layout changes in a backwards-incompatible way.
-The OCI hook hard-fails when ``state_dir/bundle.version`` (written by
-``pre_start`` and moved forward by ``migrate_state``) does not match —
-the ``terok.shield.version`` *annotation* is frozen at container
-creation, so it records provenance but cannot gate restarts of migrated
-containers.  The same constant is the signal ``check_environment()``
-uses to detect a stale on-disk entrypoint — bump it whenever the
-entrypoint *protocol* changes even if the file layout itself is
-unchanged, so that ``terok setup`` rewrites the script instead of
-short-circuiting.
-
-Upgrade contract: an existing task container must survive a
-terok-shield upgrade.  There is no multi-version compatibility window;
-instead [`migrate_legacy_policy`][terok_shield.state.migrate_legacy_policy]
-performs a **one-way migration** of the previous layout at task-restart
-time (rules reset to the migrated policy — acceptable; a bricked task is
-not).  On a version bump, replace its translation with old→new for the
-new pair; pre-previous layouts are not migratable.
+The OCI hook hard-fails if the annotation version does not match —
+deliberately no compatibility window and no migration: containers
+prepared by a different generation fail fast at restart with a message
+naming the remedy (re-create the task; a running container keeps
+running untouched, and the task workspace rides its mounts).  The
+same constant is the signal ``check_environment()`` uses to detect a
+stale on-disk entrypoint — bump it whenever the entrypoint *protocol*
+changes even if the file layout itself is unchanged, so that
+``terok setup`` rewrites the script instead of short-circuiting.
 
 Current shape (v15): the six v14 split allow/deny files
 (``profile.allowed``/``.domains``, ``live.allowed``/``.domains``,
 ``deny.list``, ``denied.domains``) are replaced by the tiered ``policy/``
 bundle of unified ``+``/``-`` files plus the derived ``resolved.ips``
-cache, and ``bundle.version`` carries the layout generation.  Earlier
-shapes are recoverable via
+cache.  Earlier shapes are recoverable via
 ``git log -L /^BUNDLE_VERSION/:src/terok_shield/state.py``.
 """
-
-BUNDLE_VERSION_FILE = "bundle.version"
-"""State-dir file carrying the bundle's layout generation (the hook's gate)."""
-
-LEGACY_V14_FILES = (
-    "profile.allowed",
-    "profile.domains",
-    "live.allowed",
-    "live.domains",
-    "deny.list",
-    "denied.domains",
-)
-"""The v14 split allow/deny files [`migrate_legacy_policy`][terok_shield.state.migrate_legacy_policy] translates and removes."""
 
 
 # ── v15 tiered policy bundle ────────────────────────────
@@ -303,22 +281,6 @@ class StateBundle:
         """
         return self.state_dir / "resolved.ips"
 
-    @property
-    def bundle_version(self) -> Path:
-        """Path to the bundle's layout-generation file (the hook's restart gate)."""
-        return self.state_dir / BUNDLE_VERSION_FILE
-
-    def read_bundle_version(self) -> int | None:
-        """The bundle's recorded layout generation (``None`` = pre-v15 or never prepared)."""
-        try:
-            return int(self.bundle_version.read_text().strip())
-        except (OSError, ValueError):
-            return None
-
-    def write_bundle_version(self) -> None:
-        """Stamp the bundle with the current [`BUNDLE_VERSION`][terok_shield.state.BUNDLE_VERSION]."""
-        self.bundle_version.write_text(f"{BUNDLE_VERSION}\n")
-
     def policy_mtime(self) -> float:
         """Newest mtime among the policy files (``0.0`` when none exist yet).
 
@@ -466,53 +428,3 @@ class StateBundle:
         self.hooks_dir.chmod(STATE_DIR_MODE)
         self.policy_dir.mkdir(parents=True, exist_ok=True)
         self.policy_dir.chmod(STATE_DIR_MODE)
-
-
-# ── One-way layout migration (v14 → v15) ────────────────
-
-
-def migrate_legacy_policy(state_dir: Path) -> bool:
-    """Translate a v14 split-file bundle into the tiered ``policy/`` layout.
-
-    One-way and destructive by design (the legacy files are removed after
-    a successful, *validated* translation):
-
-    - ``profile.domains`` (authored domains) → ``policy/40-project-allow``
-      as ``+domain`` lines.
-    - ``live.allowed``/``live.domains`` → ``+`` overlay entries, then
-      ``deny.list``/``denied.domains`` → ``-`` overlay entries — denies
-      last, so they win, matching the v14 deny-set precedence.
-    - ``profile.allowed`` (resolved + literal IPs, indistinguishable in
-      v14) → the derived ``resolved.ips`` cache, its v15 counterpart.
-      The caller applies tier semantics on top (the dnsmasq tier drops
-      the cache — learned-first).
-
-    Every produced line is validated through the policy parser *before*
-    the legacy files are deleted, so a malformed legacy entry aborts the
-    migration with the bundle untouched.
-
-    Returns True when legacy files were found and translated.
-    """
-    bundle = StateBundle(state_dir)
-    legacy = {name: state_dir / name for name in LEGACY_V14_FILES}
-    if not any(p.is_file() for p in legacy.values()):
-        return False
-
-    def lines(name: str) -> list[str]:
-        p = legacy[name]
-        if not p.is_file():
-            return []
-        return [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
-
-    bundle.ensure_dirs()
-    bundle.write_tier("project_allow", "".join(f"+{d}\n" for d in lines("profile.domains")))
-    overlay = [f"+{t}" for t in (*lines("live.allowed"), *lines("live.domains"))]
-    overlay += [f"-{t}" for t in (*lines("deny.list"), *lines("denied.domains"))]
-    if overlay:
-        bundle.policy_live.write_text("\n".join(overlay) + "\n")
-    bundle.read_effective()  # validate before the point of no return
-    if resolved := lines("profile.allowed"):
-        bundle.resolved_cache.write_text("\n".join(resolved) + "\n")
-    for p in legacy.values():
-        p.unlink(missing_ok=True)
-    return True

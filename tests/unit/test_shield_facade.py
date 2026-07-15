@@ -758,18 +758,3 @@ def test_reset_dispatches_and_logs(make_shield: ShieldHarnessFactory) -> None:
 
     harness.mode.shield_reset.assert_called_once_with("test-ctr")
     harness.audit.log_event.assert_called_once_with("test-ctr", "shield_reset")
-
-
-def test_migrate_dispatches_and_logs_only_when_migrated(
-    make_shield: ShieldHarnessFactory,
-) -> None:
-    """migrate() delegates to the backend; the audit event fires only on a real migration."""
-    harness = make_shield()
-    harness.mode.migrate_state.return_value = True
-    assert harness.shield.migrate("test-ctr") is True
-    harness.audit.log_event.assert_called_once_with("test-ctr", "shield_migrate")
-
-    harness.audit.log_event.reset_mock()
-    harness.mode.migrate_state.return_value = False
-    assert harness.shield.migrate("test-ctr") is False
-    harness.audit.log_event.assert_not_called()
