@@ -1505,23 +1505,62 @@ def test_pre_start_with_denied_ips_includes_deny_elements(
     make_hook_mode: HookModeHarnessFactory,
     make_config: ConfigFactory,
 ) -> None:
-    """pre_start() includes deny elements in ruleset when deny.list exists."""
+    """pre_start(security_deny=…) writes the t20 tier and it reaches the ruleset."""
     _set_euid(monkeypatch, 0)
     config = make_config()
     harness = make_hook_mode(config=config)
     harness.runner.run.return_value = _MODERN_PODMAN_INFO
     harness.profiles.compose_profiles.return_value = []
 
-    # Write a deny.list before pre_start
-    _b = StateBundle(config.state_dir)
-    _b.ensure_dirs()
-    _b.write_tier("security_deny", f"-{TEST_IP1}\n")
+    harness.mode.pre_start("test", ["dev-standard"], security_deny=[TEST_IP1])
+
+    bundle = StateBundle(config.state_dir)
+    assert f"-{TEST_IP1}" in bundle.tier_path("security_deny").read_text()
+    ruleset = bundle.ruleset.read_text()
+    assert "t20_security_deny_v4" in ruleset
+    assert TEST_IP1 in ruleset
+
+
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_pre_start_writes_generated_provider_allow_tier(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """pre_start(provider_allow=…) writes the t30 tier as ``+host`` lines."""
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+
+    harness.mode.pre_start("test", ["dev-standard"], provider_allow=[TEST_DOMAIN])
+
+    tier = StateBundle(config.state_dir).tier_path("provider_allow").read_text()
+    assert f"+{TEST_DOMAIN}" in tier
+
+
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_pre_start_clears_generated_tiers_when_absent(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """pre_start owns t20/t30 — a launch without a projection clears stale content."""
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+    bundle = StateBundle(config.state_dir)
+    bundle.ensure_dirs()
+    bundle.write_tier("provider_allow", f"+{TEST_DOMAIN}\n")  # left by a prior launch
 
     harness.mode.pre_start("test", ["dev-standard"])
 
-    ruleset = StateBundle(config.state_dir).ruleset.read_text()
-    assert "t20_security_deny_v4" in ruleset
-    assert TEST_IP1 in ruleset
+    assert bundle.tier_path("provider_allow").read_text() == ""
 
 
 # ── Container ID persistence ─────────────────────────────
