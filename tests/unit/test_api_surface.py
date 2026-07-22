@@ -104,6 +104,7 @@ class TestAPISurface:
             "audit_enabled",
             "profiles_dir",
             "runtime",
+            "dns_cache_dir",
         ]
 
         cfg = make_config()
@@ -113,6 +114,7 @@ class TestAPISurface:
         assert cfg.audit_enabled is True
         assert cfg.profiles_dir is None
         assert cfg.runtime == ShieldRuntime.DEFAULT
+        assert cfg.dns_cache_dir is None
 
     def test_shield_config_frozen(self, make_config):
         """ShieldConfig is frozen — assignment raises FrozenInstanceError."""

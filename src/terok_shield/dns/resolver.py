@@ -3,40 +3,73 @@
 
 """DNS resolution with timestamp-based caching.
 
-Resolves domain names from allowlist profiles via ``dig`` and caches
-the results so containers do not block on DNS at every start.  Profiles
-prefer domain names over raw IPs because CDN addresses rotate.
+Resolves allowlist domains via ``dig`` (``getent`` fallback) and caches
+the IPs so containers do not block on DNS at every start.
 
-Falls back to ``getent hosts`` when ``dig`` is not installed, and
-per-domain when ``dig`` runs but yields nothing (some environments break
-``dig`` while glibc resolution still works) — fewer IPs are captured
-(no parallel A + AAAA query), but resolution still works.  The dnsmasq tier does not use this module at launch at all —
-domain resolution happens at runtime via ``--nftset``; static resolution
-is the fallback tiers' (dig/getent) enforcement mechanism and the
-``shield resolve`` warm-up path.
+Two cache layers:
+
+- **per-container file** (``cache_path``): the view the nft ruleset reads.
+  Scoped to one container, so a fresh container never reuses another's.
+- **host cache** (``host_cache_dir``, opt-in, off by default): shared across
+  containers, keyed by the allowlist's content hash. The first task resolves;
+  the rest read.
+
+Domains resolve concurrently with a per-lookup timeout, so a batch costs
+about one lookup and one dead domain cannot stall startup.
+
+Only the dig/getent tiers use this module at launch. On the dnsmasq tier
+domains resolve on-demand at runtime via ``--nftset``; this module then
+handles raw IPs only.
 """
 # WAYPOINT: Shield (__init__), HookMode (hooks.mode)
 
+import contextlib
+import hashlib
 import logging
+import os
+import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from ..run import CommandRunner, DigNotFoundError
+from ..run import CommandRunner
+from ..state import STATE_DIR_MODE
 from ..util import is_ip as _is_ip
 
 logger = logging.getLogger(__name__)
 
+RESOLVE_TIMEOUT = 2
+"""Per-subprocess DNS budget in seconds.
+
+Best-effort: an answer slower than this counts as no answer. The old 10s
+budget let one dead domain (times the getent retry) stall a start by ~20s.
+"""
+
+MAX_RESOLVE_WORKERS = 16
+"""Upper bound on concurrent resolver subprocesses per batch."""
+
+_HOST_CACHE_KEY_LEN = 16
+"""Hex digits of the entry-list hash used as the host-cache filename."""
+
 
 class DnsResolver:
-    """Stateless DNS resolver — all persistence lives in the cache file.
+    """Stateless DNS resolver — all persistence lives in the cache files.
 
-    The only dependency is a [`CommandRunner`][terok_shield.dns.resolver.CommandRunner] for ``dig`` / ``getent``
-    subprocess calls.
+    Depends on a [`CommandRunner`][terok_shield.dns.resolver.CommandRunner]
+    for ``dig`` / ``getent`` subprocess calls and, optionally, a host-level
+    cache directory shared across containers.
     """
 
-    def __init__(self, *, runner: CommandRunner) -> None:
-        """Inject the command runner used for all DNS subprocess calls."""
+    def __init__(self, *, runner: CommandRunner, host_cache_dir: Path | None = None) -> None:
+        """Inject the command runner and the optional shared cache location.
+
+        Args:
+            runner: Command runner used for all DNS subprocess calls.
+            host_cache_dir: Cross-container cache directory. ``None`` (the
+                default) disables the shared layer.
+        """
         self._runner = runner
+        self._host_cache_dir = host_cache_dir
 
     # ── Public API ──────────────────────────────────────────
 
@@ -50,17 +83,19 @@ class DnsResolver:
     ) -> list[str]:
         """Resolve profile entries and cache the result.
 
-        Profiles mix domain names with literal IPs/CIDRs — domains go
-        through DNS resolution, literals pass through unchanged.
+        Reads the per-container file first, then the shared host cache
+        (materializing a hit into the per-container file), and only resolves
+        when both miss.
 
         Args:
             entries: Domain names and/or raw IPs from composed profiles.
-            cache_path: File to store resolved IPs in, per-container scoped.
+            cache_path: Per-container file the nft ruleset reads.
             max_age: Cache freshness threshold in seconds (default: 1 hour).
-            source_mtime: mtime of the authored policy the entries came from;
-                a cache older than this is re-resolved even when still within
-                ``max_age``, so an edited allowlist takes effect on the next
-                task start instead of waiting out the timer.
+            source_mtime: mtime of the authored policy; a per-container cache
+                older than it is re-resolved even within ``max_age``, so an
+                edited allowlist takes effect on the next task start. The host
+                cache ignores this — its content-hash key already makes it
+                edit-aware.
 
         Returns:
             Resolved IPv4/IPv6 addresses combined with raw IPs/CIDRs.
@@ -68,67 +103,90 @@ class DnsResolver:
         if self._cache_fresh(cache_path, max_age, source_mtime):
             return self._read_cache(cache_path)
 
+        host_path = self._host_cache_path(entries)
+        if host_path is not None and self._cache_fresh(host_path, max_age):
+            ips = self._read_cache(host_path)
+            self._write_cache(cache_path, ips)
+            return ips
+
         domains, raw_ips = self._split_entries(entries)
         resolved = self.resolve_domains(domains)
         all_ips = raw_ips + resolved
 
         self._write_cache(cache_path, all_ips)
+        # An all-domains-failed resolve (DNS outage, broken resolver) is fine
+        # for one container but must not poison every task on the host for
+        # max_age: share only when at least one domain resolved (or there were
+        # none to resolve).
+        if host_path is not None and (resolved or not domains):
+            self._write_cache(host_path, all_ips)
         return all_ips
 
     def resolve_domains(self, domains: list[str]) -> list[str]:
-        """Resolve domain names to IP addresses (A + AAAA), best-effort.
+        """Resolve domain names to IPs (A + AAAA), best-effort and concurrent.
 
-        Unresolvable domains are skipped with a warning.  Results are
-        deduplicated in first-seen order.
+        Probes for ``dig`` once, then resolves every domain on a small thread
+        pool — a batch costs about its slowest single lookup. Unresolvable
+        domains are skipped with a warning; results are deduplicated in
+        first-seen (input) order.
         """
-        seen: set[str] = set()
-        result: list[str] = []
-        use_getent = False
-        for domain in domains:
-            try:
-                ips = self._resolve_one(domain, use_getent=use_getent)
-            except DigNotFoundError:
-                # dig missing — degrade gracefully for the rest of this batch
-                logger.warning("dig not found — falling back to getent for DNS resolution")
-                use_getent = True
-                ips = self._resolve_one(domain, use_getent=True)
-            if not ips and not use_getent:
-                # dig ran but produced nothing.  That is usually not a dead
-                # domain: some environments break dig specifically (a DNS
-                # forwarder rejecting its EDNS options, a hardened container
-                # path) while glibc resolution still works — so retry this
-                # one domain through getent before giving up.  Per-domain,
-                # not batch-wide: one genuinely dead domain must not demote
-                # the resolver for the rest.
-                ips = self._resolve_one(domain, use_getent=True)
-                if ips:
-                    # NSS resolving what dig could not is the proof that dig
-                    # itself is broken here (crashed, EDNS-hostile forwarder)
-                    # -- worth a warning, since dig's own stderr is not
-                    # surfaced (the mageia/64K jemalloc SIGABRT hid behind
-                    # this exact silence, terok#1119).
-                    logger.warning(
-                        "dig returned nothing for %r but NSS resolved it — "
-                        "dig is broken in this environment",
-                        domain,
-                    )
-            if not ips:
-                logger.warning("Domain %r resolved to no IPs (typo or DNS failure?)", domain)
-            for ip in ips:
-                if ip not in seen:
-                    seen.add(ip)
-                    result.append(ip)
-        return result
+        if not domains:
+            return []
+        if self._runner.has("dig"):
+            resolve = self._resolve_via_dig
+        else:
+            logger.warning("dig not found — using getent for DNS resolution")
+            resolve = self._resolve_via_getent
+        with ThreadPoolExecutor(max_workers=min(len(domains), MAX_RESOLVE_WORKERS)) as pool:
+            per_domain = pool.map(resolve, domains)
+        return list(dict.fromkeys(ip for ips in per_domain for ip in ips))
 
     # ── Resolution detail ───────────────────────────────────
 
-    def _resolve_one(self, domain: str, *, use_getent: bool = False) -> list[str]:
-        """Resolve a single domain using dig or getent."""
-        if use_getent:
-            return self._runner.getent_hosts(domain)
-        return self._runner.dig_all(domain)
+    def _resolve_via_dig(self, domain: str) -> list[str]:
+        """Resolve via ``dig``, retrying one domain through NSS when dig answers empty.
+
+        An empty ``dig`` answer is usually not a dead domain: some environments
+        break ``dig`` specifically (an EDNS-hostile forwarder, a hardened path)
+        while glibc resolution still works, so we retry that one domain through
+        ``getent`` before giving up (terok#1119).
+        """
+        ips = self._runner.dig_all(domain, timeout=RESOLVE_TIMEOUT)
+        if not ips:
+            ips = self._runner.getent_hosts(domain, timeout=RESOLVE_TIMEOUT)
+            if ips:
+                logger.warning(
+                    "dig returned nothing for %r but NSS resolved it — dig is broken here", domain
+                )
+        return self._warn_if_empty(domain, ips)
+
+    def _resolve_via_getent(self, domain: str) -> list[str]:
+        """Resolve via NSS (``getent``) — the path taken when ``dig`` is absent."""
+        ips = self._runner.getent_hosts(domain, timeout=RESOLVE_TIMEOUT)
+        return self._warn_if_empty(domain, ips)
+
+    @staticmethod
+    def _warn_if_empty(domain: str, ips: list[str]) -> list[str]:
+        """Warn on an empty resolution (typo or DNS failure); pass the IPs through."""
+        if not ips:
+            logger.warning("Domain %r resolved to no IPs (typo or DNS failure?)", domain)
+        return ips
 
     # ── Cache mechanics ─────────────────────────────────────
+
+    def _host_cache_path(self, entries: list[str]) -> Path | None:
+        """Shared cache file for this exact entry list, or ``None`` when off.
+
+        Keyed by the content hash of the entry list: any allowlist edit lands
+        on a fresh key and re-resolves. Creates the directory ``0700`` on first
+        use.
+        """
+        if self._host_cache_dir is None:
+            return None
+        self._host_cache_dir.mkdir(parents=True, exist_ok=True)
+        self._host_cache_dir.chmod(STATE_DIR_MODE)
+        digest = hashlib.sha256("\n".join(entries).encode()).hexdigest()
+        return self._host_cache_dir / f"{digest[:_HOST_CACHE_KEY_LEN]}.resolved"
 
     @staticmethod
     def _split_entries(entries: list[str]) -> tuple[list[str], list[str]]:
@@ -136,12 +194,12 @@ class DnsResolver:
         domains: list[str] = []
         ips: list[str] = []
         for entry in entries:
-            (_ips := ips if _is_ip(entry) else domains).append(entry)
+            (ips if _is_ip(entry) else domains).append(entry)
         return domains, ips
 
     @staticmethod
     def _cache_fresh(path: Path, max_age: int, source_mtime: float = 0.0) -> bool:
-        """Check whether the cache exists, is younger than *max_age*, and post-dates its source.
+        """True when *path* exists, is younger than *max_age*, and post-dates *source_mtime*.
 
         A cache older than *source_mtime* (the authored policy's mtime) is
         stale even within *max_age* — the allowlist changed since we resolved.
@@ -165,6 +223,20 @@ class DnsResolver:
 
     @staticmethod
     def _write_cache(path: Path, ips: list[str]) -> None:
-        """Write resolved IPs to a cache file."""
+        """Write resolved IPs atomically (unique temp file + rename).
+
+        The host-level file is shared across concurrently starting tasks — a
+        torn read would seed a container with a truncated allowlist — and two
+        threads of one process can write the same (content-hash-keyed) file at
+        once, so each write goes to its own ``mkstemp`` temp before the rename.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(ips) + "\n" if ips else "")
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(ips) + "\n" if ips else "")
+            os.replace(tmp, path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise

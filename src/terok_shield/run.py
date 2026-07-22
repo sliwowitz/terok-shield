@@ -67,7 +67,7 @@ class CommandRunner(Protocol):
         """Resolve domain to both IPv4 and IPv6 addresses."""
         ...
 
-    def getent_hosts(self, domain: str) -> list[str]:
+    def getent_hosts(self, domain: str, *, timeout: int = 10) -> list[str]:
         """Resolve domain via ``getent hosts`` (fallback when dig is missing)."""
         ...
 
@@ -219,7 +219,7 @@ class SubprocessRunner:
                 continue
         return result
 
-    def getent_hosts(self, domain: str) -> list[str]:
+    def getent_hosts(self, domain: str, *, timeout: int = 10) -> list[str]:
         """Resolve domain via NSS (fallback when dig is missing or broken).
 
         Queries both address families explicitly: plain ``getent hosts``
@@ -227,10 +227,13 @@ class SubprocessRunner:
         names), which left ``allow_v4`` empty on the one host whose dig
         crashes -- an allowed literal-IPv4 target then hit the terminal
         reject as "Host is unreachable" (terok#1119).
+
+        *timeout* bounds each family query; on expiry that family yields
+        nothing (best-effort, matching ``dig_all``).
         """
         result: list[str] = []
         for database in ("ahostsv4", "ahostsv6"):
-            out = self.run(["getent", database, domain], check=False, timeout=10)
+            out = self.run(["getent", database, domain], check=False, timeout=timeout)
             for line in out.splitlines():
                 parts = line.strip().split()
                 if len(parts) < 2 or parts[1] != "STREAM":
