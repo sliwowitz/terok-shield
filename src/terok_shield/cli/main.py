@@ -377,12 +377,17 @@ def _build_config(
     # Profiles dir
     profiles_dir = _resolve_config_root() / "profiles"
 
+    # Shared DNS cache lives beside the per-container state dirs, so every
+    # container on this host that resolves the same allowlist shares one pass.
+    dns_cache_dir = (state_dir_override or _resolve_state_root()).resolve() / "dns-cache"
+
     return ShieldConfig(
         state_dir=state_dir,
         mode=mode,
         default_profiles=tuple(file_cfg.default_profiles),
         audit_enabled=file_cfg.audit.enabled,
         profiles_dir=profiles_dir,
+        dns_cache_dir=dns_cache_dir,
     )
 
 

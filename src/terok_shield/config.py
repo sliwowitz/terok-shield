@@ -161,6 +161,14 @@ class ShieldConfig:
     audit_enabled: bool = True
     profiles_dir: Path | None = None
     runtime: ShieldRuntime = ShieldRuntime.DEFAULT
+    dns_cache_dir: Path | None = None
+    """Opt-in shared DNS-resolution cache, shared across containers.
+
+    The one deliberate exception to the state_dir-only rule: ``None`` (the
+    default) keeps resolution per-container; a path enables a host-level cache
+    that lets many tasks with the same allowlist share one resolve. Only the
+    dig/getent tiers use it — the dnsmasq tier resolves on-demand at runtime.
+    """
 
 
 # ── ShieldModeBackend protocol ──────────────────────────

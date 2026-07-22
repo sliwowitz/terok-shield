@@ -226,7 +226,7 @@ class Shield:
             audit_path=StateBundle(config.state_dir).audit,
             enabled=config.audit_enabled,
         )
-        self.dns = dns or DnsResolver(runner=self.runner)
+        self.dns = dns or DnsResolver(runner=self.runner, host_cache_dir=config.dns_cache_dir)
         self.profiles = profiles or ProfileLoader(
             user_dir=config.profiles_dir or Path("/nonexistent"),
         )

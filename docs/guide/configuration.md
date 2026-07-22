@@ -109,10 +109,17 @@ runtime, before the reply reaches the workload. There is no pre-resolution at
 launch (`cache-size=0`) — dynamic resolution handles IP rotation automatically,
 so no cache expiry is needed.
 
-**dig / getent tiers** (fallback): resolved IPs are stored in `resolved.ips`,
-one IP per line. The cache uses file modification time (`st_mtime`) for
-freshness checking — entries older than 1 hour (or older than the authored
-policy) are automatically re-resolved.
+**dig / getent tiers** (fallback): the allowlist is resolved at pre-start into
+the per-container `resolved.ips` cache, one IP per line. Domains resolve
+concurrently with a 2s per-lookup budget, so a batch costs about one lookup.
+The cache uses file modification time (`st_mtime`) for freshness — entries
+older than 1 hour, or older than the authored policy, are re-resolved.
+
+**Shared host cache** (opt-in, off by default): set `ShieldConfig.dns_cache_dir`
+(the CLI points it at `<state root>/dns-cache/`) to share one resolution across
+every container with the same allowlist. Keyed by the allowlist's content hash,
+so an edit re-resolves; a resolve where every domain failed is never shared.
+Only the dig/getent tiers use it — the dnsmasq tier resolves on-demand.
 
 Force a cache refresh (all tiers):
 
