@@ -92,28 +92,32 @@ class TestFirewallAllowing:
 @nft_missing
 @pytest.mark.usefixtures("nft_in_netns")
 class TestRFC1918Allow:
-    """Verify RFC1918 addresses can be whitelisted via the allow set."""
+    """Verify an RFC1918 host can be carved out via the override tier.
 
-    def test_rfc1918_allowed_when_whitelisted(self, container: str, container_pid: str) -> None:
-        """RFC1918 addresses in the allow set bypass the RFC1918 reject rules."""
+    The private-range (RFC1918) reject lives at t20, *above* the t40
+    project-allow tier — so allowlisting a private host in t40 is a no-op:
+    the t20 reject fires first.  Only the t10 override tier, which sits
+    above t20, can reach a private host.
+    """
+
+    def test_rfc1918_reachable_via_override(self, container: str, container_pid: str) -> None:
+        """An RFC1918 host in the override set precedes (and so bypasses) the RFC1918 reject."""
         from terok_shield.nft.constants import RFC1918
 
         applied = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert applied.returncode == 0, f"Ruleset apply failed: {applied.stderr}"
-        added = nsenter_nft(
-            container_pid, stdin=add_elements("t40_project_allow_v4", [RFC1918_HOST])
-        )
+        added = nsenter_nft(container_pid, stdin=add_elements("t10_override_v4", [RFC1918_HOST]))
         assert added.returncode == 0, f"Add elements failed: {added.stderr}"
 
-        # Structural: allow set evaluates before RFC1918 reject
+        # Structural: the override set evaluates before the RFC1918 reject
         listed = nsenter_nft(container_pid, "list", "ruleset")
         assert listed.returncode == 0, listed.stderr
         output = listed.stdout
-        allow_pos = output.find("@t40_project_allow_v4")
+        override_pos = output.find("@t10_override_v4")
         rfc_pos = output.find(RFC1918[0])
-        assert allow_pos != -1, "t40_project_allow_v4 set must be present"
+        assert override_pos != -1, "t10_override_v4 set must be present"
         assert rfc_pos != -1, "RFC1918 reject rules must be present"
-        assert allow_pos < rfc_pos, "Allow set must precede RFC1918 reject rules"
+        assert override_pos < rfc_pos, "Override set must precede RFC1918 reject rules"
 
 
 # -- Public API allow/deny ------------------------------------

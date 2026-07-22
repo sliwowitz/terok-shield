@@ -13,7 +13,7 @@ import pytest
 
 from terok_shield import ExecError, Shield, ShieldConfig, ShieldState, state
 
-from ..testfs import NFT_BINARY
+from ..testfs import FAKE_HOOKS_DIR, NFT_BINARY
 from ..testnet import TEST_DOMAIN, TEST_IP1, TEST_IP2
 
 ConfigFactory = Callable[..., ShieldConfig]
@@ -477,7 +477,7 @@ class TestCheckEnvironment:
             json.dumps({"hook": {"path": str(script_path), "args": []}})
         )
 
-    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[Path("/fake/hooks")])
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
     @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_dig_missing_reports_issue(
         self,
@@ -493,7 +493,7 @@ class TestCheckEnvironment:
         assert any("dig" in i for i in env.issues)
         assert env.dns_tier == "getent"
 
-    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[Path("/fake/hooks")])
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
     @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_apparmor_confined_dnsmasq_reports_issue(
         self,
@@ -538,7 +538,7 @@ class TestCheckEnvironment:
         assert env.needs_setup
         assert env.setup_hint
 
-    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[Path("/fake/hooks")])
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
     @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_stale_hooks_on_persistent_podman(
         self,
@@ -558,7 +558,7 @@ class TestCheckEnvironment:
         assert any("Stale" in i for i in env.issues)
 
     @mock.patch("terok_shield._read_installed_hook_version", return_value=state.BUNDLE_VERSION)
-    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[Path("/fake/hooks")])
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
     @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
     def test_global_hooks_installed(
         self,
