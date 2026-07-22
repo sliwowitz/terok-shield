@@ -23,9 +23,11 @@ handles raw IPs only.
 """
 # WAYPOINT: Shield (__init__), HookMode (hooks.mode)
 
+import contextlib
 import hashlib
 import logging
 import os
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -221,12 +223,20 @@ class DnsResolver:
 
     @staticmethod
     def _write_cache(path: Path, ips: list[str]) -> None:
-        """Write resolved IPs atomically (write + rename).
+        """Write resolved IPs atomically (unique temp file + rename).
 
-        The host-level file is read by concurrently starting tasks, and a torn
-        read there would seed a container with a truncated allowlist.
+        The host-level file is shared across concurrently starting tasks — a
+        torn read would seed a container with a truncated allowlist — and two
+        threads of one process can write the same (content-hash-keyed) file at
+        once, so each write goes to its own ``mkstemp`` temp before the rename.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text("\n".join(ips) + "\n" if ips else "")
-        tmp.replace(path)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(ips) + "\n" if ips else "")
+            os.replace(tmp, path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise

@@ -91,6 +91,36 @@ def test_write_cache_is_atomic_and_leaves_no_temp(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == [cache_path]  # no .tmp sibling left behind
 
 
+def test_write_cache_concurrent_same_path_no_collision(tmp_path: Path) -> None:
+    """Concurrent writes to one shared host-cache path each use a distinct temp.
+
+    The host cache is content-hash keyed, so two same-process threads launching
+    containers with the same allowlist target one file at once — a pid-only
+    temp name would collide; ``mkstemp`` gives each write its own.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    cache_path = tmp_path / "shared.resolved"
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(
+            pool.map(
+                lambda _n: DnsResolver._write_cache(cache_path, [TEST_IP1, TEST_IP2]), range(32)
+            )
+        )
+
+    assert DnsResolver._read_cache(cache_path) == [TEST_IP1, TEST_IP2]  # a full write won
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(".")] == []  # no temp leftovers
+
+
+def test_write_cache_cleans_up_temp_on_rename_failure(tmp_path: Path) -> None:
+    """A failed rename removes the temp file and re-raises — no partial artifact."""
+    cache_path = tmp_path / TEST_CACHE_FILENAME
+    with mock.patch("terok_shield.dns.resolver.os.replace", side_effect=OSError("boom")):
+        with pytest.raises(OSError, match="boom"):
+            DnsResolver._write_cache(cache_path, [TEST_IP1])
+    assert list(tmp_path.iterdir()) == []  # temp cleaned up, target never created
+
+
 def test_write_cache_creates_parent_dirs(tmp_path: Path) -> None:
     """_write_cache() creates missing parent directories."""
     cache_path = tmp_path / TEST_SUBDIR_NAME / TEST_CACHE_FILENAME
