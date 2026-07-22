@@ -384,10 +384,11 @@ def test_reload_raises_on_stale_pid(tmp_path: Path) -> None:
     """reload() raises RuntimeError when the PID is not our dnsmasq (stale)."""
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
+    runner = mock.MagicMock()
 
     with mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=False):
         with pytest.raises(RuntimeError, match="not dnsmasq"):
-            reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], container="c", runner=mock.MagicMock())
+            reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], container="c", runner=runner)
 
 
 def test_terminate_sigterms_then_sigkills(tmp_path: Path) -> None:
