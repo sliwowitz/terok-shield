@@ -102,7 +102,7 @@ class TestRFC1918Allow:
 
     def test_rfc1918_reachable_via_override(self, container: str, container_pid: str) -> None:
         """An RFC1918 host in the override set precedes (and so bypasses) the RFC1918 reject."""
-        from terok_shield.nft.constants import RFC1918
+        from terok_shield.nft.constants import PRIVATE_RANGES
 
         applied = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert applied.returncode == 0, f"Ruleset apply failed: {applied.stderr}"
@@ -114,7 +114,7 @@ class TestRFC1918Allow:
         assert listed.returncode == 0, listed.stderr
         output = listed.stdout
         override_pos = output.find("@t10_override_v4")
-        rfc_pos = output.find(RFC1918[0])
+        rfc_pos = output.find(PRIVATE_RANGES[0])
         assert override_pos != -1, "t10_override_v4 set must be present"
         assert rfc_pos != -1, "RFC1918 reject rules must be present"
         assert override_pos < rfc_pos, "Override set must precede RFC1918 reject rules"

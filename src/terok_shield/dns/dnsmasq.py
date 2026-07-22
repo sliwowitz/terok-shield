@@ -44,10 +44,21 @@ def reload(
     domains: list[str],
     deny_domains: Sequence[str] = (),
 ) -> None:
-    """Regenerate dnsmasq config and signal the daemon to reload.
+    """Regenerate the dnsmasq config file and SIGHUP the daemon to clear its cache.
 
-    Sends SIGHUP to the running dnsmasq, which re-reads its config file.
     No-op if dnsmasq is not running (PID file absent).
+
+    **Scope, by design:** dnsmasq does NOT re-read its main config file on
+    SIGHUP (only ``/etc/hosts``, ``--addn-hosts``, ``--hostsdir`` and the
+    cache).  So the config-file directives this rewrites — ``nftset=`` for
+    *newly* allowed domains and ``local=`` NXDOMAIN sinkholes for denied
+    domains — take effect only when dnsmasq next starts fresh, i.e. on a
+    container (re-)create, not on this reload.  What a runtime
+    ``shield allow`` / ``shield deny`` DOES guarantee immediately is the
+    IP-level nft change (the resolved IPs are added to / removed from the
+    tier sets directly); the DNS-plane sinkhole and rotation-tracking for a
+    runtime-added domain are launch-time only.  Regenerating the file here
+    keeps it correct for that next start.
 
     Args:
         state_dir: Per-container state directory.

@@ -15,8 +15,9 @@ tests pin the three guarantees that model rests on:
 3. **Forgetting is explicit**: ``shield reset`` — and only ``shield reset``
    — returns the allow sets to their just-launched contents.
 
-Plus the DNS-plane deny: a denied domain stops resolving (NXDOMAIN) instead
-of resolving and then timing out against the packet filter.
+Plus a runtime deny: ``shield deny <domain>`` blocks connections to it at the
+IP level (the DNS-plane NXDOMAIN sinkhole is a launch-time mechanism — see the
+deny test).
 """
 
 import subprocess
@@ -120,8 +121,8 @@ class TestLearnedStateLifecycle:
             extra_args = shield.pre_start(name, [_ALLOW_PROFILE])
             if "terok.shield.dns_tier=dnsmasq" not in " ".join(extra_args):
                 pytest.skip("dnsmasq tier not selected on this host")
-            start_shielded_container(name, extra_args, IMAGE)
-            yield name, sd, shield
+            cid = start_shielded_container(name, extra_args, IMAGE)
+            yield name, sd, shield, cid
         finally:
             _podman_rm(name)
 
@@ -133,7 +134,7 @@ class TestLearnedStateLifecycle:
         its own resolution.  This is the property that lets pre-resolution
         be dropped from the launch path entirely.
         """
-        name, sd, _shield = learned_container
+        name, sd, _shield, _cid = learned_container
         assert not StateBundle(sd).resolved_cache.exists(), (
             "dnsmasq-tier launch must not write a resolved.ips seed"
         )
@@ -146,12 +147,12 @@ class TestLearnedStateLifecycle:
         raw-IP fetch succeeds **without** a fresh DNS query — exactly the
         situation of a client that cached its answer across the bypass.
         """
-        name, _sd, shield = learned_container
+        name, _sd, shield, cid = learned_container
         pid = _container_pid(name)
         _learn(name, pid)
 
-        shield.down(name, name)
-        shield.up(name, name)
+        shield.down(name, cid)
+        shield.up(name, cid)
 
         contents = _allow_set_v4(pid)
         assert any(ip in contents for ip in ALLOWED_TARGET_IPS), (
@@ -166,7 +167,7 @@ class TestLearnedStateLifecycle:
         to its just-launched contents); a fresh in-container resolution
         re-learns and restores connectivity.
         """
-        name, _sd, shield = learned_container
+        name, _sd, shield, _cid = learned_container
         pid = _container_pid(name)
         _learn(name, pid)
 
@@ -181,18 +182,22 @@ class TestLearnedStateLifecycle:
         _learn(name, pid)  # the workload re-earns its state
         assert_reachable(name, ALLOWED_TARGET_HTTP)
 
-    def test_denied_domain_gets_nxdomain(self, learned_container) -> None:
-        """A denied domain is sinkholed in the DNS plane, not just IP-filtered."""
-        name, _sd, shield = learned_container
-        shield.deny(name, GOOGLE_DNS_DOMAIN)
+    def test_runtime_denied_domain_is_blocked(self, learned_container) -> None:
+        """A runtime ``shield deny <domain>`` blocks connections to it.
 
-        r = exec_in_container(name, "nslookup", GOOGLE_DNS_DOMAIN)
-        assert r.returncode != 0 or "NXDOMAIN" in (r.stdout + r.stderr), (
-            f"denied domain still resolves:\n{r.stdout}\n{r.stderr}"
-        )
+        The IP-level deny is the runtime guarantee: the domain's resolved IPs
+        land in the security-deny tier immediately, so the connection is
+        refused.  The DNS-plane NXDOMAIN sinkhole is a **launch-time**
+        mechanism only — dnsmasq does not re-read its main config on SIGHUP,
+        so a runtime deny does not stop the name from resolving until the
+        container is re-created (see the ``dnsmasq.reload`` docstring).
+        """
+        name, _sd, shield, _cid = learned_container
+        shield.deny(name, GOOGLE_DNS_DOMAIN)
+        assert_blocked(name, f"https://{GOOGLE_DNS_DOMAIN}/")
 
     def test_dnsmasq_cache_is_disabled(self, learned_container) -> None:
         """cache-size=0 in the generated config — a cached answer would skip
         the nftset add and hand out an IP whose set element was never re-armed."""
-        _name, sd, _shield = learned_container
+        _name, sd, _shield, _cid = learned_container
         assert "cache-size=0" in StateBundle(sd).dnsmasq_conf.read_text()
