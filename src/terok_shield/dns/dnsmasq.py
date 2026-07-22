@@ -17,11 +17,13 @@ only copy because hook scripts run outside the package venv.
 """
 # WAYPOINT: HookMode (hooks.mode)
 
+import contextlib
 import ipaddress
 import logging
 import os
 import re
 import signal
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -43,33 +45,36 @@ def reload(
     upstream_dns: str,
     domains: list[str],
     deny_domains: Sequence[str] = (),
+    *,
+    container: str,
+    runner: CommandRunner,
 ) -> None:
-    """Regenerate the dnsmasq config file and SIGHUP the daemon to clear its cache.
+    """Regenerate the dnsmasq config and restart dnsmasq so it takes effect.
 
-    No-op if dnsmasq is not running (PID file absent).
+    dnsmasq does NOT re-read its main config file on SIGHUP (only hosts /
+    ``--addn-hosts`` / ``--hostsdir`` and its cache), so a config change —
+    the ``nftset=`` line for a newly allowed domain, or the ``local=``
+    NXDOMAIN sinkhole for a denied one — only lands on a fresh start.  So we
+    restart in-netns: regenerate the conf, stop the old process, and relaunch
+    it reading the new conf.  No-op if dnsmasq was never started (PID file
+    absent — not the dnsmasq tier).
 
-    **Scope, by design:** dnsmasq does NOT re-read its main config file on
-    SIGHUP (only ``/etc/hosts``, ``--addn-hosts``, ``--hostsdir`` and the
-    cache).  So the config-file directives this rewrites — ``nftset=`` for
-    *newly* allowed domains and ``local=`` NXDOMAIN sinkholes for denied
-    domains — take effect only when dnsmasq next starts fresh, i.e. on a
-    container (re-)create, not on this reload.  What a runtime
-    ``shield allow`` / ``shield deny`` DOES guarantee immediately is the
-    IP-level nft change (the resolved IPs are added to / removed from the
-    tier sets directly); the DNS-plane sinkhole and rotation-tracking for a
-    runtime-added domain are launch-time only.  Regenerating the file here
-    keeps it correct for that next start.
+    There is a sub-second window with no in-container DNS between stop and
+    relaunch.  Runtime domain allow/deny is operator-initiated and rare, so
+    that is preferred over the previous SIGHUP, which loaded nothing.
 
     Args:
         state_dir: Per-container state directory.
         upstream_dns: Upstream DNS forwarder address.
         domains: Updated domain names for nftset auto-population.
         deny_domains: Denied domain names for DNS-plane NXDOMAIN sinkholes.
+        container: Container name — used to enter its netns for the relaunch.
+        runner: Command runner that performs the in-netns relaunch.
 
     Raises:
-        RuntimeError: If dnsmasq PID exists but the process is gone
-            (stale PID).  The caller should log this — it means the
-            container's DNS is broken.
+        RuntimeError: On a stale/foreign PID file, or if dnsmasq does not
+            come back after the restart — the container's DNS is broken and
+            the task should be re-created.
     """
     pid_int = _read_pid(state_dir)
     if pid_int is None:
@@ -82,9 +87,8 @@ def reload(
             "Restart the container to recover."
         )
 
-    # Regenerate config, then signal dnsmasq to re-read it.  Preserve
-    # log-queries / log-facility and the listen address so a live
-    # reload never rebinds dnsmasq onto a different interface.
+    # Regenerate the config, preserving log-queries / log-facility and the
+    # listen address so the relaunch never rebinds onto a different interface.
     pid_path = StateBundle(state_dir).dnsmasq_pid
     conf_path = StateBundle(state_dir).dnsmasq_conf
     old_conf = conf_path.read_text() if conf_path.is_file() else ""
@@ -100,13 +104,42 @@ def reload(
             deny_domains=deny_domains,
         )
     )
-    try:
-        os.kill(pid_int, signal.SIGHUP)
-    except ProcessLookupError as e:
-        raise RuntimeError(
-            f"dnsmasq (pid {pid_int}) is dead — container DNS is broken. "
-            "Restart the container to recover."
-        ) from e
+
+    # Stop the old dnsmasq, then relaunch it reading the fresh conf.  The
+    # netns already carries the listen address on ``lo`` (added at
+    # createRuntime and persistent for the container's lifetime), so no
+    # ``ip addr add`` is needed here.
+    _terminate(pid_int, state_dir)
+    _clear_pid_file(state_dir)
+    runner.dnsmasq_via_nsenter(container, str(conf_path))
+    _await_restart(state_dir)
+
+
+def _terminate(pid_int: int, state_dir: Path, timeout_s: float = 2.0) -> None:
+    """SIGTERM *pid_int*, wait for it to exit, then SIGKILL as a last resort."""
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid_int, signal.SIGTERM)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not _is_our_dnsmasq(pid_int, state_dir):
+            return
+        time.sleep(0.05)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid_int, signal.SIGKILL)
+
+
+def _await_restart(state_dir: Path, timeout_s: float = 2.0) -> None:
+    """Confirm a fresh dnsmasq wrote its PID file and owns the conf."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        pid = _read_pid(state_dir)
+        if pid is not None and _is_our_dnsmasq(pid, state_dir):
+            return
+        time.sleep(0.05)
+    raise RuntimeError(
+        "dnsmasq did not restart after a config reload — container DNS is broken. "
+        "Re-create the task to recover."
+    )
 
 
 # ── Domain file operations ─────────────────────────────

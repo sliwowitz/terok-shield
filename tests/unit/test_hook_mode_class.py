@@ -1131,26 +1131,20 @@ class TestDomainOperations:
     def test_allow_domain_persists_and_reloads(
         self, make_hook_mode: HookModeHarnessFactory
     ) -> None:
-        """allow_domain() records ``+domain`` in the overlay and sends SIGHUP."""
+        """allow_domain() records ``+domain`` in the overlay and reloads dnsmasq."""
         harness = make_hook_mode()
         sd = harness.config.state_dir.resolve()
         StateBundle(sd).ensure_dirs()
-        # Write upstream.dns so reload works
         StateBundle(sd).upstream_dns.write_text("169.254.1.1\n")
-        # Write a dnsmasq PID file so reload triggers
         StateBundle(sd).dnsmasq_pid.write_text("12345\n")
 
-        with (
-            mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-            mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-        ):
-            harness.mode.allow_domain(TEST_DOMAIN)
+        with mock.patch("terok_shield.dns.dnsmasq.reload"):
+            harness.mode.allow_domain("test-ctr", TEST_DOMAIN)
 
-        domains = StateBundle(sd).policy_live.read_text()
-        assert f"+{TEST_DOMAIN}" in domains
+        assert f"+{TEST_DOMAIN}" in StateBundle(sd).policy_live.read_text()
 
     def test_allow_domain_reloads_dnsmasq(self, make_hook_mode: HookModeHarnessFactory) -> None:
-        """allow_domain() records the overlay entry and reloads dnsmasq."""
+        """allow_domain() records the overlay entry and reloads dnsmasq for the container."""
         harness = make_hook_mode()
         sd = harness.config.state_dir.resolve()
         StateBundle(sd).ensure_dirs()
@@ -1158,8 +1152,9 @@ class TestDomainOperations:
         StateBundle(sd).upstream_dns.write_text("169.254.1.1\n")
 
         with mock.patch("terok_shield.dns.dnsmasq.reload") as mock_reload:
-            harness.mode.allow_domain(TEST_DOMAIN)
+            harness.mode.allow_domain("test-ctr", TEST_DOMAIN)
         mock_reload.assert_called_once()
+        assert mock_reload.call_args.kwargs["container"] == "test-ctr"
 
     def test_deny_domain_removes_and_reloads(self, make_hook_mode: HookModeHarnessFactory) -> None:
         """deny_domain() records ``-domain`` in the overlay and excludes it from the dnsmasq set."""
@@ -1171,11 +1166,8 @@ class TestDomainOperations:
         bundle.upstream_dns.write_text("169.254.1.1\n")
         bundle.dnsmasq_pid.write_text("12345\n")
 
-        with (
-            mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-            mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-        ):
-            harness.mode.deny_domain(TEST_DOMAIN)
+        with mock.patch("terok_shield.dns.dnsmasq.reload"):
+            harness.mode.deny_domain("test-ctr", TEST_DOMAIN)
 
         from terok_shield.dns.dnsmasq import read_merged_domains
 
@@ -1191,7 +1183,7 @@ class TestDomainOperations:
         StateBundle(sd).ensure_dirs()
 
         with pytest.raises(RuntimeError, match="upstream DNS not persisted"):
-            harness.mode._reload_dnsmasq(sd)
+            harness.mode._reload_dnsmasq("test-ctr", sd)
 
     @pytest.mark.parametrize(
         ("method_name", "tier"),
@@ -1216,7 +1208,7 @@ class TestDomainOperations:
         StateBundle(sd).dns_tier.write_text(f"{tier}\n")
 
         # Must not raise
-        getattr(harness.mode, method_name)(TEST_DOMAIN)
+        getattr(harness.mode, method_name)("test-ctr", TEST_DOMAIN)
         # And must not have written the runtime overlay
         assert not StateBundle(sd).policy_live.exists()
 
@@ -1231,14 +1223,10 @@ class TestDomainOperations:
         StateBundle(sd).dnsmasq_pid.write_text("12345\n")
         # dns_tier_path NOT written — pre_start has not run
 
-        with (
-            mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-            mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-        ):
-            harness.mode.allow_domain(TEST_DOMAIN)
+        with mock.patch("terok_shield.dns.dnsmasq.reload"):
+            harness.mode.allow_domain("test-ctr", TEST_DOMAIN)
 
-        domains = StateBundle(sd).policy_live.read_text()
-        assert f"+{TEST_DOMAIN}" in domains
+        assert f"+{TEST_DOMAIN}" in StateBundle(sd).policy_live.read_text()
 
 
 class TestPreStartDnsTierBranches:
@@ -1385,11 +1373,8 @@ class TestDenyDomainWithReload:
         bundle.upstream_dns.write_text("169.254.1.1\n")
         bundle.dnsmasq_pid.write_text("12345\n")
 
-        with (
-            mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-            mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-        ):
-            harness.mode.deny_domain(TEST_DOMAIN)
+        with mock.patch("terok_shield.dns.dnsmasq.reload"):
+            harness.mode.deny_domain("test-ctr", TEST_DOMAIN)
 
         assert f"-{TEST_DOMAIN}" in bundle.policy_live.read_text()
 
@@ -1405,7 +1390,7 @@ class TestDenyDomainWithReload:
         bundle.upstream_dns.write_text("169.254.1.1\n")
 
         with mock.patch("terok_shield.dns.dnsmasq.reload") as mock_reload:
-            harness.mode.deny_domain(TEST_DOMAIN)
+            harness.mode.deny_domain("test-ctr", TEST_DOMAIN)
         mock_reload.assert_called_once()
 
 

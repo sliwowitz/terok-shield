@@ -307,43 +307,53 @@ def test_read_merged_domains_subtracts_denied(tmp_path: Path) -> None:
 # ── reload ───────────────────────────────────────────────
 
 
-def test_reload_regenerates_config_and_sends_sighup(tmp_path: Path) -> None:
-    """reload() regenerates config and sends SIGHUP to dnsmasq."""
+def _run_reload(tmp_path: Path, *args: object, **kwargs: object) -> mock.MagicMock:
+    """Invoke reload() with a mock runner and stubbed stop/verify, return the runner.
+
+    ``_terminate`` (kill loop) and ``_await_restart`` (pidfile poll) have their
+    own direct tests below, so the reload-flow tests stub them out.
+    """
+    runner = mock.MagicMock()
+    with (
+        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.dns.dnsmasq._terminate"),
+        mock.patch("terok_shield.dns.dnsmasq._await_restart"),
+    ):
+        reload(tmp_path, *args, container="test-ctr", runner=runner, **kwargs)  # type: ignore[arg-type]
+    return runner
+
+
+def test_reload_regenerates_config_and_restarts(tmp_path: Path) -> None:
+    """reload() regenerates the config and relaunches dnsmasq in the netns.
+
+    dnsmasq does not re-read its main config on SIGHUP, so the reload must
+    restart it for the new nftset/sinkhole directives to take effect.
+    """
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
 
-    with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
-    ):
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+    runner = _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
 
-    # Config was regenerated
     assert TEST_DOMAIN in StateBundle(tmp_path).dnsmasq_conf.read_text()
-    # SIGHUP sent (not SIGTERM)
-    import signal
-
-    mock_kill.assert_called_once_with(12345, signal.SIGHUP)
+    runner.dnsmasq_via_nsenter.assert_called_once()
+    call = runner.dnsmasq_via_nsenter.call_args
+    assert call.args[0] == "test-ctr"
+    assert call.args[1] == str(StateBundle(tmp_path).dnsmasq_conf)
 
 
 def test_reload_preserves_krun_listen_address(tmp_path: Path) -> None:
     """reload() reads the existing conf's listen-address and re-emits it.
 
-    Without this, a krun-runtime container's live reload would silently
-    rebind dnsmasq onto netns ``127.0.0.1`` and break DNS for the guest.
+    Without this, a krun-runtime container's reload would silently rebind
+    dnsmasq onto netns ``127.0.0.1`` and break DNS for the guest.
     """
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
-    # Pre-existing conf was generated for the krun runtime.
     StateBundle(tmp_path).dnsmasq_conf.write_text(
         f"listen-address={DNSMASQ_BIND_KRUN}\nport=53\nbind-interfaces\n"
     )
 
-    with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-    ):
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
 
     new_conf = StateBundle(tmp_path).dnsmasq_conf.read_text()
     assert f"listen-address={DNSMASQ_BIND_KRUN}" in new_conf
@@ -351,55 +361,70 @@ def test_reload_preserves_krun_listen_address(tmp_path: Path) -> None:
 
 
 def test_reload_falls_back_to_default_when_listen_address_missing(tmp_path: Path) -> None:
-    """reload() emits the default bind when the prior conf had no ``listen-address=`` line.
-
-    Defensive against hand-written or truncated configs — never crash, fall back
-    to the safe default-runtime bind.
-    """
+    """reload() emits the default bind when the prior conf had no ``listen-address=`` line."""
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
-    # No listen-address line in the old conf.
     StateBundle(tmp_path).dnsmasq_conf.write_text("port=53\nbind-interfaces\n")
 
-    with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-    ):
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
 
-    new_conf = StateBundle(tmp_path).dnsmasq_conf.read_text()
-    assert f"listen-address={DNSMASQ_BIND_DEFAULT}" in new_conf
+    assert (
+        f"listen-address={DNSMASQ_BIND_DEFAULT}" in StateBundle(tmp_path).dnsmasq_conf.read_text()
+    )
 
 
 def test_reload_noop_when_not_running(tmp_path: Path) -> None:
-    """reload() is a no-op when dnsmasq PID file is absent."""
+    """reload() is a no-op (no relaunch) when the dnsmasq PID file is absent."""
     StateBundle(tmp_path).ensure_dirs()
-    with mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill:
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
-    mock_kill.assert_not_called()
+    runner = _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+    runner.dnsmasq_via_nsenter.assert_not_called()
 
 
 def test_reload_raises_on_stale_pid(tmp_path: Path) -> None:
-    """reload() raises RuntimeError when PID is not dnsmasq (stale)."""
+    """reload() raises RuntimeError when the PID is not our dnsmasq (stale)."""
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
 
     with mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=False):
         with pytest.raises(RuntimeError, match="not dnsmasq"):
-            reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+            reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], container="c", runner=mock.MagicMock())
 
 
-def test_reload_raises_on_dead_process(tmp_path: Path) -> None:
-    """reload() raises RuntimeError when SIGHUP fails (process dead)."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
+def test_terminate_sigterms_then_sigkills(tmp_path: Path) -> None:
+    """_terminate SIGTERMs, then SIGKILLs a process that outlives the timeout."""
+    import signal
+
+    from terok_shield.dns.dnsmasq import _terminate
 
     with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill", side_effect=ProcessLookupError),
+        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),  # never dies
+        mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
+        mock.patch("terok_shield.dns.dnsmasq.time.sleep"),
     ):
-        with pytest.raises(RuntimeError, match="dead"):
-            reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+        _terminate(12345, tmp_path, timeout_s=0.0)
+
+    assert mock.call(12345, signal.SIGTERM) in mock_kill.call_args_list
+    assert mock.call(12345, signal.SIGKILL) in mock_kill.call_args_list
+
+
+def test_await_restart_raises_when_dnsmasq_absent(tmp_path: Path) -> None:
+    """_await_restart raises when no fresh dnsmasq appears within the timeout."""
+    from terok_shield.dns.dnsmasq import _await_restart
+
+    StateBundle(tmp_path).ensure_dirs()  # no pid file written
+    with mock.patch("terok_shield.dns.dnsmasq.time.sleep"):
+        with pytest.raises(RuntimeError, match="did not restart"):
+            _await_restart(tmp_path, timeout_s=0.0)
+
+
+def test_await_restart_returns_when_fresh_dnsmasq_present(tmp_path: Path) -> None:
+    """_await_restart returns cleanly once a fresh dnsmasq owns the conf."""
+    from terok_shield.dns.dnsmasq import _await_restart
+
+    StateBundle(tmp_path).ensure_dirs()
+    StateBundle(tmp_path).dnsmasq_pid.write_text("999\n")
+    with mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True):
+        _await_restart(tmp_path)  # must not raise
 
 
 # ── generate_config validation ───────────────────────────
@@ -532,11 +557,7 @@ def test_reload_writes_deny_sinkholes(tmp_path: Path) -> None:
     bundle.dnsmasq_pid.write_text("12345\n")
     bundle.dnsmasq_conf.write_text(f"listen-address={DNSMASQ_BIND_DEFAULT}\n")
 
-    with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-    ):
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], [TEST_DOMAIN2])
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], [TEST_DOMAIN2])
 
     conf = bundle.dnsmasq_conf.read_text()
     assert f"nftset=/{TEST_DOMAIN}/" in conf

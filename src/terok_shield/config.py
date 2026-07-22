@@ -183,16 +183,16 @@ class ShieldModeBackend(Protocol):
         """Live-allow an IP for a running container."""
         ...
 
-    def allow_domain(self, domain: str) -> None:
-        """Live-allow a domain (update dnsmasq config if active)."""
+    def allow_domain(self, container: str, domain: str) -> None:
+        """Live-allow a domain (reload dnsmasq if active)."""
         ...
 
     def deny_ip(self, container: str, ip: str) -> None:
         """Live-deny an IP for a running container."""
         ...
 
-    def deny_domain(self, domain: str) -> None:
-        """Live-deny a domain (remove from dnsmasq config if active)."""
+    def deny_domain(self, container: str, domain: str) -> None:
+        """Live-deny a domain (reload dnsmasq if active)."""
         ...
 
     def list_rules(self, container: str) -> str:

@@ -55,6 +55,10 @@ class CommandRunner(Protocol):
         """Run nft inside a running container's network namespace."""
         ...
 
+    def dnsmasq_via_nsenter(self, container: str, conf_path: str, *, pid: str | None = None) -> str:
+        """Launch dnsmasq inside a running container's network namespace."""
+        ...
+
     def podman_inspect(self, container: str, fmt: str) -> str:
         """Inspect a container attribute via podman."""
         ...
@@ -157,6 +161,21 @@ class SubprocessRunner:
         if stdin is not None:
             return self.run([*cmd, *args, "-f", "-"], stdin=stdin, check=check)
         return self.run([*cmd, *args], check=check)
+
+    def dnsmasq_via_nsenter(self, container: str, conf_path: str, *, pid: str | None = None) -> str:
+        """Launch dnsmasq inside a running container's network namespace.
+
+        dnsmasq runs in the host PID namespace but the container's network
+        namespace (like the OCI hook's own launch), so a host-side reload can
+        relaunch it here.  dnsmasq daemonizes and writes its own pid-file; the
+        command returns once it has forked into the background.
+        """
+        if pid is None:
+            pid = self.podman_inspect(container, "{{.State.Pid}}")
+        dnsmasq = which_sbin_aware("dnsmasq") or "dnsmasq"
+        return self.run(
+            ["podman", "unshare", "nsenter", "-t", pid, "-n", dnsmasq, f"--conf-file={conf_path}"]
+        )
 
     # ── Podman ──────────────────────────────────────────
 

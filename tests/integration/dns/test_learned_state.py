@@ -15,9 +15,8 @@ tests pin the three guarantees that model rests on:
 3. **Forgetting is explicit**: ``shield reset`` — and only ``shield reset``
    — returns the allow sets to their just-launched contents.
 
-Plus a runtime deny: ``shield deny <domain>`` blocks connections to it at the
-IP level (the DNS-plane NXDOMAIN sinkhole is a launch-time mechanism — see the
-deny test).
+Plus the DNS-plane deny: a runtime ``shield deny <domain>`` restarts dnsmasq so
+the name stops resolving (NXDOMAIN), not merely IP-filtered.
 """
 
 import subprocess
@@ -182,19 +181,20 @@ class TestLearnedStateLifecycle:
         _learn(name, pid)  # the workload re-earns its state
         assert_reachable(name, ALLOWED_TARGET_HTTP)
 
-    def test_runtime_denied_domain_is_blocked(self, learned_container) -> None:
-        """A runtime ``shield deny <domain>`` blocks connections to it.
+    def test_runtime_denied_domain_gets_nxdomain(self, learned_container) -> None:
+        """A runtime ``shield deny <domain>`` sinkholes it in the DNS plane.
 
-        The IP-level deny is the runtime guarantee: the domain's resolved IPs
-        land in the security-deny tier immediately, so the connection is
-        refused.  The DNS-plane NXDOMAIN sinkhole is a **launch-time**
-        mechanism only — dnsmasq does not re-read its main config on SIGHUP,
-        so a runtime deny does not stop the name from resolving until the
-        container is re-created (see the ``dnsmasq.reload`` docstring).
+        ``deny`` restarts dnsmasq so it loads the fresh ``local=`` sinkhole
+        (dnsmasq does not re-read its main config on SIGHUP), so the name
+        stops resolving — not merely IP-filtered.
         """
         name, _sd, shield, _cid = learned_container
         shield.deny(name, GOOGLE_DNS_DOMAIN)
-        assert_blocked(name, f"https://{GOOGLE_DNS_DOMAIN}/")
+
+        r = exec_in_container(name, "nslookup", GOOGLE_DNS_DOMAIN)
+        assert r.returncode != 0 or "NXDOMAIN" in (r.stdout + r.stderr), (
+            f"denied domain still resolves:\n{r.stdout}\n{r.stderr}"
+        )
 
     def test_dnsmasq_cache_is_disabled(self, learned_container) -> None:
         """cache-size=0 in the generated config — a cached answer would skip

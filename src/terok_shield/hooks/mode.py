@@ -333,13 +333,13 @@ class HookMode:
 
     # ── Live operations (domain) ───────────────────────
 
-    def allow_domain(self, domain: str) -> None:
-        """Record ``+domain`` in the runtime overlay and signal a dnsmasq reload.
+    def allow_domain(self, container: str, domain: str) -> None:
+        """Record ``+domain`` in the runtime overlay and reload dnsmasq.
 
         The overlay (``policy/live``) flips any prior deny of *domain* and
-        survives reloads; dnsmasq re-reads the composed domain list on SIGHUP
-        so the change takes effect without a container restart.  The IP-level
-        allow (nft set update) is handled separately by ``allow_ip()``.
+        survives reloads; the dnsmasq restart picks up the new ``nftset=``
+        line so future IP rotations of *domain* are auto-populated.  The
+        IP-level allow (nft set update) is handled separately by ``allow_ip()``.
 
         No-op when the container is not using the dnsmasq DNS tier (the static
         IP-level allow already happened via ``allow_ip()``).
@@ -348,14 +348,15 @@ class HookMode:
         if not _is_dnsmasq_tier(sd):
             return
         StateBundle(sd).overlay_set("+", domain)
-        self._reload_dnsmasq(sd)
+        self._reload_dnsmasq(container, sd)
 
-    def deny_domain(self, domain: str) -> None:
-        """Record ``-domain`` in the runtime overlay and signal a dnsmasq reload.
+    def deny_domain(self, container: str, domain: str) -> None:
+        """Record ``-domain`` in the runtime overlay and reload dnsmasq.
 
-        Counterpart of ``allow_domain()``: dnsmasq stops auto-populating nft
-        sets for *domain* and sinkholes its queries (NXDOMAIN), so the deny
-        fails fast in the DNS plane instead of timing out against the filter.
+        Counterpart of ``allow_domain()``: the dnsmasq restart picks up the
+        ``local=`` sinkhole, so *domain* stops resolving (NXDOMAIN) and the
+        deny fails fast in the DNS plane instead of timing out against the
+        filter.
 
         No-op when the container is not using the dnsmasq DNS tier.
         """
@@ -363,20 +364,27 @@ class HookMode:
         if not _is_dnsmasq_tier(sd):
             return
         StateBundle(sd).overlay_set("-", domain)
-        self._reload_dnsmasq(sd)
+        self._reload_dnsmasq(container, sd)
 
-    def _reload_dnsmasq(self, state_dir: Path) -> None:
-        """Regenerate dnsmasq config and send SIGHUP.
+    def _reload_dnsmasq(self, container: str, state_dir: Path) -> None:
+        """Regenerate the dnsmasq config and restart dnsmasq to load it.
 
         No-op if dnsmasq is not running (PID file absent).
-        Raises RuntimeError if dnsmasq is dead (stale PID).
+        Raises RuntimeError if dnsmasq is dead (stale PID) or fails to restart.
         """
         upstream = self._read_upstream_dns()
         if not upstream:
             raise RuntimeError("Cannot reload dnsmasq: upstream DNS not persisted in state")
 
         domains = dnsmasq.read_merged_domains(state_dir)
-        dnsmasq.reload(state_dir, upstream, domains, dnsmasq.read_denied_domains(state_dir))
+        dnsmasq.reload(
+            state_dir,
+            upstream,
+            domains,
+            dnsmasq.read_denied_domains(state_dir),
+            container=container,
+            runner=self._runner,
+        )
 
     # ── Live operations (IP) ────────────────────────────
 
