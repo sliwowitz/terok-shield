@@ -14,11 +14,10 @@ import pytest
 from terok_shield.nft.constants import (
     BLOCKED_LOG_PREFIX,
     BYPASS_LOG_PREFIX,
-    IPV6_PRIVATE,
+    HARD_DENY_RANGES,
     NFT_TABLE,
     PASTA_HOST_LOOPBACK_MAP,
     PRIVATE_RANGES,
-    RFC1918,
 )
 from terok_shield.nft.rules import (
     RulesetBuilder,
@@ -27,7 +26,12 @@ from terok_shield.nft.rules import (
     add_deny_elements_dual,
     add_elements,
     add_elements_dual,
+    add_override_elements_dual,
+    arm_bypass_window,
     delete_deny_elements_dual,
+    disarm_bypass_window,
+    parse_set_elements,
+    restore_elements,
     safe_ip,
 )
 
@@ -46,10 +50,10 @@ from ..testnet import (
     TEST_NET1,
 )
 
-_ALLOW_V4_SET = "set allow_v4 { type ipv4_addr; flags interval; }"
-_ALLOW_V6_SET = "set allow_v6 { type ipv6_addr; flags interval; }"
-_DENY_V4_SET = "set deny_v4 { type ipv4_addr; flags interval; }"
-_DENY_V6_SET = "set deny_v6 { type ipv6_addr; flags interval; }"
+_ALLOW_V4_SET = "set t40_project_allow_v4 { type ipv4_addr; flags interval; }"
+_ALLOW_V6_SET = "set t40_project_allow_v6 { type ipv6_addr; flags interval; }"
+_DENY_V4_SET = "set t20_security_deny_v4 { type ipv4_addr; flags interval; }"
+_DENY_V6_SET = "set t20_security_deny_v6 { type ipv6_addr; flags interval; }"
 _ALLOW_LOG_PREFIX = "TEROK_SHIELD_ALLOWED"
 _DENY_LOG_PREFIX = "TEROK_SHIELD_DENIED"
 _BLOCKED_LOG_PREFIX = "TEROK_SHIELD_BLOCKED"
@@ -57,7 +61,7 @@ _ADMIN_PROHIBITED = "admin-prohibited"
 _INPUT_CHAIN = "chain input"
 _OUTPUT_CHAIN = "chain output"
 _LOOPBACK_ACCEPT = 'oifname "lo" accept'
-_UNSAFE_SET_NAME = "allow_v4; drop"
+_UNSAFE_SET_NAME = "t40_project_allow_v4; drop"
 _UNSAFE_TABLE_NAME = f"{NFT_TABLE}; drop"
 
 
@@ -153,11 +157,11 @@ def test_hook_ruleset_contains_required_fragments(fragment: str) -> None:
     assert fragment in RulesetBuilder().build_hook()
 
 
-def test_hook_ruleset_blocks_all_private_ranges() -> None:
-    """Every RFC1918 and IPv6 private/link-local range must be rejected in enforce mode."""
+def test_hook_ruleset_blocks_all_private_and_hard_deny_ranges() -> None:
+    """Every hard-deny (link-local/IMDS) and private (RFC1918/ULA) range is rejected."""
     rs = RulesetBuilder().build_hook()
-    for net in PRIVATE_RANGES:
-        assert net in rs, f"Private range {net!r} missing from hook ruleset"
+    for net in HARD_DENY_RANGES + PRIVATE_RANGES:
+        assert net in rs, f"Range {net!r} missing from hook ruleset"
 
 
 def test_hook_ruleset_accepts_dns_to_the_configured_forwarder() -> None:
@@ -208,19 +212,21 @@ def test_hook_ruleset_emits_one_rule_per_loopback_port(
         assert ruleset.index(rule) < ruleset.index("169.254.0.0/16")
 
 
-def test_hook_ruleset_places_allow_sets_before_private_range_rejects() -> None:
-    """Allow-set accepts must precede the private-range reject rules."""
-    ruleset = RulesetBuilder().build_hook()
-    assert ruleset.index("@allow_v4") < ruleset.index(RFC1918[0])
+def test_hook_ruleset_tier_order_is_authority_order() -> None:
+    """Tier order is the authority order: hard-deny < override < deny < private < allow.
 
-
-def test_hook_ruleset_places_deny_sets_between_allow_and_private() -> None:
-    """Deny-set reject rules appear after allow-set accepts and before private-range rejects."""
-    ruleset = RulesetBuilder().build_hook()
-    allow_pos = ruleset.index("@allow_v4")
-    deny_pos = ruleset.index("@deny_v4")
-    private_pos = ruleset.index(RFC1918[0])
-    assert allow_pos < deny_pos < private_pos
+    The deny tier sits ABOVE the allow tier, so an explicit deny wins over an
+    allow; the override tier sits above the deny (the only way past a
+    security-deny); and the hard-deny floor (link-local/IMDS) sits above the
+    override — absolute, not even override-able.
+    """
+    rs = RulesetBuilder().build_hook()
+    hard_deny = rs.index(HARD_DENY_RANGES[0])  # 169.254.0.0/16
+    override = rs.index("@t10_override_v4")
+    deny = rs.index("@t20_security_deny_v4")
+    private = rs.index(PRIVATE_RANGES[0])  # 10.0.0.0/8
+    allow = rs.index("@t40_project_allow_v4")
+    assert hard_deny < override < deny < private < allow
 
 
 # ── Terminal deny rule (BLOCKED prefix) ───────────────
@@ -246,10 +252,14 @@ def test_hook_ruleset_terminal_rule_is_standalone_log_reject() -> None:
 def test_hook_ruleset_deny_sets_use_denied_prefix() -> None:
     """Deny set rules use the DENIED prefix (not BLOCKED)."""
     ruleset = RulesetBuilder().build_hook()
-    assert "@deny_v4" in ruleset, "deny_v4 set rule missing from ruleset"
-    assert "@deny_v6" in ruleset, "deny_v6 set rule missing from ruleset"
+    assert "@t20_security_deny_v4" in ruleset, "t20_security_deny_v4 set rule missing from ruleset"
+    assert "@t20_security_deny_v6" in ruleset, "t20_security_deny_v6 set rule missing from ruleset"
     # Deny set rules have a daddr selector + DENIED prefix
-    lines = [ln for ln in ruleset.splitlines() if "@deny_v4" in ln or "@deny_v6" in ln]
+    lines = [
+        ln
+        for ln in ruleset.splitlines()
+        if "@t20_security_deny_v4" in ln or "@t20_security_deny_v6" in ln
+    ]
     assert all(_DENY_LOG_PREFIX in ln for ln in lines)
     assert not any(_BLOCKED_LOG_PREFIX in ln for ln in lines)
 
@@ -260,16 +270,16 @@ def test_hook_ruleset_has_no_queued_prefix() -> None:
 
 
 def test_verify_ruleset_checks_deny_sets() -> None:
-    """verify_ruleset() requires deny_v4 and deny_v6 sets."""
+    """verify_ruleset() requires t20_security_deny_v4 and t20_security_deny_v6 sets."""
     minimal = (
         f"policy drop {_ADMIN_PROHIBITED} "
         f'log group 100 prefix "{_BLOCKED_LOG_PREFIX}" '
-        f"allow_v4 allow_v6 {_OUTPUT_CHAIN} {_INPUT_CHAIN}\n"
+        f"t40_project_allow_v4 t40_project_allow_v6 {_OUTPUT_CHAIN} {_INPUT_CHAIN}\n"
         f"{_private_reject_rules()}"
     )
     errors = RulesetBuilder().verify_hook(minimal)
-    assert "deny_v4 set missing" in errors
-    assert "deny_v6 set missing" in errors
+    assert "t20_security_deny_v4 set missing" in errors
+    assert "t20_security_deny_v6 set missing" in errors
 
 
 def test_ruleset_builder_rejects_invalid_dns() -> None:
@@ -302,24 +312,24 @@ def test_ruleset_builder_rejects_invalid_loopback_ports(
     [
         pytest.param(
             [TEST_IP1, TEST_IP2],
-            _add_element_command("allow_v4", TEST_IP1, TEST_IP2),
+            _add_element_command("t40_project_allow_v4", TEST_IP1, TEST_IP2),
             id="valid-ipv4s",
         ),
         pytest.param(
             [TEST_IP1, "invalid", TEST_IP2],
-            _add_element_command("allow_v4", TEST_IP1, TEST_IP2),
+            _add_element_command("t40_project_allow_v4", TEST_IP1, TEST_IP2),
             id="skips-invalid-inputs",
         ),
         pytest.param(
             [IPV4_CIDR_HOST_BITS],
-            _add_element_command("allow_v4", IPV4_CIDR_HOST_BITS_CANONICAL),
+            _add_element_command("t40_project_allow_v4", IPV4_CIDR_HOST_BITS_CANONICAL),
             id="canonicalizes-cidrs",
         ),
     ],
 )
 def test_add_elements_emits_only_valid_canonicalized_values(ips: list[str], expected: str) -> None:
     """add_elements() filters invalid values and normalizes the rest."""
-    assert add_elements("allow_v4", ips) == expected
+    assert add_elements("t40_project_allow_v4", ips) == expected
 
 
 @pytest.mark.parametrize(
@@ -328,14 +338,14 @@ def test_add_elements_emits_only_valid_canonicalized_values(ips: list[str], expe
 )
 def test_add_elements_returns_empty_when_no_ips_survive_validation(ips: list[str]) -> None:
     """add_elements() returns no command when every candidate is invalid."""
-    assert add_elements("allow_v4", ips) == ""
+    assert add_elements("t40_project_allow_v4", ips) == ""
 
 
 @pytest.mark.parametrize(
     ("set_name", "table"),
     [
         pytest.param(_UNSAFE_SET_NAME, NFT_TABLE, id="unsafe-set-name"),
-        pytest.param("allow_v4", _UNSAFE_TABLE_NAME, id="unsafe-table-name"),
+        pytest.param("t40_project_allow_v4", _UNSAFE_TABLE_NAME, id="unsafe-table-name"),
     ],
 )
 def test_add_elements_rejects_unsafe_identifiers(set_name: str, table: str) -> None:
@@ -349,30 +359,30 @@ def test_add_elements_rejects_unsafe_identifiers(set_name: str, table: str) -> N
     [
         pytest.param(
             [TEST_IP1, TEST_IP2],
-            _add_element_command("allow_v4", TEST_IP1, TEST_IP2),
+            _add_element_command("t40_project_allow_v4", TEST_IP1, TEST_IP2),
             id="ipv4-only",
         ),
         pytest.param(
             [IPV6_CLOUDFLARE],
-            _add_element_command("allow_v6", IPV6_CLOUDFLARE),
+            _add_element_command("t40_project_allow_v6", IPV6_CLOUDFLARE),
             id="ipv6-only",
         ),
         pytest.param(
             [TEST_IP1, IPV6_CLOUDFLARE],
-            _add_element_command("allow_v4", TEST_IP1)
-            + _add_element_command("allow_v6", IPV6_CLOUDFLARE),
+            _add_element_command("t40_project_allow_v4", TEST_IP1)
+            + _add_element_command("t40_project_allow_v6", IPV6_CLOUDFLARE),
             id="mixed-families",
         ),
         pytest.param(
             [TEST_IP1, "invalid", IPV6_CLOUDFLARE],
-            _add_element_command("allow_v4", TEST_IP1)
-            + _add_element_command("allow_v6", IPV6_CLOUDFLARE),
+            _add_element_command("t40_project_allow_v4", TEST_IP1)
+            + _add_element_command("t40_project_allow_v6", IPV6_CLOUDFLARE),
             id="skips-invalid-and-preserves-family-order",
         ),
         pytest.param(
             [IPV4_CIDR_HOST_BITS, IPV6_VERBOSE],
-            _add_element_command("allow_v4", IPV4_CIDR_HOST_BITS_CANONICAL)
-            + _add_element_command("allow_v6", IPV6_VERBOSE_CANONICAL),
+            _add_element_command("t40_project_allow_v4", IPV4_CIDR_HOST_BITS_CANONICAL)
+            + _add_element_command("t40_project_allow_v6", IPV6_VERBOSE_CANONICAL),
             id="canonicalizes-both-families",
         ),
     ],
@@ -409,24 +419,24 @@ def _deny_delete_element_command(set_name: str, *ips: str) -> str:
     [
         pytest.param(
             [TEST_IP1, TEST_IP2],
-            _deny_add_element_command("deny_v4", TEST_IP1, TEST_IP2),
+            _deny_add_element_command("t20_security_deny_v4", TEST_IP1, TEST_IP2),
             id="ipv4-only",
         ),
         pytest.param(
             [IPV6_CLOUDFLARE],
-            _deny_add_element_command("deny_v6", IPV6_CLOUDFLARE),
+            _deny_add_element_command("t20_security_deny_v6", IPV6_CLOUDFLARE),
             id="ipv6-only",
         ),
         pytest.param(
             [TEST_IP1, IPV6_CLOUDFLARE],
-            _deny_add_element_command("deny_v4", TEST_IP1)
-            + _deny_add_element_command("deny_v6", IPV6_CLOUDFLARE),
+            _deny_add_element_command("t20_security_deny_v4", TEST_IP1)
+            + _deny_add_element_command("t20_security_deny_v6", IPV6_CLOUDFLARE),
             id="mixed-families",
         ),
         pytest.param(
             [TEST_IP1, "invalid", IPV6_CLOUDFLARE],
-            _deny_add_element_command("deny_v4", TEST_IP1)
-            + _deny_add_element_command("deny_v6", IPV6_CLOUDFLARE),
+            _deny_add_element_command("t20_security_deny_v4", TEST_IP1)
+            + _deny_add_element_command("t20_security_deny_v6", IPV6_CLOUDFLARE),
             id="skips-invalid",
         ),
     ],
@@ -450,18 +460,18 @@ def test_add_deny_elements_dual_returns_empty_when_no_valid_ips(ips: list[str]) 
     [
         pytest.param(
             [TEST_IP1, TEST_IP2],
-            _deny_delete_element_command("deny_v4", TEST_IP1, TEST_IP2),
+            _deny_delete_element_command("t20_security_deny_v4", TEST_IP1, TEST_IP2),
             id="ipv4-only",
         ),
         pytest.param(
             [IPV6_CLOUDFLARE],
-            _deny_delete_element_command("deny_v6", IPV6_CLOUDFLARE),
+            _deny_delete_element_command("t20_security_deny_v6", IPV6_CLOUDFLARE),
             id="ipv6-only",
         ),
         pytest.param(
             [TEST_IP1, IPV6_CLOUDFLARE],
-            _deny_delete_element_command("deny_v4", TEST_IP1)
-            + _deny_delete_element_command("deny_v6", IPV6_CLOUDFLARE),
+            _deny_delete_element_command("t20_security_deny_v4", TEST_IP1)
+            + _deny_delete_element_command("t20_security_deny_v6", IPV6_CLOUDFLARE),
             id="mixed-families",
         ),
     ],
@@ -480,6 +490,36 @@ def test_delete_deny_elements_dual_returns_empty_when_no_valid_ips(ips: list[str
     assert delete_deny_elements_dual(ips) == ""
 
 
+# ── override set + bypass window ─────────────────────────
+
+
+def test_add_override_elements_dual_targets_the_override_set() -> None:
+    """add_override_elements_dual() routes IPs to the tier-10 override sets."""
+    cmd = add_override_elements_dual([TEST_IP1, IPV6_CLOUDFLARE])
+    assert _add_element_command("t10_override_v4", TEST_IP1) in cmd
+    assert _add_element_command("t10_override_v6", IPV6_CLOUDFLARE) in cmd
+
+
+def test_arm_bypass_window_adds_default_routes_with_timeout() -> None:
+    """arm_bypass_window() adds 0.0.0.0/0 and ::/0 to the timed sets with the timeout."""
+    cmd = arm_bypass_window("30m")
+    assert f"add element {NFT_TABLE} bypass_window_v4 {{ 0.0.0.0/0 timeout 30m }}" in cmd
+    assert f"add element {NFT_TABLE} bypass_window_v6 {{ ::/0 timeout 30m }}" in cmd
+
+
+def test_arm_bypass_window_rejects_bad_timeout() -> None:
+    """arm_bypass_window() validates the timeout before interpolating it."""
+    with pytest.raises(ValueError):
+        arm_bypass_window("30m; drop")
+
+
+def test_disarm_bypass_window_flushes_both_families() -> None:
+    """disarm_bypass_window() flushes the v4 and v6 timed sets."""
+    cmd = disarm_bypass_window()
+    assert f"flush set {NFT_TABLE} bypass_window_v4" in cmd
+    assert f"flush set {NFT_TABLE} bypass_window_v6" in cmd
+
+
 # ── verify_hook() -----------------------------------------------------
 
 _builder = RulesetBuilder()
@@ -495,27 +535,27 @@ def test_verify_hook_accepts_the_generated_hook_ruleset() -> None:
     [
         pytest.param("some random text", "policy is not drop", id="missing-policy-drop"),
         pytest.param(
-            "chain input { policy drop;\nTEROK_SHIELD_DENIED admin-prohibited allow_v4 allow_v6 }",
+            "chain input { policy drop;\nTEROK_SHIELD_DENIED admin-prohibited t40_project_allow_v4 t40_project_allow_v6 }",
             "output chain missing",
             id="missing-output-chain",
         ),
         pytest.param(
-            "chain output { policy drop;\nTEROK_SHIELD_DENIED admin-prohibited allow_v4 allow_v6 }",
+            "chain output { policy drop;\nTEROK_SHIELD_DENIED admin-prohibited t40_project_allow_v4 t40_project_allow_v6 }",
             "input chain missing",
             id="missing-input-chain",
         ),
         pytest.param(
             "chain output { type filter hook output priority filter; policy drop;\n"
             "chain input { policy drop;\n"
-            f"{_DENY_LOG_PREFIX} admin-prohibited\n{_private_reject_rules()}\n@allow_v6 }}",
-            "allow_v4 set missing",
+            f"{_DENY_LOG_PREFIX} admin-prohibited\n{_private_reject_rules()}\n@t40_project_allow_v6 }}",
+            "t40_project_allow_v4 set missing",
             id="missing-allow-v4-set",
         ),
         pytest.param(
             "chain output { type filter hook output priority filter; policy drop;\n"
             "chain input { policy drop;\n"
-            f"{_DENY_LOG_PREFIX} admin-prohibited\n{_private_reject_rules()}\n@allow_v4 }}",
-            "allow_v6 set missing",
+            f"{_DENY_LOG_PREFIX} admin-prohibited\n{_private_reject_rules()}\n@t40_project_allow_v4 }}",
+            "t40_project_allow_v6 set missing",
             id="missing-allow-v6-set",
         ),
     ],
@@ -531,7 +571,7 @@ def test_verify_hook_reports_missing_top_level_invariants(
 def test_verify_hook_reports_each_missing_private_range_rule() -> None:
     """Every missing private-range reject rule should produce its own error."""
     errors = _builder.verify_hook(
-        f"policy drop {_ADMIN_PROHIBITED} {_DENY_LOG_PREFIX} allow_v4 allow_v6 {_OUTPUT_CHAIN} {_INPUT_CHAIN}"
+        f"policy drop {_ADMIN_PROHIBITED} {_DENY_LOG_PREFIX} t40_project_allow_v4 t40_project_allow_v6 {_OUTPUT_CHAIN} {_INPUT_CHAIN}"
     )
     range_errors = [error for error in errors if "Private-range" in error]
     assert len(range_errors) == len(PRIVATE_RANGES)
@@ -539,20 +579,34 @@ def test_verify_hook_reports_each_missing_private_range_rule() -> None:
 
 def test_verify_hook_reports_missing_ipv6_private_ranges_independently() -> None:
     """Missing IPv6 private-range rejects are reported separately from IPv4 ones."""
+    ipv4_private = tuple(n for n in PRIVATE_RANGES if "." in n)
+    ipv6_private = tuple(n for n in PRIVATE_RANGES if ":" in n)
     errors = _builder.verify_hook(
         "chain output { type filter hook output priority filter; policy drop;\n"
         "chain input { policy drop;\n"
-        f"{_DENY_LOG_PREFIX} {_ADMIN_PROHIBITED} allow_v4 allow_v6\n{_private_reject_rules(RFC1918)}\n@allow_v4 }}"
+        f"{_DENY_LOG_PREFIX} {_ADMIN_PROHIBITED} t40_project_allow_v4 t40_project_allow_v6\n"
+        f"{_private_reject_rules(ipv4_private)}\n@t40_project_allow_v4 }}"
     )
-    ipv6_errors = [error for error in errors if "Private-range" in error and ":" in error]
-    assert len(ipv6_errors) == len(IPV6_PRIVATE)
+    ipv6_errors = [e for e in errors if "Private-range" in e and ":" in e]
+    assert len(ipv6_errors) == len(ipv6_private)
 
 
 def test_verify_hook_rejects_a_bypass_ruleset() -> None:
     """Bypass mode must not satisfy enforce-mode verification."""
     errors = _builder.verify_hook(_builder.build_bypass())
     assert errors
-    assert any("terminal deny-all rule" in error for error in errors)
+    assert any("terminal reject-all rule" in error for error in errors)
+
+
+def test_verify_hook_rejects_silent_drop_terminal() -> None:
+    """A BLOCKED terminal that silently drops (no reject) fails verification."""
+    ruleset = _builder.build_hook()
+    silent = ruleset.replace(
+        f'prefix "{_BLOCKED_LOG_PREFIX}: " counter reject with icmpx {_ADMIN_PROHIBITED}',
+        f'prefix "{_BLOCKED_LOG_PREFIX}: " counter drop',
+    )
+    assert silent != ruleset  # sanity: the terminal reject was rewritten to drop
+    assert "terminal reject-all rule missing" in _builder.verify_hook(silent)
 
 
 def test_verify_hook_accepts_prefix_before_group_ordering() -> None:
@@ -575,7 +629,7 @@ def test_verify_hook_accepts_prefix_before_group_ordering() -> None:
 def test_verify_hook_checks_private_ranges_by_rule_not_by_position() -> None:
     """Private-range rejects pass verification even if moved after the allow-set match."""
     ruleset = (
-        f"policy drop {_ADMIN_PROHIBITED} {_DENY_LOG_PREFIX} @allow_v4 accept allow_v6\n"
+        f"policy drop {_ADMIN_PROHIBITED} {_DENY_LOG_PREFIX} @t40_project_allow_v4 accept t40_project_allow_v6\n"
         f"{_private_reject_rules()}"
     )
     range_errors = [error for error in _builder.verify_hook(ruleset) if "Private-range" in error]
@@ -623,8 +677,8 @@ def test_bypass_ruleset_allow_all_removes_all_private_range_rejects() -> None:
 def test_bypass_ruleset_includes_deny_sets() -> None:
     """Shield-down ruleset includes deny sets so deny.list is enforced."""
     rs = RulesetBuilder().build_bypass()
-    assert "deny_v4" in rs
-    assert "deny_v6" in rs
+    assert "t20_security_deny_v4" in rs
+    assert "t20_security_deny_v6" in rs
     assert _DENY_LOG_PREFIX in rs
 
 
@@ -677,23 +731,23 @@ def test_verify_bypass_accepts_generated_bypass_rulesets(ruleset: str, allow_all
             "policy accept policy drop", "bypass nflog prefix missing", id="missing-bypass-prefix"
         ),
         pytest.param(
-            "chain input { policy drop;\nTEROK_SHIELD_BYPASS allow_v4 allow_v6 }",
+            "chain input { policy drop;\nTEROK_SHIELD_BYPASS t40_project_allow_v4 t40_project_allow_v6 }",
             "output chain missing",
             id="missing-output-chain",
         ),
         pytest.param(
-            "chain output { policy accept;\nTEROK_SHIELD_BYPASS allow_v4 allow_v6 }",
+            "chain output { policy accept;\nTEROK_SHIELD_BYPASS t40_project_allow_v4 t40_project_allow_v6 }",
             "input chain missing",
             id="missing-input-chain",
         ),
         pytest.param(
-            f"{_OUTPUT_CHAIN} policy accept {_INPUT_CHAIN} policy drop {BYPASS_LOG_PREFIX} allow_v6",
-            "allow_v4 set missing",
+            f"{_OUTPUT_CHAIN} policy accept {_INPUT_CHAIN} policy drop {BYPASS_LOG_PREFIX} t40_project_allow_v6",
+            "t40_project_allow_v4 set missing",
             id="missing-allow-v4-set",
         ),
         pytest.param(
-            f"{_OUTPUT_CHAIN} policy accept {_INPUT_CHAIN} policy drop {BYPASS_LOG_PREFIX} allow_v4",
-            "allow_v6 set missing",
+            f"{_OUTPUT_CHAIN} policy accept {_INPUT_CHAIN} policy drop {BYPASS_LOG_PREFIX} t40_project_allow_v4",
+            "t40_project_allow_v6 set missing",
             id="missing-allow-v6-set",
         ),
     ],
@@ -709,7 +763,7 @@ def test_verify_bypass_reports_missing_top_level_invariants(
 def test_verify_bypass_reports_private_ranges_when_allow_all_is_false() -> None:
     """Private-range reject rules remain mandatory in default bypass mode."""
     errors = _builder.verify_bypass(
-        f"{_OUTPUT_CHAIN} policy accept {_INPUT_CHAIN} policy drop {BYPASS_LOG_PREFIX} allow_v4 allow_v6"
+        f"{_OUTPUT_CHAIN} policy accept {_INPUT_CHAIN} policy drop {BYPASS_LOG_PREFIX} t40_project_allow_v4 t40_project_allow_v6"
     )
     range_errors = [error for error in errors if "Private-range" in error]
     assert len(range_errors) == len(PRIVATE_RANGES)
@@ -718,7 +772,7 @@ def test_verify_bypass_reports_private_ranges_when_allow_all_is_false() -> None:
 def test_verify_bypass_skips_private_range_checks_in_allow_all_mode() -> None:
     """allow_all=True disables private-range verification in bypass mode."""
     errors = _builder.verify_bypass(
-        f"{_OUTPUT_CHAIN} policy accept {_INPUT_CHAIN} policy drop {BYPASS_LOG_PREFIX} allow_v4 allow_v6",
+        f"{_OUTPUT_CHAIN} policy accept {_INPUT_CHAIN} policy drop {BYPASS_LOG_PREFIX} t40_project_allow_v4 t40_project_allow_v6",
         allow_all=True,
     )
     range_errors = [error for error in errors if "Private-range" in error]
@@ -759,15 +813,15 @@ def test_quarantine_ruleset_contains_required_fragments(fragment: str) -> None:
 def test_quarantine_ruleset_has_no_allow_sets() -> None:
     """Block mode must have no allowlists -- total blackout."""
     rs = RulesetBuilder.build_quarantine()
-    assert "allow_v4" not in rs
-    assert "allow_v6" not in rs
+    assert "t40_project_allow_v4" not in rs
+    assert "t40_project_allow_v6" not in rs
 
 
 def test_quarantine_ruleset_has_no_deny_sets() -> None:
     """Block mode needs no deny sets -- everything is dropped anyway."""
     rs = RulesetBuilder.build_quarantine()
-    assert "deny_v4" not in rs
-    assert "deny_v6" not in rs
+    assert "t20_security_deny_v4" not in rs
+    assert "t20_security_deny_v6" not in rs
 
 
 def test_quarantine_ruleset_has_no_dns_rules() -> None:
@@ -801,7 +855,7 @@ def test_verify_quarantine_rejects_hook_ruleset() -> None:
     """Hook (deny-all with allowlists) must not satisfy block verification."""
     errors = RulesetBuilder.verify_quarantine(_builder.build_hook())
     assert errors
-    assert any("allow_v4" in e for e in errors)
+    assert any("t40_project_allow_v4" in e for e in errors)
 
 
 def test_verify_quarantine_rejects_bypass_ruleset() -> None:
@@ -865,7 +919,7 @@ class TestGatewayPortRules:
         """Gateway accept rules appear before private-range reject rules."""
         rs = self._gw_builder().build_hook()
         gw_pos = rs.index(f"ip daddr {self._GW_V4} accept")
-        private_pos = rs.index(RFC1918[0])
+        private_pos = rs.index(PRIVATE_RANGES[0])
         assert gw_pos < private_pos
 
     def test_gateway_multiple_ports(self) -> None:
@@ -932,10 +986,15 @@ class TestSetTimeout:
     """nft set declarations with optional timeout for dnsmasq mode."""
 
     def test_hook_ruleset_without_timeout(self) -> None:
-        """Default rulesets have no timeout in set declarations."""
+        """Without set_timeout, the allow sets carry no element timeout.
+
+        (The bypass_window set always declares the ``timeout`` flag — its
+        elements expire to close the timed allow-all window — so a blanket
+        "timeout absent" assertion no longer holds.)
+        """
         rs = RulesetBuilder().build_hook()
-        assert "flags interval;" in rs
-        assert "timeout" not in rs
+        assert "set t40_project_allow_v4 { type ipv4_addr; flags interval; }" in rs
+        assert "timeout 30m" not in rs  # no dnsmasq-tier default element timeout
 
     def test_hook_ruleset_with_timeout(self) -> None:
         """With set_timeout, sets get interval+timeout flags."""
@@ -951,3 +1010,96 @@ class TestSetTimeout:
         """Invalid set_timeout in RulesetBuilder is rejected."""
         with pytest.raises(ValueError):
             RulesetBuilder(set_timeout="bad")
+
+
+# ── Set-element snapshot parsing / restore ──────────────
+
+
+def _list_set_output(elements: str) -> str:
+    """Wrap an elements block in realistic ``nft list set`` output."""
+    return (
+        "table inet terok_shield {\n"
+        "\tset t40_project_allow_v4 {\n"
+        "\t\ttype ipv4_addr\n"
+        "\t\tflags interval,timeout\n"
+        "\t\ttimeout 30m\n"
+        f"\t\telements = {{ {elements} }}\n"
+        "\t}\n"
+        "}\n"
+    )
+
+
+class TestParseSetElements:
+    """parse_set_elements() — snapshotting a live allow set."""
+
+    def test_parses_timed_permanent_and_bare_elements(self) -> None:
+        """Learned (timed), seeded (0s), and untimed elements all round out."""
+        out = _list_set_output(
+            f"{TEST_IP1} timeout 30m expires 22m10s,\n"
+            f"\t\t\t     {TEST_IP2} timeout 0s,\n"
+            f"\t\t\t     {TEST_NET1} }}"
+        )
+        assert parse_set_elements(out) == [
+            (TEST_IP1, "30m"),
+            (TEST_IP2, "0s"),
+            (TEST_NET1, ""),
+        ]
+
+    def test_compound_timeout_is_preserved(self) -> None:
+        """nft prints compound durations (1h22m10s) — kept verbatim."""
+        out = _list_set_output(f"{TEST_IP1} timeout 1h22m10s expires 5s")
+        assert parse_set_elements(out) == [(TEST_IP1, "1h22m10s")]
+
+    def test_invalid_atoms_are_skipped(self) -> None:
+        """Garbage atoms never abort the snapshot (best-effort by design)."""
+        out = _list_set_output(f"not-an-ip timeout 5m, {TEST_IP1}")
+        assert parse_set_elements(out) == [(TEST_IP1, "")]
+
+    def test_no_elements_block_yields_empty(self) -> None:
+        """A set without elements (or non-set output) snapshots to nothing."""
+        assert parse_set_elements("table inet terok_shield {\n\tset x {\n\t}\n}") == []
+        assert parse_set_elements("") == []
+
+    def test_empty_atoms_are_skipped(self) -> None:
+        """A trailing comma or blank atom contributes nothing."""
+        out = _list_set_output(f"{TEST_IP1}, ")
+        assert parse_set_elements(out) == [(TEST_IP1, "")]
+
+
+class TestRestoreElements:
+    """restore_elements() — replaying a snapshot into a rebuilt table."""
+
+    def test_emits_single_grouped_add(self) -> None:
+        """All elements of one set land in one add command, timeouts intact."""
+        cmd = restore_elements(
+            "t40_project_allow_v4", [(TEST_IP1, "30m"), (TEST_IP2, "0s"), (TEST_NET1, "")]
+        )
+        assert cmd == (
+            f"add element inet terok_shield t40_project_allow_v4 "
+            f"{{ {TEST_IP1} timeout 30m, {TEST_IP2} timeout 0s, {TEST_NET1} }}\n"
+        )
+
+    def test_round_trips_a_parsed_snapshot(self) -> None:
+        """parse → restore reproduces every element with its timeout."""
+        out = _list_set_output(f"{TEST_IP1} timeout 30m expires 2m, {TEST_IP2} timeout 0s")
+        cmd = restore_elements("t40_project_allow_v4", parse_set_elements(out))
+        assert f"{TEST_IP1} timeout 30m" in cmd
+        assert f"{TEST_IP2} timeout 0s" in cmd
+        assert "expires" not in cmd  # a restore re-grants the full timeout
+
+    def test_empty_snapshot_restores_nothing(self) -> None:
+        """No elements → no command."""
+        assert restore_elements("t40_project_allow_v4", []) == ""
+
+    @pytest.mark.parametrize("timeout", ["30m; drop", "abc", "5"])
+    def test_rejects_unsafe_timeouts(self, timeout: str) -> None:
+        """A timeout that is not a pure nft duration never reaches the shell."""
+        with pytest.raises(ValueError):
+            restore_elements("t40_project_allow_v4", [(TEST_IP1, timeout)])
+
+    def test_rejects_unsafe_identifiers_and_ips(self) -> None:
+        """Set names and IPs are validated like every other nft input."""
+        with pytest.raises(ValueError):
+            restore_elements("bad; flush ruleset", [(TEST_IP1, "")])
+        with pytest.raises(ValueError):
+            restore_elements("t40_project_allow_v4", [("not-an-ip", "")])

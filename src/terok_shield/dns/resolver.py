@@ -10,9 +10,10 @@ prefer domain names over raw IPs because CDN addresses rotate.
 Falls back to ``getent hosts`` when ``dig`` is not installed, and
 per-domain when ``dig`` runs but yields nothing (some environments break
 ``dig`` while glibc resolution still works) — fewer IPs are captured
-(no parallel A + AAAA query), but resolution still works.  When the
-dnsmasq tier is active, domain resolution happens at runtime via
-``--nftset``; this module then only handles raw IPs.
+(no parallel A + AAAA query), but resolution still works.  The dnsmasq tier does not use this module at launch at all —
+domain resolution happens at runtime via ``--nftset``; static resolution
+is the fallback tiers' (dig/getent) enforcement mechanism and the
+``shield resolve`` warm-up path.
 """
 # WAYPOINT: Shield (__init__), HookMode (hooks.mode)
 
@@ -45,6 +46,7 @@ class DnsResolver:
         cache_path: Path,
         *,
         max_age: int = 3600,
+        source_mtime: float = 0.0,
     ) -> list[str]:
         """Resolve profile entries and cache the result.
 
@@ -55,11 +57,15 @@ class DnsResolver:
             entries: Domain names and/or raw IPs from composed profiles.
             cache_path: File to store resolved IPs in, per-container scoped.
             max_age: Cache freshness threshold in seconds (default: 1 hour).
+            source_mtime: mtime of the authored policy the entries came from;
+                a cache older than this is re-resolved even when still within
+                ``max_age``, so an edited allowlist takes effect on the next
+                task start instead of waiting out the timer.
 
         Returns:
             Resolved IPv4/IPv6 addresses combined with raw IPs/CIDRs.
         """
-        if self._cache_fresh(cache_path, max_age):
+        if self._cache_fresh(cache_path, max_age, source_mtime):
             return self._read_cache(cache_path)
 
         domains, raw_ips = self._split_entries(entries)
@@ -134,11 +140,19 @@ class DnsResolver:
         return domains, ips
 
     @staticmethod
-    def _cache_fresh(path: Path, max_age: int) -> bool:
-        """Check whether the cache file exists and is younger than *max_age* seconds."""
+    def _cache_fresh(path: Path, max_age: int, source_mtime: float = 0.0) -> bool:
+        """Check whether the cache exists, is younger than *max_age*, and post-dates its source.
+
+        A cache older than *source_mtime* (the authored policy's mtime) is
+        stale even within *max_age* — the allowlist changed since we resolved.
+        """
         try:
             mtime = path.stat().st_mtime
         except OSError:
+            return False
+        # future: jitter max_age per-container so many tasks don't re-resolve
+        # in a synchronized wave at the hour boundary.
+        if mtime < source_mtime:
             return False
         return (time.time() - mtime) < max_age
 

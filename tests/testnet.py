@@ -86,6 +86,7 @@ ALLOWED_TARGET_IPS = ["1.1.1.1", "1.0.0.1"]  # Cloudflare anycast pair
 ALLOWED_TARGET_DOMAIN = "one.one.one.one"  # Resolves to both IPs above
 ALLOWED_TARGET_HTTP = "http://1.1.1.1/"  # Plain HTTP (port 80)
 ALLOWED_TARGET_HTTPS = f"https://{ALLOWED_TARGET_DOMAIN}/"  # HTTPS (port 443)
+ALLOWED_TARGET_DOMAIN_HTTP = f"http://{ALLOWED_TARGET_DOMAIN}/"  # HTTP by name (cold-start tests)
 
 # ── Blocked target: Google DNS (used as a non-allowed destination) ──
 

@@ -371,7 +371,7 @@ class Shield:
             self.audit.log_event(container, "allowed", dest=ip, detail=f"target={target}")
         # Update dnsmasq config for domain targets (so future IP rotations are captured)
         if is_domain and allowed:
-            self._mode.allow_domain(target)
+            self._mode.allow_domain(container, target)
         return allowed
 
     def deny(self, container: str, target: str) -> list[str]:
@@ -391,7 +391,7 @@ class Shield:
             self.audit.log_event(container, "denied", dest=ip, detail=f"target={target}")
         # Remove domain from dnsmasq config (stops future auto-population)
         if is_domain and denied:
-            self._mode.deny_domain(target)
+            self._mode.deny_domain(container, target)
         return denied
 
     def rules(self, container: str) -> str:
@@ -435,6 +435,17 @@ class Shield:
         self.audit.log_event(container, "shield_up")
         self.hub_events.shield_up(container, container_id, dossier=self._read_dossier())
 
+    def reset(self, container: str) -> None:
+        """Forget DNS-learned allow state, keeping the authored policy seeds.
+
+        The dnsmasq tier accumulates every IP the workload legitimately
+        resolved; ``reset`` returns the allow sets to their just-launched
+        contents (policy literals only) without touching the deny tier or
+        the operator's runtime overlay.
+        """
+        self._mode.shield_reset(container)
+        self.audit.log_event(container, "shield_reset")
+
     def _read_dossier(self) -> dict[str, str]:
         """Resolve the wire dossier for this container by reading the orchestrator's task meta.
 
@@ -475,9 +486,16 @@ class Shield:
         entries = self.profiles.compose_profiles(profiles)
         if not entries:
             return []
+        bundle = StateBundle(self.config.state_dir)
+        bundle.ensure_dirs()
+        bundle.write_tier("project_allow", "".join(f"+{e}\n" for e in entries))
         max_age = 0 if force else 3600
-        cache_path = StateBundle(self.config.state_dir).profile_allowed
-        return self.dns.resolve_and_cache(entries, cache_path, max_age=max_age)
+        return self.dns.resolve_and_cache(
+            bundle.read_effective().allow_targets(),
+            bundle.resolved_cache,
+            max_age=max_age,
+            source_mtime=bundle.policy_mtime(),
+        )
 
     def profiles_list(self) -> list[str]:
         """List available profile names."""

@@ -19,8 +19,10 @@ Orchestrates collaborators per lifecycle phase:
 """
 # WAYPOINT: Shield (__init__)
 
+import ipaddress
 import logging
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,11 +52,14 @@ from ..nft.constants import (
     PASTA_HOST_LOOPBACK_MAP,
     SLIRP4NETNS_DNS,
     SLIRP4NETNS_GATEWAY_V6,
+    TIER_PROJECT_ALLOW,
 )
 from ..nft.rules import (
     RulesetBuilder,
     add_deny_elements_dual,
     delete_deny_elements_dual,
+    parse_set_elements,
+    restore_elements,
     safe_ip,
 )
 from ..podman_info.hooks_dir import global_hooks_hint, has_global_hooks
@@ -62,7 +67,7 @@ from ..podman_info.info import PodmanInfo, parse_podman_info
 from ..podman_info.network import parse_resolv_conf, slirp4netns_gateway
 from ..run import ExecError, ShieldNeedsSetup
 from ..state import StateBundle
-from ..util import is_ip as _is_ip, is_ipv4
+from ..util import is_ipv4
 from .install import install_hooks
 
 logger = logging.getLogger(__name__)
@@ -146,7 +151,7 @@ class HookMode:
         # the builder reads ports from the bundle (SSOT): later up/down
         # rebuilds use the same source.
         entries = self._profiles.compose_profiles(profiles)
-        self._resolve_and_write_allowlists(sd, tier, entries)
+        self._write_policy_and_resolve(sd, entries, tier)
         StateBundle(sd).upstream_dns.write_text(f"{upstream_dns}\n")
         StateBundle(sd).dns_tier.write_text(f"{tier.value}\n")
         StateBundle(sd).loopback_ports.write_text(
@@ -209,27 +214,35 @@ class HookMode:
         ]
         return args
 
-    def _resolve_and_write_allowlists(self, sd: Path, tier: DnsTier, entries: list[str]) -> None:
-        """Resolve profile entries and write allowlist files for the detected tier.
+    def _write_policy_and_resolve(self, sd: Path, entries: list[str], tier: DnsTier) -> None:
+        """Write the composed profiles as the project-allow tier; statically resolve only where needed.
 
-        On the ``dnsmasq`` tier we still pre-resolve every domain in addition
-        to writing it into ``profile.domains``.  The pre-resolved IPs go into
-        ``profile.allowed`` as permanent (``timeout 0``) set members, so the
-        initial allow set is usable from the container's first packet — while
-        dnsmasq continues to add more IPs on-demand as new A/AAAA records come
-        back.  Without the pre-resolution, the first connection for an
-        allowlisted domain races dnsmasq's first ``--nftset`` add, and a
-        low-TTL record can slip out of the set between the ``reply`` and the
-        application's ``connect()``, producing an intermittent first-hit
-        block that then recovers on retry.
+        The authored ``policy/40-project-allow`` is the source of truth
+        (domains + literal IPs).  On the dnsmasq tier there is **no**
+        pre-resolution: dnsmasq commits every answered A/AAAA record to the
+        allow sets *before* forwarding the reply (``forward.c`` calls the
+        nftset add synchronously while processing the upstream response), so
+        a workload can never race its own answer.  The kernel set is
+        populated on demand, per query — launch cost stays O(1) in allowlist
+        size, and CDN rotation is tracked for free.  Any stale
+        ``resolved.ips`` is removed so the ruleset seeds from literal IPs
+        only.
+
+        The dig/getent fallback tiers have no DNS interception point, so
+        statically resolving every admitted target into ``resolved.ips``
+        (refreshed when stale or older than the authored policy) remains
+        their only domain-enforcement mechanism.
         """
+        bundle = StateBundle(sd)
+        bundle.write_tier("project_allow", "".join(f"+{e}\n" for e in entries))
         if tier == DnsTier.DNSMASQ:
-            domains, _raw_ips = _split_domains_ips(entries)
-            StateBundle(sd).profile_domains.write_text("\n".join(domains) + "\n" if domains else "")
-            self._dns.resolve_and_cache(entries, StateBundle(sd).profile_allowed)
-        else:
-            # dig/getent tier: resolve everything to IPs at pre-start time.
-            self._dns.resolve_and_cache(entries, StateBundle(sd).profile_allowed)
+            bundle.resolved_cache.unlink(missing_ok=True)
+            return
+        self._dns.resolve_and_cache(
+            bundle.read_effective().allow_targets(),
+            bundle.resolved_cache,
+            source_mtime=bundle.policy_mtime(),
+        )
 
     def _write_ruleset(
         self, sd: Path, tier: DnsTier, upstream_dns: str, gw_v4: str = "", gw_v6: str = ""
@@ -262,6 +275,7 @@ class HookMode:
                 StateBundle(sd).dnsmasq_pid,
                 listen_address=bind,
                 log_path=StateBundle(sd).dnsmasq_log,
+                deny_domains=dnsmasq.read_denied_domains(sd),
             )
             StateBundle(sd).dnsmasq_conf.write_text(conf)
             StateBundle(sd).resolv_conf.write_text(f"nameserver {bind}\noptions ndots:0\n")
@@ -319,79 +333,76 @@ class HookMode:
 
     # ── Live operations (domain) ───────────────────────
 
-    def allow_domain(self, domain: str) -> None:
-        """Add a domain to the dnsmasq config and signal reload.
+    def allow_domain(self, container: str, domain: str) -> None:
+        """Record ``+domain`` in the runtime overlay and reload dnsmasq.
 
-        Delegates to ``dnsmasq.add_domain()``, which persists the domain to
-        ``live.domains`` (not ``profile.domains``) and removes any matching
-        entry from ``denied.domains``.  When dnsmasq is running, a SIGHUP is
-        sent so the change takes effect immediately without a container restart.
-        These entries are runtime additions: they survive dnsmasq reloads but
-        are separate from the pre-start ``profile.domains`` list.
+        The overlay (``policy/live``) flips any prior deny of *domain* and
+        survives reloads; the dnsmasq restart picks up the new ``nftset=``
+        line so future IP rotations of *domain* are auto-populated.  The
+        IP-level allow (nft set update) is handled separately by ``allow_ip()``.
 
-        The IP-level allow (nft set update) is handled separately by
-        ``allow_ip()`` — this method is the domain-tracking counterpart
-        that ensures future IP rotations are also captured.
-
-        No-op when the container is not using the dnsmasq DNS tier (the
-        static IP-level allow already happened via ``allow_ip()``).
+        No-op when the container is not using the dnsmasq DNS tier (the static
+        IP-level allow already happened via ``allow_ip()``).
         """
         sd = self._config.state_dir.resolve()
         if not _is_dnsmasq_tier(sd):
             return
-        if not dnsmasq.add_domain(sd, domain):
-            return  # already present
-        self._reload_dnsmasq(sd)
+        StateBundle(sd).overlay_set("+", domain)
+        self._reload_dnsmasq(container, sd)
 
-    def deny_domain(self, domain: str) -> None:
-        """Remove a domain from the dnsmasq config and signal reload.
+    def deny_domain(self, container: str, domain: str) -> None:
+        """Record ``-domain`` in the runtime overlay and reload dnsmasq.
 
-        Counterpart of ``allow_domain()``.  Removes the domain so dnsmasq
-        stops auto-populating nft sets for it on future DNS queries.
+        Counterpart of ``allow_domain()``: the dnsmasq restart picks up the
+        ``local=`` sinkhole, so *domain* stops resolving (NXDOMAIN) and the
+        deny fails fast in the DNS plane instead of timing out against the
+        filter.
 
         No-op when the container is not using the dnsmasq DNS tier.
         """
         sd = self._config.state_dir.resolve()
         if not _is_dnsmasq_tier(sd):
             return
-        if not dnsmasq.remove_domain(sd, domain):
-            return  # not present
-        self._reload_dnsmasq(sd)
+        StateBundle(sd).overlay_set("-", domain)
+        self._reload_dnsmasq(container, sd)
 
-    def _reload_dnsmasq(self, state_dir: Path) -> None:
-        """Regenerate dnsmasq config and send SIGHUP.
+    def _reload_dnsmasq(self, container: str, state_dir: Path) -> None:
+        """Regenerate the dnsmasq config and restart dnsmasq to load it.
 
         No-op if dnsmasq is not running (PID file absent).
-        Raises RuntimeError if dnsmasq is dead (stale PID).
+        Raises RuntimeError if dnsmasq is dead (stale PID) or fails to restart.
         """
         upstream = self._read_upstream_dns()
         if not upstream:
             raise RuntimeError("Cannot reload dnsmasq: upstream DNS not persisted in state")
 
         domains = dnsmasq.read_merged_domains(state_dir)
-        dnsmasq.reload(state_dir, upstream, domains)
+        dnsmasq.reload(
+            state_dir,
+            upstream,
+            domains,
+            dnsmasq.read_denied_domains(state_dir),
+            container=container,
+            runner=self._runner,
+        )
 
     # ── Live operations (IP) ────────────────────────────
 
     def allow_ip(self, container: str, ip: str) -> None:
         """Live-allow an IP for a running container via nsenter."""
         ip = safe_ip(ip)
-
-        # Un-deny: remove from deny.list and nft deny set if present
         sd = self._config.state_dir.resolve()
-        dp = StateBundle(sd).deny
-        if dp.is_file():
-            denied = StateBundle(sd).read_denied_ips()
-            if ip in denied:
-                denied.discard(ip)
-                dp.write_text("".join(f"{d}\n" for d in sorted(denied)))
-                nft_cmd = delete_deny_elements_dual([ip])
-                if nft_cmd:
-                    self._nft_apply_best_effort(container, nft_cmd)
+        bundle = StateBundle(sd)
+
+        # Un-deny: drop from the nft deny set if it is currently denied.
+        if ip in bundle.read_denied_ips():
+            nft_cmd = delete_deny_elements_dual([ip])
+            if nft_cmd:
+                self._nft_apply_best_effort(container, nft_cmd)
 
         # When the dnsmasq set has a default timeout (30 m), permanent IPs must use
         # 'timeout 0s' so they are never evicted by the set's per-element expiry clock.
-        tier_path = StateBundle(sd).dns_tier
+        tier_path = bundle.dns_tier
         if tier_path.is_file() and tier_path.read_text().strip() == DnsTier.DNSMASQ.value:
             element = f"{{ {ip} timeout 0s }}"
         else:
@@ -406,23 +417,19 @@ class HookMode:
             self._set_for_ip(ip),
             element,
         )
-        # Persist to live.allowed (skip if already present)
-        live_path = self._live_path()
-        live_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = set(live_path.read_text().splitlines()) if live_path.is_file() else set()
-        if ip not in existing:
-            with live_path.open("a") as f:
-                f.write(f"{ip}\n")
+        # Persist to the runtime overlay (flips any prior deny of this IP).
+        bundle.overlay_set("+", ip)
 
     def deny_ip(self, container: str, ip: str) -> None:
         """Live-deny an IP for a running container via nsenter.
 
-        Removes from the nft allow set (best-effort) and from live.allowed.
-        Adds to the nft deny set.  Always persists to deny.list so operator
-        deny decisions stick across restarts.
+        Removes from the nft allow set (best-effort), adds to the nft deny set,
+        and records ``-ip`` in ``policy/live`` so the deny sticks across
+        ``shield up`` / restart and flips any prior allow.
         """
         ip = safe_ip(ip)
         sd = self._config.state_dir.resolve()
+        bundle = StateBundle(sd)
 
         # Best-effort nft delete (IP may not be in the set)
         try:
@@ -442,32 +449,17 @@ class HookMode:
             ):
                 logger.warning("nft delete element failed for %s: %s", ip, e)
 
-        # Remove from live.allowed
-        live_path = self._live_path()
-        if live_path.is_file():
-            lines = live_path.read_text().splitlines()
-            lines = [line for line in lines if line.strip() != ip]
-            live_path.write_text("\n".join(lines) + "\n" if lines else "")
-
         # Add to nft deny set (prevents dnsmasq from re-allowing)
         nft_cmd = add_deny_elements_dual([ip])
         if nft_cmd:
             self._nft_apply_best_effort(container, nft_cmd)
 
-        # Persist to deny.list so deny sets survive shield_up / restart.
-        # Operator deny decisions always stick.
-        dp = StateBundle(sd).deny
-        if ip not in StateBundle(sd).read_denied_ips():
-            with dp.open("a") as f:
-                f.write(f"{ip}\n")
+        # Persist to the runtime overlay (flips any prior allow; sticks across restart).
+        bundle.overlay_set("-", ip)
 
     def _set_for_ip(self, ip: str) -> str:
-        """Return the nft set name for an IP address."""
-        return "allow_v4" if is_ipv4(ip) else "allow_v6"
-
-    def _live_path(self) -> Path:
-        """Return the resolved path to live.allowed (prevents path traversal)."""
-        return StateBundle(self._config.state_dir).live_allowed.resolve()
+        """Return the tier-40 project-allow nft set for an IP address (by family)."""
+        return f"{TIER_PROJECT_ALLOW}_v4" if is_ipv4(ip) else f"{TIER_PROJECT_ALLOW}_v6"
 
     def _nft_apply_best_effort(self, container: str, nft_cmd: str) -> None:
         """Run multi-line nft commands via nsenter, swallowing errors."""
@@ -491,7 +483,14 @@ class HookMode:
             stdin = rs
         else:
             stdin = f"delete table {NFT_TABLE}\n{rs}"
+        snapshot = [] if current == ShieldState.OFFLINE else self._snapshot_allow_sets(container)
         self._runner.nft_via_nsenter(container, stdin=stdin)
+
+        # Carry the allow-set contents (seeds + dnsmasq-learned IPs) across
+        # the rebuild — bypass mode does not evaluate them, but the later
+        # ``shield up`` snapshots this table, so dropping them here would
+        # forget every learned IP after one down/up round trip.
+        self._restore_allow_sets(container, snapshot, skip=())
 
         # Repopulate deny sets so deny.list is enforced even when shield is down.
         denied_ips = list(StateBundle(sd).read_denied_ips())
@@ -536,7 +535,14 @@ class HookMode:
             raise RuntimeError(f"Quarantine ruleset verification failed: {'; '.join(errors)}")
 
     def shield_up(self, container: str) -> None:
-        """Restore normal deny-all mode for a running container."""
+        """Restore normal deny-all mode for a running container.
+
+        The rebuild is ``delete table`` + re-apply, which would forget every
+        dnsmasq-learned allow-set element — a container coming out of a bypass
+        window would suddenly lose IPs its workload already resolved (clients
+        cache answers, so they do not necessarily re-query).  The allow sets
+        are therefore snapshotted before the rebuild and restored after it.
+        """
         sd = self._config.state_dir.resolve()
 
         ruleset = self._container_ruleset(container)
@@ -546,6 +552,7 @@ class HookMode:
             stdin = rs
         else:
             stdin = f"delete table {NFT_TABLE}\n{rs}"
+        snapshot = [] if current == ShieldState.OFFLINE else self._snapshot_allow_sets(container)
         self._runner.nft_via_nsenter(container, stdin=stdin)
 
         # Re-add effective IPs (allowed minus denied)
@@ -562,6 +569,12 @@ class HookMode:
             if deny_cmd:
                 self._runner.nft_via_nsenter(container, stdin=deny_cmd)
 
+        # Restore the snapshot, minus everything the rebuild already re-added
+        # (a duplicate/overlapping element would abort the nft transaction)
+        # and minus denied entries (deny_ip() removed them from the allow set
+        # deliberately — a bypass round trip must not resurrect them).
+        self._restore_allow_sets(container, snapshot, skip=[*unique_ips, *denied_ips])
+
         # Gateway addresses are baked into the ruleset — no repopulation needed.
 
         output = self._runner.nft_via_nsenter(
@@ -574,6 +587,71 @@ class HookMode:
         errors = ruleset.verify_hook(output)
         if errors:
             raise RuntimeError(f"Ruleset verification failed: {'; '.join(errors)}")
+
+    def shield_reset(self, container: str) -> None:
+        """Forget learned allow-set state — back to the just-launched contents.
+
+        Flushes both tier-40 project-allow sets and re-seeds them from the
+        effective policy in a single nft transaction, so authored literals
+        never blink out.  dnsmasq-learned IPs vanish until the workload
+        resolves the corresponding names again; the operator overlay
+        (``policy/live``) and the deny tier are untouched.
+        """
+        sd = self._config.state_dir.resolve()
+        ruleset = self._container_ruleset(container)
+        stdin = (
+            f"flush set {NFT_TABLE} {TIER_PROJECT_ALLOW}_v4\n"
+            f"flush set {NFT_TABLE} {TIER_PROJECT_ALLOW}_v6\n"
+        )
+        stdin += ruleset.add_elements_dual(StateBundle(sd).read_effective_ips())
+        self._runner.nft_via_nsenter(container, stdin=stdin)
+
+    # ── Allow-set snapshot/restore (down/up round trips) ─
+
+    def _snapshot_allow_sets(self, container: str) -> list[tuple[str, str, str]]:
+        """Dump the tier-40 allow sets as ``(set_name, ip, timeout)`` rows.
+
+        Captures seeds and dnsmasq-learned elements right before a table
+        rebuild.  A missing table or set yields no rows — there was nothing
+        to keep.  (Tiers 10/30 have no runtime population yet; extend this
+        snapshot when they gain one.)
+        """
+        rows: list[tuple[str, str, str]] = []
+        for fam in ("v4", "v6"):
+            name = f"{TIER_PROJECT_ALLOW}_{fam}"
+            try:
+                out = self._runner.nft_via_nsenter(
+                    container, "list", "set", "inet", NFT_TABLE_NAME, name
+                )
+            except ExecError:
+                continue
+            rows += [(name, ip, timeout) for ip, timeout in parse_set_elements(out)]
+        return rows
+
+    def _restore_allow_sets(
+        self, container: str, rows: list[tuple[str, str, str]], *, skip: Iterable[str]
+    ) -> None:
+        """Re-add snapshot *rows*, minus IPs already covered by *skip* entries.
+
+        *skip* holds the IPs/CIDRs the rebuild re-added through its own
+        channels — restoring one of those would collide inside the nft
+        transaction (a duplicate or overlapping interval aborts the whole
+        batch).  Restore failure is logged, never raised: coming up with a
+        cold allow set beats staying in bypass.
+        """
+        keep = [row for row in rows if not _covered(row[1], skip)]
+        if not keep:
+            return
+        by_set: dict[str, list[tuple[str, str]]] = {}
+        for name, ip, timeout in keep:
+            by_set.setdefault(name, []).append((ip, timeout))
+        stdin = "".join(restore_elements(name, els) for name, els in by_set.items())
+        try:
+            self._runner.nft_via_nsenter(container, stdin=stdin)
+        except ExecError as exc:
+            logger.warning(
+                "allow-set restore failed for %s (workload re-learns via DNS): %s", container, exc
+            )
 
     def _container_ruleset(self, container: str) -> RulesetBuilder:
         """Build a RulesetBuilder with the container's actual DNS settings.
@@ -725,20 +803,22 @@ def _gateways_for_mode(network_mode: str) -> tuple[str, str]:
     )
 
 
-def _split_domains_ips(entries: list[str]) -> tuple[list[str], list[str]]:
-    """Split profile entries into (domains, raw_ips).
+def _covered(ip: str, skip: Iterable[str]) -> bool:
+    """True when *ip* overlaps any IP/CIDR entry of *skip*.
 
-    Domains are forwarded to dnsmasq for runtime resolution via ``--nftset``.
-    Raw IPs are resolved/cached as before and loaded into nft sets at hook time.
+    Overlap matters, not just equality: re-adding a snapshot element that
+    intersects an interval the rebuild already re-added would abort the
+    whole nft restore transaction.  Unparseable *skip* entries are ignored.
     """
-    domains: list[str] = []
-    raw_ips: list[str] = []
-    for entry in entries:
-        if _is_ip(entry):
-            raw_ips.append(entry)
-        else:
-            domains.append(entry)
-    return domains, raw_ips
+    addr = ipaddress.ip_network(ip, strict=False)
+    for entry in skip:
+        try:
+            net = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            continue
+        if isinstance(net, type(addr)) and addr.overlaps(net):
+            return True
+    return False
 
 
 def _is_dnsmasq_tier(state_dir: Path) -> bool:

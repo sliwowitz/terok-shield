@@ -27,7 +27,7 @@ class TestRulesAPI:
         """``Shield.rules()`` returns text containing ``terok_shield``."""
         rules = _shield().rules(shielded_container)
         assert "terok_shield" in rules
-        assert "allow_v4" in rules
+        assert "t40_project_allow_v4" in rules
 
 
 # -- CLI rules ------------------------------------------------
@@ -87,7 +87,13 @@ class TestRulesBypassAPI:
         assert "policy accept" in rules
 
     def test_rules_restored_after_up(self, shielded_container: str) -> None:
-        """Rules revert to deny-all after shield.up()."""
+        """Rules revert to deny-all after shield.up().
+
+        The distinguishing signal is the output-chain policy — ``accept`` in
+        bypass, ``drop`` when restored. The ``TEROK_SHIELD_BYPASS`` prefix is
+        NOT one: it also labels the ``@bypass_window`` tier, which is a
+        permanent part of the deny-all ruleset (an empty timed allow-all set).
+        """
         shield = _shield()
         shield.down(shielded_container, shielded_container.id)
         assert "policy accept" in shield.rules(shielded_container)
@@ -95,7 +101,7 @@ class TestRulesBypassAPI:
         shield.up(shielded_container, shielded_container.id)
         rules = shield.rules(shielded_container)
         assert "policy drop" in rules
-        assert BYPASS_LOG_PREFIX not in rules
+        assert "policy accept" not in rules
 
 
 # -- CLI logs -------------------------------------------------

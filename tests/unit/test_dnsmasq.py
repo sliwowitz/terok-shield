@@ -10,13 +10,13 @@ import pytest
 
 from terok_shield.dns.dnsmasq import (
     _validate_domain,
-    add_domain,
+    deny_config_lines,
     generate_config,
     has_nftset_support,
     nftset_entry,
+    read_denied_domains,
     read_merged_domains,
     reload,
-    remove_domain,
 )
 from terok_shield.nft.constants import (
     DNSMASQ_BIND_DEFAULT,
@@ -24,6 +24,7 @@ from terok_shield.nft.constants import (
     NFT_TABLE_NAME,
     PASTA_DNS,
 )
+from terok_shield.state import StateBundle
 
 from ..testnet import TEST_DOMAIN, TEST_DOMAIN2
 
@@ -72,7 +73,8 @@ def test_nftset_entry_format() -> None:
     """nftset_entry() generates the correct dnsmasq nftset config line."""
     result = nftset_entry("github.com")
     assert result == (
-        f"nftset=/github.com/4#inet#{NFT_TABLE_NAME}#allow_v4,6#inet#{NFT_TABLE_NAME}#allow_v6"
+        f"nftset=/github.com/4#inet#{NFT_TABLE_NAME}#t40_project_allow_v4"
+        f",6#inet#{NFT_TABLE_NAME}#t40_project_allow_v6"
     )
 
 
@@ -263,99 +265,40 @@ def test_clear_pid_file_ignores_missing(tmp_path: Path) -> None:
     _clear_pid_file(tmp_path)  # should not raise
 
 
-# ── add_domain / remove_domain ────────────────────────────
-
-
-def test_add_domain_appends(tmp_path: Path) -> None:
-    """add_domain() appends a new domain to live.domains."""
-    StateBundle(tmp_path).ensure_dirs()
-    assert add_domain(tmp_path, TEST_DOMAIN) is True
-    assert TEST_DOMAIN in StateBundle(tmp_path).live_domains.read_text()
-
-
-def test_add_domain_deduplicates(tmp_path: Path) -> None:
-    """add_domain() returns False for an already-present domain."""
-    StateBundle(tmp_path).ensure_dirs()
-    add_domain(tmp_path, TEST_DOMAIN)
-    assert add_domain(tmp_path, TEST_DOMAIN) is False
-
-
-def test_add_domain_deduplicates_against_profile(tmp_path: Path) -> None:
-    """add_domain() returns False when domain already exists in profile.domains."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n")
-    assert add_domain(tmp_path, TEST_DOMAIN) is False
-
-
-def test_add_domain_undenies(tmp_path: Path) -> None:
-    """add_domain() removes domain from denied.domains if present."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).denied_domains.write_text(f"{TEST_DOMAIN}\n")
-    assert add_domain(tmp_path, TEST_DOMAIN) is True
-    denied = StateBundle(tmp_path).denied_domains.read_text()
-    assert TEST_DOMAIN not in denied
-
-
-def test_remove_domain(tmp_path: Path) -> None:
-    """remove_domain() adds domain to denied.domains and removes from live.domains."""
-    StateBundle(tmp_path).ensure_dirs()
-    add_domain(tmp_path, TEST_DOMAIN)
-    add_domain(tmp_path, TEST_DOMAIN2)
-    assert remove_domain(tmp_path, TEST_DOMAIN) is True
-    merged = read_merged_domains(tmp_path)
-    assert TEST_DOMAIN not in merged
-    assert TEST_DOMAIN2 in merged
-
-
-def test_remove_domain_from_profile(tmp_path: Path) -> None:
-    """remove_domain() denies a domain that exists in profile.domains."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n{TEST_DOMAIN2}\n")
-    assert remove_domain(tmp_path, TEST_DOMAIN) is True
-    merged = read_merged_domains(tmp_path)
-    assert TEST_DOMAIN not in merged
-    assert TEST_DOMAIN2 in merged
-    # profile.domains is unchanged
-    assert TEST_DOMAIN in StateBundle(tmp_path).profile_domains.read_text()
-
-
-def test_remove_domain_not_found(tmp_path: Path) -> None:
-    """remove_domain() returns False when domain is not present."""
-    StateBundle(tmp_path).ensure_dirs()
-    assert remove_domain(tmp_path, TEST_DOMAIN) is False
-
-
-# ── read_merged_domains ──────────────────────────────────
+# ── read_merged_domains (policy-backed) ──────────────────
 
 
 def test_read_merged_domains_empty(tmp_path: Path) -> None:
-    """read_merged_domains() returns empty list when no domain files exist."""
+    """read_merged_domains() returns empty list when no policy exists."""
     StateBundle(tmp_path).ensure_dirs()
     assert read_merged_domains(tmp_path) == []
 
 
-def test_read_merged_domains_profile_only(tmp_path: Path) -> None:
-    """read_merged_domains() returns profile domains when no live/denied."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n{TEST_DOMAIN2}\n")
+def test_read_merged_domains_project_tier(tmp_path: Path) -> None:
+    """Admitted domains from the project-allow tier are returned in order."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n+{TEST_DOMAIN2}\n")
     assert read_merged_domains(tmp_path) == [TEST_DOMAIN, TEST_DOMAIN2]
 
 
-def test_read_merged_domains_merges_live(tmp_path: Path) -> None:
-    """read_merged_domains() merges profile + live with dedup."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n")
-    StateBundle(tmp_path).live_domains.write_text(f"{TEST_DOMAIN2}\n")
+def test_read_merged_domains_merges_live_overlay(tmp_path: Path) -> None:
+    """The runtime overlay (policy/live) adds to the admitted domains."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
+    bundle.overlay_set("+", TEST_DOMAIN2)
     merged = read_merged_domains(tmp_path)
     assert TEST_DOMAIN in merged
     assert TEST_DOMAIN2 in merged
 
 
 def test_read_merged_domains_subtracts_denied(tmp_path: Path) -> None:
-    """read_merged_domains() subtracts denied domains from the result."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).profile_domains.write_text(f"{TEST_DOMAIN}\n{TEST_DOMAIN2}\n")
-    StateBundle(tmp_path).denied_domains.write_text(f"{TEST_DOMAIN}\n")
+    """A '-' overlay entry removes a domain from the dnsmasq list."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n+{TEST_DOMAIN2}\n")
+    bundle.overlay_set("-", TEST_DOMAIN)
     merged = read_merged_domains(tmp_path)
     assert TEST_DOMAIN not in merged
     assert TEST_DOMAIN2 in merged
@@ -364,43 +307,53 @@ def test_read_merged_domains_subtracts_denied(tmp_path: Path) -> None:
 # ── reload ───────────────────────────────────────────────
 
 
-def test_reload_regenerates_config_and_sends_sighup(tmp_path: Path) -> None:
-    """reload() regenerates config and sends SIGHUP to dnsmasq."""
+def _run_reload(tmp_path: Path, *args: object, **kwargs: object) -> mock.MagicMock:
+    """Invoke reload() with a mock runner and stubbed stop/verify, return the runner.
+
+    ``_terminate`` (kill loop) and ``_await_restart`` (pidfile poll) have their
+    own direct tests below, so the reload-flow tests stub them out.
+    """
+    runner = mock.MagicMock()
+    with (
+        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.dns.dnsmasq._terminate"),
+        mock.patch("terok_shield.dns.dnsmasq._await_restart"),
+    ):
+        reload(tmp_path, *args, container="test-ctr", runner=runner, **kwargs)  # type: ignore[arg-type]
+    return runner
+
+
+def test_reload_regenerates_config_and_restarts(tmp_path: Path) -> None:
+    """reload() regenerates the config and relaunches dnsmasq in the netns.
+
+    dnsmasq does not re-read its main config on SIGHUP, so the reload must
+    restart it for the new nftset/sinkhole directives to take effect.
+    """
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
 
-    with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
-    ):
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+    runner = _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
 
-    # Config was regenerated
     assert TEST_DOMAIN in StateBundle(tmp_path).dnsmasq_conf.read_text()
-    # SIGHUP sent (not SIGTERM)
-    import signal
-
-    mock_kill.assert_called_once_with(12345, signal.SIGHUP)
+    runner.dnsmasq_via_nsenter.assert_called_once()
+    call = runner.dnsmasq_via_nsenter.call_args
+    assert call.args[0] == "test-ctr"
+    assert call.args[1] == str(StateBundle(tmp_path).dnsmasq_conf)
 
 
 def test_reload_preserves_krun_listen_address(tmp_path: Path) -> None:
     """reload() reads the existing conf's listen-address and re-emits it.
 
-    Without this, a krun-runtime container's live reload would silently
-    rebind dnsmasq onto netns ``127.0.0.1`` and break DNS for the guest.
+    Without this, a krun-runtime container's reload would silently rebind
+    dnsmasq onto netns ``127.0.0.1`` and break DNS for the guest.
     """
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
-    # Pre-existing conf was generated for the krun runtime.
     StateBundle(tmp_path).dnsmasq_conf.write_text(
         f"listen-address={DNSMASQ_BIND_KRUN}\nport=53\nbind-interfaces\n"
     )
 
-    with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-    ):
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
 
     new_conf = StateBundle(tmp_path).dnsmasq_conf.read_text()
     assert f"listen-address={DNSMASQ_BIND_KRUN}" in new_conf
@@ -408,94 +361,71 @@ def test_reload_preserves_krun_listen_address(tmp_path: Path) -> None:
 
 
 def test_reload_falls_back_to_default_when_listen_address_missing(tmp_path: Path) -> None:
-    """reload() emits the default bind when the prior conf had no ``listen-address=`` line.
-
-    Defensive against hand-written or truncated configs — never crash, fall back
-    to the safe default-runtime bind.
-    """
+    """reload() emits the default bind when the prior conf had no ``listen-address=`` line."""
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
-    # No listen-address line in the old conf.
     StateBundle(tmp_path).dnsmasq_conf.write_text("port=53\nbind-interfaces\n")
 
-    with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill"),
-    ):
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
 
-    new_conf = StateBundle(tmp_path).dnsmasq_conf.read_text()
-    assert f"listen-address={DNSMASQ_BIND_DEFAULT}" in new_conf
+    assert (
+        f"listen-address={DNSMASQ_BIND_DEFAULT}" in StateBundle(tmp_path).dnsmasq_conf.read_text()
+    )
 
 
 def test_reload_noop_when_not_running(tmp_path: Path) -> None:
-    """reload() is a no-op when dnsmasq PID file is absent."""
+    """reload() is a no-op (no relaunch) when the dnsmasq PID file is absent."""
     StateBundle(tmp_path).ensure_dirs()
-    with mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill:
-        reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
-    mock_kill.assert_not_called()
+    runner = _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+    runner.dnsmasq_via_nsenter.assert_not_called()
 
 
 def test_reload_raises_on_stale_pid(tmp_path: Path) -> None:
-    """reload() raises RuntimeError when PID is not dnsmasq (stale)."""
+    """reload() raises RuntimeError when the PID is not our dnsmasq (stale)."""
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
+    runner = mock.MagicMock()
 
     with mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=False):
         with pytest.raises(RuntimeError, match="not dnsmasq"):
-            reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+            reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], container="c", runner=runner)
 
 
-def test_reload_raises_on_dead_process(tmp_path: Path) -> None:
-    """reload() raises RuntimeError when SIGHUP fails (process dead)."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
+def test_terminate_sigterms_then_sigkills(tmp_path: Path) -> None:
+    """_terminate SIGTERMs, then SIGKILLs a process that outlives the timeout."""
+    import signal
+
+    from terok_shield.dns.dnsmasq import _terminate
 
     with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
-        mock.patch("terok_shield.dns.dnsmasq.os.kill", side_effect=ProcessLookupError),
+        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),  # never dies
+        mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
+        mock.patch("terok_shield.dns.dnsmasq.time.sleep"),
     ):
-        with pytest.raises(RuntimeError, match="dead"):
-            reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+        _terminate(12345, tmp_path, timeout_s=0.0)
+
+    assert mock.call(12345, signal.SIGTERM) in mock_kill.call_args_list
+    assert mock.call(12345, signal.SIGKILL) in mock_kill.call_args_list
 
 
-# ── read_domains normalization ───────────────────────────
+def test_await_restart_raises_when_dnsmasq_absent(tmp_path: Path) -> None:
+    """_await_restart raises when no fresh dnsmasq appears within the timeout."""
+    from terok_shield.dns.dnsmasq import _await_restart
+
+    StateBundle(tmp_path).ensure_dirs()  # no pid file written
+    with mock.patch("terok_shield.dns.dnsmasq.time.sleep"):
+        with pytest.raises(RuntimeError, match="did not restart"):
+            _await_restart(tmp_path, timeout_s=0.0)
 
 
-def test_read_domains_normalizes_case(tmp_path: Path) -> None:
-    """read_domains() lowercases entries for consistent comparison."""
-    from terok_shield.dns.dnsmasq import read_domains
+def test_await_restart_returns_when_fresh_dnsmasq_present(tmp_path: Path) -> None:
+    """_await_restart returns cleanly once a fresh dnsmasq owns the conf."""
+    from terok_shield.dns.dnsmasq import _await_restart
 
-    domains_path = tmp_path / "profile.domains"
-    domains_path.write_text("GitHub.COM\nexample.org\n")
-    assert read_domains(domains_path) == ["github.com", "example.org"]
-
-
-def test_read_domains_skips_invalid(tmp_path: Path) -> None:
-    """read_domains() silently skips invalid domain entries."""
-    from terok_shield.dns.dnsmasq import read_domains
-
-    domains_path = tmp_path / "profile.domains"
-    domains_path.write_text("github.com\n; injection\nexample.org\n")
-    assert read_domains(domains_path) == ["github.com", "example.org"]
-
-
-def test_read_domains_deduplicates(tmp_path: Path) -> None:
-    """read_domains() deduplicates after normalization."""
-    from terok_shield.dns.dnsmasq import read_domains
-
-    domains_path = tmp_path / "profile.domains"
-    domains_path.write_text("github.com\nGITHUB.COM\n")
-    assert read_domains(domains_path) == ["github.com"]
-
-
-def test_read_domains_skips_blank_lines(tmp_path: Path) -> None:
-    """read_domains() skips blank lines without treating them as invalid."""
-    from terok_shield.dns.dnsmasq import read_domains
-
-    domains_path = tmp_path / "profile.domains"
-    domains_path.write_text("\ngithub.com\n\nexample.org\n\n")
-    assert read_domains(domains_path) == ["github.com", "example.org"]
+    StateBundle(tmp_path).ensure_dirs()
+    StateBundle(tmp_path).dnsmasq_pid.write_text("999\n")
+    with mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True):
+        _await_restart(tmp_path)  # must not raise
 
 
 # ── generate_config validation ───────────────────────────
@@ -543,4 +473,93 @@ def test_has_nftset_support_missing_dnsmasq() -> None:
     assert has_nftset_support(runner) is False
 
 
-from terok_shield.state import StateBundle
+# ── cache-size + DNS-plane deny ─────────────────────────
+
+
+def test_generate_config_disables_dnsmasq_cache(tmp_path: Path) -> None:
+    """cache-size=0: a cached answer would skip the --nftset add and hand the
+    workload an IP whose (timed) allow-set element was never re-armed."""
+    pid_path = StateBundle(tmp_path).dnsmasq_pid
+    config = generate_config(PASTA_DNS, [], pid_path, listen_address=DNSMASQ_BIND_DEFAULT)
+    assert "cache-size=0" in config
+
+
+def test_generate_config_sinkholes_denied_domains(tmp_path: Path) -> None:
+    """A denied domain gets a local=/dom/ NXDOMAIN sinkhole line."""
+    pid_path = StateBundle(tmp_path).dnsmasq_pid
+    config = generate_config(
+        PASTA_DNS,
+        [TEST_DOMAIN],
+        pid_path,
+        listen_address=DNSMASQ_BIND_DEFAULT,
+        deny_domains=[TEST_DOMAIN2],
+    )
+    assert f"local=/{TEST_DOMAIN2}/" in config
+    assert f"nftset=/{TEST_DOMAIN}/" in config
+
+
+class TestDenyConfigLines:
+    """deny_config_lines() — sinkholes, punch-throughs, and their edge cases."""
+
+    def test_denied_domain_is_sinkholed(self) -> None:
+        """Plain deny → one local=/dom/ line, nothing else."""
+        assert deny_config_lines([], [TEST_DOMAIN], PASTA_DNS) == [f"local=/{TEST_DOMAIN}/"]
+
+    def test_allowed_subdomain_of_denied_ancestor_gets_punch_through(self) -> None:
+        """dnsmasq matches by longest suffix — the specific allow must outrank
+        the ancestor sinkhole, mirroring the policy engine's composition."""
+        sub = f"api.{TEST_DOMAIN}"
+        lines = deny_config_lines([sub], [TEST_DOMAIN], PASTA_DNS)
+        assert f"local=/{TEST_DOMAIN}/" in lines
+        assert f"server=/{sub}/{PASTA_DNS}" in lines
+
+    def test_wildcards_are_stripped_on_both_sides(self) -> None:
+        """*.dom deny and *.sub allow behave as their base domains."""
+        sub = f"api.{TEST_DOMAIN}"
+        lines = deny_config_lines([f"*.{sub}"], [f"*.{TEST_DOMAIN}"], PASTA_DNS)
+        assert f"local=/{TEST_DOMAIN}/" in lines
+        assert f"server=/{sub}/{PASTA_DNS}" in lines
+
+    def test_same_name_conflict_emits_no_sinkhole(self) -> None:
+        """Deny at exactly an allowed name: a same-specificity dnsmasq directive
+        conflict has no defined winner — leave the verdict to the IP tiers."""
+        assert deny_config_lines([TEST_DOMAIN], [TEST_DOMAIN], PASTA_DNS) == []
+
+    def test_unrelated_allow_gets_no_punch_through(self) -> None:
+        """Only strict subdomains of the denied base punch through."""
+        lines = deny_config_lines([TEST_DOMAIN2], [TEST_DOMAIN], PASTA_DNS)
+        assert lines == [f"local=/{TEST_DOMAIN}/"]
+
+    def test_invalid_deny_entries_are_skipped(self) -> None:
+        """Malformed deny entries are dropped with a warning, like the nftset path."""
+        assert deny_config_lines([], ["not a domain!"], PASTA_DNS) == []
+
+    def test_duplicate_lines_are_deduplicated(self) -> None:
+        """Two denied ancestors of one allow yield a single punch-through."""
+        sub_base = f"sub.{TEST_DOMAIN}"
+        allowed = f"api.{sub_base}"
+        lines = deny_config_lines([allowed], [TEST_DOMAIN, sub_base], PASTA_DNS)
+        assert lines.count(f"server=/{allowed}/{PASTA_DNS}") == 1
+
+
+def test_read_denied_domains_composes_from_policy(tmp_path: Path) -> None:
+    """read_denied_domains() surfaces '-' domains from the tiered bundle."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
+    bundle.overlay_set("-", TEST_DOMAIN2)
+    assert read_denied_domains(tmp_path) == [TEST_DOMAIN2]
+
+
+def test_reload_writes_deny_sinkholes(tmp_path: Path) -> None:
+    """reload() regenerates the config with the deny sinkholes included."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.dnsmasq_pid.write_text("12345\n")
+    bundle.dnsmasq_conf.write_text(f"listen-address={DNSMASQ_BIND_DEFAULT}\n")
+
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], [TEST_DOMAIN2])
+
+    conf = bundle.dnsmasq_conf.read_text()
+    assert f"nftset=/{TEST_DOMAIN}/" in conf
+    assert f"local=/{TEST_DOMAIN2}/" in conf

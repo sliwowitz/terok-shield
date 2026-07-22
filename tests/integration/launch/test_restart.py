@@ -69,7 +69,7 @@ class TestRestartPersistence:
             rules = shield.rules(name)
             assert "terok_shield" in rules, "Expected terok_shield table in ruleset"
             assert "policy drop" in rules, "Expected deny-all policy in output chain"
-            assert "allow_v4" in rules, "Expected allow_v4 set in ruleset"
+            assert "t40_project_allow_v4" in rules, "Expected t40_project_allow_v4 set in ruleset"
 
             # ── Phase 2: stop ──────────────────────────────────
             subprocess.run(

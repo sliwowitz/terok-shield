@@ -22,7 +22,7 @@ import pytest
 
 from terok_shield import Shield, ShieldConfig
 from terok_shield.config import DnsTier, detect_dns_tier
-from terok_shield.dns.dnsmasq import generate_config, nftset_entry, read_domains
+from terok_shield.dns.dnsmasq import generate_config, nftset_entry, read_merged_domains
 from terok_shield.nft.constants import DNSMASQ_BIND_DEFAULT, PASTA_DNS
 from terok_shield.run import which_sbin_aware
 from tests.testnet import (
@@ -120,8 +120,8 @@ class TestDnsmasqConfigGeneration:
         """nftset_entry produces the correct dnsmasq directive."""
         entry = nftset_entry("github.com")
         assert entry.startswith("nftset=/github.com/")
-        assert "allow_v4" in entry
-        assert "allow_v6" in entry
+        assert "t40_project_allow_v4" in entry
+        assert "t40_project_allow_v6" in entry
 
     def test_generate_config_with_real_domains(self, tmp_path: Path) -> None:
         """generate_config() produces a valid dnsmasq config for real domains."""
@@ -186,8 +186,8 @@ class TestPreStartDnsmasqTier:
                 f"expected exact resolv.conf mount {expected_mount!r}, got: {vol_args!r}"
             )
 
-    def test_pre_start_writes_profile_domains(self) -> None:
-        """pre_start() writes profile domains to state for the OCI hook."""
+    def test_pre_start_writes_project_allow_domains(self) -> None:
+        """pre_start() writes the composed domains to the project-allow tier."""
         with tempfile.TemporaryDirectory() as tmp:
             sd = Path(tmp)
             shield = Shield(ShieldConfig(state_dir=sd))
@@ -196,10 +196,9 @@ class TestPreStartDnsmasqTier:
             tier = _tier_from_args(args)
             if tier != "dnsmasq":
                 pytest.skip(f"pre_start selected tier '{tier}', not dnsmasq")
-            domains_path = StateBundle(sd).profile_domains
-            assert domains_path.is_file()
-            domains = read_domains(domains_path)
-            assert len(domains) > 0
+            tier_path = StateBundle(sd).tier_path("project_allow")
+            assert tier_path.is_file()
+            assert len(read_merged_domains(sd)) > 0
 
     def test_pre_start_sets_dns_tier_annotation(self) -> None:
         """pre_start() sets a dns_tier annotation."""
@@ -377,20 +376,18 @@ class TestLiveDomainAllowDeny:
         finally:
             _podman_rm(name)
 
-    def test_allow_domain_updates_live_domains(self, shielded) -> None:
-        """shield.allow(domain) adds the domain to live.domains."""
+    def test_allow_domain_updates_overlay(self, shielded) -> None:
+        """shield.allow(domain) admits the domain via the runtime overlay."""
         name, sd, shield = shielded
         shield.allow(name, GOOGLE_DNS_DOMAIN)
-        domains = read_domains(StateBundle(sd).live_domains)
-        assert GOOGLE_DNS_DOMAIN in domains
+        assert GOOGLE_DNS_DOMAIN in read_merged_domains(sd)
 
-    def test_deny_domain_adds_to_denied_domains(self, shielded) -> None:
-        """shield.deny(domain) adds the domain to denied.domains."""
+    def test_deny_domain_removes_from_overlay(self, shielded) -> None:
+        """shield.deny(domain) withholds the domain from the dnsmasq set."""
         name, sd, shield = shielded
         shield.allow(name, GOOGLE_DNS_DOMAIN)
         shield.deny(name, GOOGLE_DNS_DOMAIN)
-        denied = read_domains(StateBundle(sd).denied_domains)
-        assert GOOGLE_DNS_DOMAIN in denied
+        assert GOOGLE_DNS_DOMAIN not in read_merged_domains(sd)
 
     def test_allow_domain_populates_nft_set(self, shielded) -> None:
         """Allowing a domain and querying it causes dnsmasq to populate the nft allow set."""
@@ -412,10 +409,10 @@ class TestLiveDomainAllowDeny:
         if not pid:
             pytest.fail(f"podman inspect returned empty PID for container {name!r}")
 
-        r = nsenter_nft(pid, "list", "set", "inet", "terok_shield", "allow_v4")
+        r = nsenter_nft(pid, "list", "set", "inet", "terok_shield", "t40_project_allow_v4")
         assert r.returncode == 0
         assert GOOGLE_DNS_IP in r.stdout, (
-            f"{GOOGLE_DNS_IP} not found in allow_v4 set after resolving {GOOGLE_DNS_DOMAIN}; "
+            f"{GOOGLE_DNS_IP} not found in t40_project_allow_v4 set after resolving {GOOGLE_DNS_DOMAIN}; "
             f"set contents: {r.stdout!r}"
         )
 

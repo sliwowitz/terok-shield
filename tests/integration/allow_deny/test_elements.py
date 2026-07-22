@@ -23,10 +23,12 @@ class TestAddElementsLive:
         """IPs added via add_elements appear in 'nft list set'."""
         r = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert r.returncode == 0, f"Ruleset apply failed: {r.stderr}"
-        r = nsenter_nft(container_pid, stdin=add_elements("allow_v4", [TEST_IP1]))
+        r = nsenter_nft(container_pid, stdin=add_elements("t40_project_allow_v4", [TEST_IP1]))
         assert r.returncode == 0, f"Add elements failed: {r.stderr}"
 
-        listed = nsenter_nft(container_pid, "list", "set", "inet", "terok_shield", "allow_v4")
+        listed = nsenter_nft(
+            container_pid, "list", "set", "inet", "terok_shield", "t40_project_allow_v4"
+        )
         assert listed.returncode == 0
         assert TEST_IP1 in listed.stdout
 
@@ -35,10 +37,12 @@ class TestAddElementsLive:
         ips = [*ALLOWED_TARGET_IPS, GOOGLE_DNS_IP, QUAD9_DNS_IP]
         r = nsenter_nft(container_pid, stdin=RulesetBuilder().build_hook())
         assert r.returncode == 0, f"Ruleset apply failed: {r.stderr}"
-        r = nsenter_nft(container_pid, stdin=add_elements("allow_v4", ips))
+        r = nsenter_nft(container_pid, stdin=add_elements("t40_project_allow_v4", ips))
         assert r.returncode == 0, f"Add elements failed: {r.stderr}"
 
-        listed = nsenter_nft(container_pid, "list", "set", "inet", "terok_shield", "allow_v4")
+        listed = nsenter_nft(
+            container_pid, "list", "set", "inet", "terok_shield", "t40_project_allow_v4"
+        )
         assert listed.returncode == 0
         for ip in ips:
             assert ip in listed.stdout

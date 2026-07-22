@@ -15,6 +15,7 @@ from terok_shield.verbs.control import (
     _handle_deny,
     _handle_preview,
     _handle_quarantine,
+    _handle_reset,
 )
 from terok_shield.verbs.observe import _handle_logs, _handle_profiles, _handle_status
 from terok_shield.verbs.stream import _handle_watch
@@ -150,6 +151,15 @@ class TestHandlers:
         shield.quarantine.assert_called_once_with("test-ctr")
         output = capsys.readouterr().out
         assert "QUARANTINED" in output
+        assert "test-ctr" in output
+
+    def test_handle_reset_delegates_and_prints(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """_handle_reset calls shield.reset() and prints confirmation."""
+        shield = mock.MagicMock()
+        _handle_reset(shield, "test-ctr")
+        shield.reset.assert_called_once_with("test-ctr")
+        output = capsys.readouterr().out
+        assert "reset" in output
         assert "test-ctr" in output
 
     def test_handle_preview_all_without_down_raises(self) -> None:

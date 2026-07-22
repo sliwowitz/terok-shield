@@ -15,7 +15,7 @@ own network namespace.
 │  ┌────────────────────────────────────┐  │
 │  │ nftables (applied by OCI hook)     │  │
 │  │ policy: DROP                       │  │
-│  │ allow: DNS, lo, @allow_v4/v6       │  │
+│  │ allow: DNS, lo, @t40_project_allow │  │
 │  │ reject: RFC1918, RFC4193           │  │
 │  └────────────────────────────────────┘  │
 │                                          │
@@ -29,31 +29,33 @@ own network namespace.
    [Per-container state bundle](#per-container-state-bundle) for where they
    land), processes the allowlist profiles, and pre-generates the complete nft
    ruleset to `ruleset.nft`. DNS handling differs by tier:
-   - **dnsmasq tier**: domain names are written to `profile.domains` for dnsmasq
-     `--nftset` runtime resolution; only raw IP entries are resolved and written
-     to `profile.allowed`. dnsmasq populates the nft allow sets at runtime as
-     the container makes DNS queries.
-   - **dig / getent tier**: all entries (domains and raw IPs) are resolved to IPs
-     at pre-start time and written to `profile.allowed`; no runtime resolution.
+   - **dnsmasq tier**: no pre-resolution at all — the composed policy lands in
+     `policy/40-project-allow`, literal IP entries seed the allow sets via the
+     generated ruleset, and dnsmasq `--nftset` populates the sets at runtime,
+     per DNS query, *before* the answer reaches the workload. Launch cost stays
+     O(1) in allowlist size and CDN rotation is tracked for free.
+   - **dig / getent tier**: all entries (domains and raw IPs) are statically
+     resolved at pre-start time into the `resolved.ips` cache; no runtime
+     resolution or rotation tracking.
 
    Returns podman args with OCI annotations (`state_dir`, `loopback_ports`,
    `version`, `upstream_dns`, `dns_tier`)
 2. When podman creates a container with the `terok.shield.profiles` annotation,
    it fires the stdlib-only hook script at the `createRuntime` stage
-3. The hook reads `state_dir` from annotations, applies `ruleset.nft` inside the
-   container's network namespace via `nsenter`, discovers the gateway from
-   `/proc/{pid}/net/route`, and starts a per-container dnsmasq instance if the
-   dnsmasq tier is active
+3. The hook reads `state_dir` from annotations and applies the pre-generated
+   `ruleset.nft` (gateway addresses already baked in at `pre_start`) inside the
+   container's network namespace via `nsenter`, then starts a per-container
+   dnsmasq instance if the dnsmasq tier is active
 4. dnsmasq runs inside the container's network namespace with `--nftset` pointing
-   to the `allow_v4`/`allow_v6` sets — every DNS resolution automatically adds the
-   resolved IPs to the live nft allow sets
+   to the `t40_project_allow_v4`/`t40_project_allow_v6` sets — every DNS resolution
+   automatically adds the resolved IPs to the live nft project-allow sets
 5. The workload starts with `CAP_NET_ADMIN` and `CAP_NET_RAW` dropped, so it
    cannot modify the rules
 
 ### Chain evaluation order
 
 ```text
-loopback → established → DNS → gateway ports → loopback ports → allow_v4/v6 → private-range reject (RFC1918 + RFC4193) → deny all
+preamble (lo, established, DNS, infra ports, +localhost grants) → t00 hard-deny (link-local + IMDS) → t10 override → t20 security-deny (@t20_security_deny + RFC1918/RFC4193) → t30 provider allow → t40 project allow → bypass window → terminal reject (log BLOCKED)
 ```
 
 ### When to use
@@ -70,14 +72,14 @@ Each container's hooks and state are isolated in its own directory:
 {state_dir}/
 ├── hooks/                                  # OCI hook descriptors (only if per-container hooks are supported)
 ├── terok-shield-hook                       # Hook entrypoint (stdlib-only Python), per-container hooks only
-├── ruleset.nft                             # Pre-generated nft ruleset
-├── gateway                                 # Discovered gateway IP
-├── profile.allowed                         # IPs from pre-start DNS resolution
-├── profile.domains                         # Domain names for dnsmasq config
-├── live.allowed                            # IPs from allow/deny
-├── live.domains                            # Domains added at runtime
-├── deny.list                               # Persistent deny overrides
-├── denied.domains                          # Domains denied at runtime
+├── policy/                                 # v15 tiered +/- policy, one file per tier set
+│   ├── 10-override                         #   → nft set t10_override (break-glass allow)
+│   ├── 20-security-deny                    #   → nft set t20_security_deny (vault hosts + operator deny)
+│   ├── 30-provider-allow                   #   → nft set t30_provider_allow (provider egress)
+│   ├── 40-project-allow                    #   → nft set t40_project_allow (project allowlist)
+│   └── live                                #   Runtime allow/deny overlay (+/- lines)
+├── resolved.ips                            # Resolved allow IPs (t40 seed; dig/getent tiers)
+├── ruleset.nft                             # Pre-generated nft ruleset (gateways baked in)
 ├── dnsmasq.conf                            # Generated dnsmasq config (dnsmasq tier)
 ├── dnsmasq.pid                             # dnsmasq PID (dnsmasq tier)
 ├── resolv.conf                             # Bind-mounted /etc/resolv.conf (dnsmasq tier)
@@ -109,8 +111,13 @@ Via the Python API (this is how [terok](https://github.com/terok-ai/terok)
 uses terok-shield as a library):
 
 ```python
+from pathlib import Path
+
 from terok_shield import Shield, ShieldConfig
-shield = Shield(ShieldConfig(state_dir=Path("~/.local/state/terok/shield/containers/my-ctr")))
+
+shield = Shield(
+    ShieldConfig(state_dir=Path.home() / ".local/state/terok/shield/containers/my-ctr")
+)
 extra_args = shield.pre_start("my-ctr", ["dev-standard"])
 # pass extra_args to podman run
 ```
@@ -120,7 +127,8 @@ extra_args = shield.pre_start("my-ctr", ["dev-standard"])
 When dnsmasq is active, the allow sets are populated dynamically — no manual
 `terok-shield allow` calls are needed for domains already in the profile.
 Every `dig`, `getaddrinfo`, or HTTP request that triggers a DNS lookup inside
-the container adds the resolved IPs to `allow_v4`/`allow_v6` automatically.
+the container adds the resolved IPs to `t40_project_allow_v4`/`t40_project_allow_v6`
+automatically.
 
 To watch the sets grow in real time:
 

@@ -50,7 +50,7 @@ class TestAPILifecycle:
             # 3. Verify ruleset applied
             rules = shield.rules(name)
             assert "terok_shield" in rules
-            assert "allow_v4" in rules
+            assert "t40_project_allow_v4" in rules
 
             # 4. Allow target IPs (Cloudflare anycast may respond from either)
             allowed: list[str] = []

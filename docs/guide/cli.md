@@ -120,7 +120,7 @@ terok-shield resolve my-container --force
 # Resolved 28 IPs for my-container (forced)
 ```
 
-Cached IPs are stored in the container's `profile.allowed` file and
+Cached IPs are stored in the container's `resolved.ips` file and
 automatically refreshed when stale (default: 1 hour).
 
 ## allow
@@ -145,9 +145,9 @@ terok-shield allow my-container 203.0.113.10
 ```
 
 If `target` is a domain name, it is resolved to IPs automatically.
-Changes take effect immediately. Allowed IPs are persisted to `live.allowed`
-and survive `down`/`up` bypass cycles. If the IP was previously denied
-(present in `deny.list`), the deny is cleared automatically.
+Changes take effect immediately. The allow is persisted to the `policy/live`
+overlay (as a `+` line) and survives `down`/`up` bypass cycles. If the target
+was previously denied, the allow flips that verdict automatically.
 
 ## deny
 
@@ -167,10 +167,11 @@ terok-shield deny my-container example.com
 # Denied example.com (<resolved-ip>) for my-container
 ```
 
-The IP is removed from the nft allow set (if present; errors are logged but
-do not prevent the deny from being persisted) and from `live.allowed`.
-If the IP is present in `profile.allowed`, it is also written to `deny.list`
-so the deny persists across `up`/`down` cycles and container restarts.
+The IP is removed from the nft `t40_project_allow` set (if present; errors are
+logged but do not prevent the deny from being persisted) and added to the
+`t20_security_deny` set. The deny is recorded as a `-` line in the `policy/live`
+overlay, so it persists across `up`/`down` cycles and container restarts and
+flips any prior allow of the same target.
 
 ## down
 
@@ -197,8 +198,26 @@ Restore normal deny-all mode for a container.
 terok-shield up <container>
 ```
 
-Re-applies the deny-all ruleset and restores effective IPs:
-`(profile.allowed ∪ live.allowed) − deny.list`.
+Re-applies the deny-all ruleset and restores the effective allow IPs
+(the composed `policy/` tiers with the runtime overlay, minus the
+security-deny tier). Allow-set state the container learned through dnsmasq
+survives the transition — a down/up round trip never forgets IPs the
+workload already resolved.
+
+## reset
+
+Forget DNS-learned allow-set state, returning the allow sets to their
+just-launched contents.
+
+```bash
+terok-shield reset <container>
+```
+
+The dnsmasq tier accumulates every IP the workload legitimately resolved
+(elements also age out on their own via the set timeout). `reset` drops
+that learned state in one transaction while re-seeding the authored policy
+literals, and touches neither the deny tier nor runtime `allow`/`deny`
+overlay entries. The workload re-earns its state on its next DNS queries.
 
 ## preview
 

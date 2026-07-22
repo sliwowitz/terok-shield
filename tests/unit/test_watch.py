@@ -24,6 +24,7 @@ from terok_shield.nft.constants import (
     NFLOG_GROUP,
     PRIVATE_LOG_PREFIX,
 )
+from terok_shield.state import StateBundle as _StateBundle
 from terok_shield.watch import (
     _enrich_nflog,
     _ensure_log_file,
@@ -260,11 +261,11 @@ class TestDnsLogWatcher:
 
     @pytest.fixture
     def state_dir(self, tmp_path: Path) -> Path:
-        """Create a minimal state dir with profile.domains."""
+        """Create a minimal state dir with an allowlist policy tier."""
         sd = tmp_path / "state"
-        sd.mkdir()
-        # Write allowed domains
-        (sd / "profile.domains").write_text(f"{TEST_DOMAIN}\n{TEST_DOMAIN2}\n")
+        bundle = _StateBundle(sd)
+        bundle.ensure_dirs()
+        bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n+{TEST_DOMAIN2}\n")
         # Create the log file
         (sd / "dnsmasq.log").write_text("")
         return sd
@@ -927,8 +928,9 @@ class TestDomainRefresh:
     def test_poll_refreshes_domains_after_interval(self, tmp_path: Path) -> None:
         """poll() reloads the allowed domain set when the refresh interval elapses."""
         sd = tmp_path / "state"
-        sd.mkdir()
-        (sd / "profile.domains").write_text(f"{TEST_DOMAIN}\n")
+        bundle = _StateBundle(sd)
+        bundle.ensure_dirs()
+        bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
         log = sd / "dnsmasq.log"
         log.write_text("")
 
@@ -937,7 +939,7 @@ class TestDomainRefresh:
             watcher = DnsLogWatcher(log, sd, _CONTAINER)
 
         # Add BLOCKED_DOMAIN to allowed set *after* watcher was created
-        (sd / "profile.domains").write_text(f"{TEST_DOMAIN}\n{BLOCKED_DOMAIN}\n")
+        bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n+{BLOCKED_DOMAIN}\n")
 
         # Append a query — before refresh, BLOCKED_DOMAIN would be blocked
         with log.open("a") as f:
@@ -978,11 +980,12 @@ class TestRunWatchHappyPath:
 
     @pytest.fixture
     def dnsmasq_state(self, tmp_path: Path) -> Path:
-        """State dir with dnsmasq tier, profile domains, and dnsmasq config."""
+        """State dir with dnsmasq tier, an allowlist policy tier, and dnsmasq config."""
         sd = tmp_path / "state"
-        sd.mkdir()
+        bundle = _StateBundle(sd)
+        bundle.ensure_dirs()
         (sd / "dns.tier").write_text(DnsTier.DNSMASQ.value)
-        (sd / "profile.domains").write_text(f"{TEST_DOMAIN}\n")
+        bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
         (sd / "dnsmasq.conf").write_text("# stub config\n")
         return sd
 

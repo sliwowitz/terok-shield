@@ -89,11 +89,19 @@ def _nft_main(oci: dict, sd: Path, stage: str, log_path: Path) -> int:
         _oci_state.log(f"terok-shield hook: unknown stage {stage!r}", log_path)
         return 1
 
+    # Fail fast on any version mismatch — deliberately no compatibility
+    # window and no migration: the annotation is frozen at container
+    # creation, so a mismatch means this container was prepared by a
+    # different terok-shield generation, and the remedy is a fresh
+    # container (re-create the task; the task workspace rides its mounts).
     ann = oci.get("annotations") or {}
     ver = ann.get(_oci_state.ANN_VERSION, "")
     if not ver or str(ver) != str(_oci_state.BUNDLE_VERSION):
         _oci_state.log(
-            f"terok-shield hook: bundle version {ver!r} != {_oci_state.BUNDLE_VERSION}. Re-run pre_start().",
+            f"terok-shield hook: bundle version {ver!r} != {_oci_state.BUNDLE_VERSION} — this "
+            "container was prepared by a different terok-shield generation. Re-create the "
+            "task (a fresh container gets a current shield bundle); if the installed hooks "
+            "are older than the package, re-run 'terok-shield setup'.",
             log_path,
         )
         return 1

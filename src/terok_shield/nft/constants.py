@@ -9,6 +9,16 @@ Pure literals with no logic — safe for import by the nft.py security boundary.
 NFT_TABLE = "inet terok_shield"
 NFT_TABLE_NAME = "terok_shield"
 
+# ── Tier set base names ────────────────────────────────
+# One named set per tier per family (``<base>_v4`` / ``<base>_v6``).  Each base
+# mirrors its ``policy/<NN>-<name>`` bundle file 1:1 so the file→rule mapping is
+# self-evident.  Tier 00 (hard-deny) is static CIDR ranges, not a set.
+TIER_OVERRIDE = "t10_override"  # tier 10 — break-glass allow, above the deny
+TIER_SECURITY_DENY = "t20_security_deny"  # tier 20 — vault hosts + operator deny
+TIER_PROVIDER_ALLOW = "t30_provider_allow"  # tier 30 — agent/provider egress (executor)
+TIER_PROJECT_ALLOW = "t40_project_allow"  # tier 40 — common sets + git remote + custom
+SET_BYPASS_WINDOW = "bypass_window"  # timed allow-all (kernel-timeout elements)
+
 # ── Network defaults ────────────────────────────────────
 # Used as parameter defaults in nft.py and re-exported by config.py.
 
@@ -20,25 +30,26 @@ PASTA_DNS = "169.254.1.1"  # pasta default DNS forwarder (link-local)
 # where container→127.0.0.1 + pasta→127.0.0.1 causes Connection reset.
 PASTA_HOST_LOOPBACK_MAP = "169.254.1.2"
 
-# RFC 1918 private ranges + RFC 3927 link-local: rejected by default,
-# access attempts and whitelisting logged with a notice.
-RFC1918: tuple[str, ...] = (
+# ── Tier denial floors (two distinct, differently-overridable classes) ──
+#
+# HARD_DENY_RANGES — link-local, including the cloud-metadata IMDS
+# (169.254.169.254).  Rejected ABOVE the override tier, so it is absolute:
+# not even an explicit operator override can reach it (SSRF/metadata floor).
+HARD_DENY_RANGES: tuple[str, ...] = (
+    "169.254.0.0/16",  # RFC 3927 IPv4 link-local — includes cloud-metadata IMDS  # NOSONAR
+    "fe80::/10",  # RFC 4291 IPv6 link-local
+)
+
+# PRIVATE_RANGES — RFC 1918 + RFC 4193 (ULA): the private LAN.  Denied by
+# default (anti-lateral-movement) but BELOW the override tier, so a specific
+# internal host:port can be deliberately carved out via an operator override
+# while the rest of the LAN stays blocked.
+PRIVATE_RANGES: tuple[str, ...] = (
     "10.0.0.0/8",  # RFC 1918
     "172.16.0.0/12",  # RFC 1918
     "192.168.0.0/16",  # RFC 1918
-    "169.254.0.0/16",  # RFC 3927 (IPv4 link-local)
+    "fc00::/7",  # RFC 4193 IPv6 ULA
 )
-
-# RFC 4193 (ULA) + RFC 4291 (link-local): IPv6 equivalents of RFC 1918.
-# Same treatment — rejected by default, logged when whitelisted.
-IPV6_PRIVATE: tuple[str, ...] = (
-    "fc00::/7",  # RFC 4193 (Unique Local Addresses)
-    "fe80::/10",  # RFC 4291 (link-local)
-)
-
-# Combined private ranges (RFC 1918 + RFC 4193/4291) — single source of truth
-# for rule generation and verification.
-PRIVATE_RANGES: tuple[str, ...] = RFC1918 + IPV6_PRIVATE
 
 # ── slirp4netns defaults ──────────────────────────────
 # Gateway and DNS are deterministic offsets from the CIDR base address.
