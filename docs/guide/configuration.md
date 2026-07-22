@@ -42,14 +42,14 @@ Each container gets an isolated state bundle under `containers/`:
         │   ├── terok-shield-createRuntime.json
         │   └── terok-shield-poststop.json
         ├── terok-shield-hook       # OCI hook entrypoint (stdlib-only Python), per-container hooks only
-        ├── ruleset.nft             # Pre-generated nft ruleset
-        ├── gateway                 # Discovered gateway IP
-        ├── profile.allowed         # Pre-resolved IPs from DNS profiles
-        ├── profile.domains         # Domain names for dnsmasq config
-        ├── live.allowed            # IPs from runtime allow/deny
-        ├── live.domains            # Domains added at runtime
-        ├── deny.list               # Persistent deny overrides
-        ├── denied.domains          # Domains denied at runtime
+        ├── policy/                 # v15 tiered +/- policy, one file per tier set
+        │   ├── 10-override         #   → nft set t10_override (break-glass allow)
+        │   ├── 20-security-deny    #   → nft set t20_security_deny (vault hosts + operator deny)
+        │   ├── 30-provider-allow   #   → nft set t30_provider_allow (provider egress)
+        │   ├── 40-project-allow    #   → nft set t40_project_allow (project allowlist)
+        │   └── live                #   Runtime allow/deny overlay (+/- lines)
+        ├── resolved.ips            # Resolved allow IPs (t40 seed; dig/getent tiers)
+        ├── ruleset.nft             # Pre-generated nft ruleset (gateways baked in)
         ├── dnsmasq.conf            # Generated dnsmasq config (dnsmasq tier)
         ├── dnsmasq.pid             # dnsmasq PID (dnsmasq tier)
         ├── resolv.conf             # Bind-mounted /etc/resolv.conf (dnsmasq tier)
@@ -73,14 +73,13 @@ Each container gets an isolated state bundle under `containers/`:
 |------|-----------|---------|
 | `hooks/` | `pre_start()` | OCI hook descriptors (per-container hooks only) |
 | `terok-shield-hook` | `pre_start()` | Stdlib-only hook entrypoint script (per-container hooks only) |
-| `ruleset.nft` | `pre_start()` | Pre-generated nft ruleset applied by the hook |
-| `gateway` | OCI hook | Gateway IP discovered from `/proc/{pid}/net/route` |
-| `profile.allowed` | `pre_start()` / `resolve()` | Cached IPs from DNS resolution |
-| `profile.domains` | `pre_start()` | Domain names for dnsmasq `--nftset` entries |
-| `live.allowed` | `allow()` / `deny()` | Runtime allow/deny IP persistence |
-| `live.domains` | `allow_domain()` | Domains added at runtime |
-| `deny.list` | `deny()` | IPs denied from presets (survives `up`/`down` cycles) |
-| `denied.domains` | `deny_domain()` | Domains denied at runtime |
+| `ruleset.nft` | `pre_start()` | Pre-generated nft ruleset applied by the hook (gateways baked in) |
+| `policy/10-override` | `pre_start()` | Break-glass allow tier (`t10_override`) |
+| `policy/20-security-deny` | `pre_start()` / `deny()` | Vault-host + operator deny tier (`t20_security_deny`) |
+| `policy/30-provider-allow` | `pre_start()` | Provider-egress allow tier (`t30_provider_allow`) |
+| `policy/40-project-allow` | `pre_start()` | Project allowlist tier (`t40_project_allow`) — authored domains and IPs |
+| `policy/live` | `allow()` / `deny()` | Runtime allow/deny overlay (`+`/`-` lines; a later verdict flips an earlier one) |
+| `resolved.ips` | `pre_start()` / `resolve()` | Resolved allow IPs seeding `t40_project_allow` (dig/getent tiers) |
 | `dnsmasq.conf` | `pre_start()` | Generated dnsmasq configuration (dnsmasq tier only) |
 | `dnsmasq.pid` | OCI hook | dnsmasq PID for lifecycle management |
 | `resolv.conf` | `pre_start()` | Redirects container DNS to `127.0.0.1:53` (dnsmasq tier) |
@@ -104,14 +103,16 @@ DNS resolution behaviour depends on the active tier, selected automatically by
 `detect_dns_tier()`:
 
 **dnsmasq tier** (preferred): a per-container dnsmasq instance is started by
-the OCI hook. It uses `--nftset` to auto-populate the nft `allow_v4`/`allow_v6`
-sets on every resolution at runtime. `profile.allowed` still holds the
-pre-start resolved IPs, but dynamic resolution handles IP rotation
-automatically — no cache expiry needed.
+the OCI hook. It uses `--nftset` to auto-populate the nft
+`t40_project_allow_v4`/`t40_project_allow_v6` sets on every resolution at
+runtime, before the reply reaches the workload. There is no pre-resolution at
+launch (`cache-size=0`) — dynamic resolution handles IP rotation automatically,
+so no cache expiry is needed.
 
-**dig / getent tiers** (fallback): resolved IPs are stored in `profile.allowed`,
+**dig / getent tiers** (fallback): resolved IPs are stored in `resolved.ips`,
 one IP per line. The cache uses file modification time (`st_mtime`) for
-freshness checking — entries older than 1 hour are automatically re-resolved.
+freshness checking — entries older than 1 hour (or older than the authored
+policy) are automatically re-resolved.
 
 Force a cache refresh (all tiers):
 
@@ -139,7 +140,7 @@ These annotations are set automatically by `terok-shield run` (or
 | `terok.shield.name` | Container name | Audit log identification |
 | `terok.shield.state_dir` | Absolute path | Where the hook finds its state bundle |
 | `terok.shield.loopback_ports` | Colon-separated ints | Ports for ruleset generation |
-| `terok.shield.version` | Integer | Bundle version (hard-fail on mismatch) |
+| `terok.shield.version` | Integer | Bundle version (hard-fail on mismatch — re-create the task to fix) |
 | `terok.shield.audit_enabled` | `true` / `false` | Whether to write audit logs |
 | `terok.shield.upstream_dns` | IP address | Upstream DNS forwarder for dnsmasq |
 | `terok.shield.dns_tier` | `dnsmasq` / `dig` / `getent` | Active DNS resolution tier |

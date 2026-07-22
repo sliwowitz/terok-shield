@@ -67,9 +67,9 @@ log prefix, and (unless `allow_all`) the private-range rules;
 │  │  │  (applied by OCI hook)                 │  │   │
 │  │  │                                        │  │   │
 │  │  │  policy: DROP                          │  │   │
-│  │  │  allow: DNS, lo, @allow_v4/v6          │  │   │
+│  │  │  allow: DNS, lo, @t40_project_allow    │  │   │
 │  │  │  gateway/loopback ports: literal IPs   │  │   │
-│  │  │  reject: @deny_v4/v6, private ranges   │  │   │
+│  │  │  reject: @t20_security_deny, private   │  │   │
 │  │  └────────────────────────────────────────┘  │   │
 │  │                                              │   │
 │  │  ┌────────────────────────────────────────┐  │   │
@@ -91,16 +91,20 @@ The workload cannot modify nftables rules because `CAP_NET_ADMIN` and
 **Hook mode** (per-container netns, output chain):
 
 ```text
-loopback → established → DNS → gateway ports → loopback ports → allow_v4/v6 → deny_v4/v6 → private-range reject → deny all
+preamble (lo, established, DNS, infra ports, +localhost grants) → t00 hard-deny (link-local + IMDS) → t10 override → t20 security-deny (@t20_security_deny + RFC1918/RFC4193) → t30 provider allow → t40 project allow → bypass window → terminal reject (log BLOCKED)
 ```
 
-**Rule ordering rationale:** the allow sets (`@allow_v4`, `@allow_v6`) are
-evaluated *before* private-range reject rules. This lets operators allowlist
-specific RFC 1918 or RFC 4193 addresses (e.g., local infrastructure) via
-allowlist profiles. The deny sets (`@deny_v4`, `@deny_v6`) sit between the
-allow sets and the private-range rules; explicitly denied destinations are
-rejected and logged with the `DENIED` prefix, and stay denied across
-`shield up` / restarts via `deny.list`.
+**Rule ordering rationale:** tier order *is* the authority order — an
+`accept`/`reject` is a terminal verdict, so the first tier that matches wins.
+The security-deny tier (`@t20_security_deny_v4`/`_v6`, plus the RFC 1918 /
+RFC 4193 private-range rejects) sits *above* the provider- and project-allow
+tiers, so an explicit deny wins over an allow, and a private-range host can be
+reached **only** via the break-glass override tier (`@t10_override_v4`/`_v6`) —
+not by adding it to an allow set. The hard-deny floor (`t00`, link-local +
+169.254.0.0/16 IMDS) sits above even the override and is absolute. Denied
+destinations are rejected and logged with the `DENIED` prefix and stay denied
+across `shield up` / restarts via the security-deny tier and the `policy/live`
+overlay. The terminal rule is a `reject` (not a bare drop).
 
 ### Dual-stack (IPv4 + IPv6)
 
@@ -108,12 +112,12 @@ The firewall operates in dual-stack mode using nftables `inet` tables, which
 handle both IPv4 and IPv6 within the same ruleset. Two parallel allow sets
 are maintained:
 
-- `allow_v4` (`type ipv4_addr; flags interval;`) — IPv4 allowlist
-- `allow_v6` (`type ipv6_addr; flags interval;`) — IPv6 allowlist
+- `t40_project_allow_v4` (`type ipv4_addr; flags interval;`) — IPv4 allowlist
+- `t40_project_allow_v6` (`type ipv6_addr; flags interval;`) — IPv6 allowlist
 
-On the dnsmasq tier the allow sets also carry a `timeout` flag so
-dnsmasq-learned entries auto-expire. Parallel `deny_v4` / `deny_v6` sets
-hold explicitly denied destinations.
+On the dnsmasq tier the project-allow sets also carry a `timeout` flag so
+dnsmasq-learned entries auto-expire. Parallel `t20_security_deny_v4` /
+`t20_security_deny_v6` sets hold explicitly denied destinations.
 
 DNS resolution queries both A and AAAA records, and resolved addresses are
 automatically routed to the correct set. Rejects are cross-family:

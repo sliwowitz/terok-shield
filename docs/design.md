@@ -8,9 +8,9 @@ Uses OCI hooks to apply per-container nftables rules inside the container's own
 network namespace. Each container gets an isolated firewall. Works with pasta
 (rootless default) and slirp4netns.
 
-Lifecycle: `Shield.pre_start()` installs the OCI hook (idempotent), resolves DNS,
-writes `profile.allowed`, pre-generates the complete nft ruleset to `ruleset.nft`,
-and returns podman args with annotations. On each container start, the OCI hook
+Lifecycle: `Shield.pre_start()` installs the OCI hook (idempotent), resolves DNS
+(on the dig/getent tiers, into `resolved.ips`), pre-generates the complete nft
+ruleset to `ruleset.nft`, and returns podman args with annotations. On each container start, the OCI hook
 reads `state_dir` from annotations, applies the pre-generated `ruleset.nft` inside
 the container's network namespace, and optionally starts a per-container *dnsmasq*
 instance.  Gateway addresses are baked into the ruleset at generation time — no
@@ -25,12 +25,14 @@ Bundled defaults use domain names because they're stable across IP rotations and
 easy to audit. DNS resolution uses the best available tier:
 
 1. **dnsmasq** (preferred) — a per-container dnsmasq instance is started by the OCI
-   hook with `nftset=` config entries (one per domain, targeting `allow_v4` and
-   `allow_v6`), automatically populating the nft allow sets on every resolution at
-   runtime. Handles IP rotation without manual intervention. Container DNS is
-   redirected to the per-container dnsmasq (`127.0.0.1`, or a link-local address
-   under krun) via a `resolv.conf` volume mount.
-2. **dig** — pre-start `dig +short A/AAAA` resolution; IPs cached in `profile.allowed`
+   hook with `nftset=` config entries (one per domain, targeting
+   `t40_project_allow_v4` and `t40_project_allow_v6`), automatically populating the
+   nft project-allow sets on every resolution at runtime, before the reply reaches
+   the workload. No pre-resolution at launch (`cache-size=0`). Handles IP rotation
+   without manual intervention. Container DNS is redirected to the per-container
+   dnsmasq (`127.0.0.1`, or a link-local address under krun) via a `resolv.conf`
+   volume mount.
+2. **dig** — pre-start `dig +short A/AAAA` resolution; IPs cached in `resolved.ips`
    with `st_mtime`-based freshness (default 1 hour).
 3. **getent** — fallback when `dig` is also absent.
 
@@ -55,20 +57,23 @@ Users can add custom profiles in `$XDG_CONFIG_HOME/terok/shield/profiles/`.
 Operator deny decisions must survive `shield up` and container restarts.
 The mechanism:
 
-- `deny.list` — a per-container file in `state_dir`; every denied IP is
-  appended here
-- Denied IPs also go into dedicated nft deny sets (`deny_v4` / `deny_v6`),
-  rejected and logged with the `DENIED` prefix; the deny sets are enforced
-  even in bypass mode (`shield down`)
-- On deny: remove from the allow set and `live.allowed`, add to the deny
-  set, append to `deny.list`
-- On allow: if the IP is in `deny.list`, remove it there and from the deny
-  set (un-deny), then add to the allow set and `live.allowed`
-- On reload (`shield_up`): compute effective allow IPs as
-  `(profile.allowed ∪ live.allowed) − deny.list` and repopulate the deny
-  sets from `deny.list`
+- `policy/live` — a per-container runtime overlay in `state_dir`; every
+  runtime allow/deny upserts a `+target` / `-target` line here, and a later
+  verdict flips an earlier one for the same target rather than stacking.
+  Authored (non-runtime) denies live in `policy/20-security-deny`.
+- Denied IPs also go into dedicated nft deny sets (`t20_security_deny_v4` /
+  `t20_security_deny_v6`), rejected and logged with the `DENIED` prefix; the
+  deny sets are enforced even in bypass mode (`shield down`)
+- On deny: remove from the `t40_project_allow` set, add to the
+  `t20_security_deny` set, upsert `-target` into `policy/live`
+- On allow: un-deny from the `t20_security_deny` set if currently denied,
+  add to the `t40_project_allow` set, upsert `+target` into `policy/live`
+  (flipping any prior deny of the same target)
+- On reload (`shield_up`): compute the effective allow IPs as the composed
+  `policy/` tiers plus the runtime overlay, minus the security-deny tier, and
+  repopulate the deny sets from the composed denies
 
-Deny-list reconciliation happens in `state.py` (`StateBundle.read_effective_ips()`)
+Policy composition happens in `state.py` (`StateBundle.read_effective_ips()`)
 before ruleset generation; `nft/rules.py` receives a flat IP list with denied
 entries already subtracted.
 
@@ -87,16 +92,17 @@ across state files are reliable regardless of input notation (e.g.
 │   ├── terok-shield-createRuntime.json
 │   └── terok-shield-poststop.json
 ├── terok-shield-hook              # entrypoint script (stdlib-only)
+├── policy/                        # v15 tiered +/- policy, one file per tier set
+│   ├── 10-override                #   → nft set t10_override      (break-glass allow, above the deny)
+│   ├── 20-security-deny           #   → nft set t20_security_deny (vault hosts + operator deny)
+│   ├── 30-provider-allow          #   → nft set t30_provider_allow (executor roster / provider egress)
+│   ├── 40-project-allow           #   → nft set t40_project_allow (project allowlist: common sets + git remote + custom)
+│   └── live                       #   runtime allow/deny overlay (folded into its owning tiers)
+├── resolved.ips                   # derived: resolved allow IPs (the t40 set seed; dig/getent tiers)
 ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
 ├── upstream.dns                   # persisted upstream DNS address
 ├── dns.tier                       # persisted active DNS tier
 ├── loopback.ports                 # per-container host-loopback TCP ports
-├── profile.allowed                # IPs from DNS resolution (preset)
-├── profile.domains                # domain names for dnsmasq config
-├── live.allowed                   # IPs from manual allow/deny
-├── live.domains                   # domains added at runtime via allow_domain
-├── deny.list                      # persistent deny overrides
-├── denied.domains                 # domains denied at runtime via deny_domain
 ├── dnsmasq.conf                   # generated dnsmasq configuration (dnsmasq tier)
 ├── dnsmasq.pid                    # dnsmasq PID (dnsmasq tier)
 ├── dnsmasq.log                    # dnsmasq query log (for `shield watch`)
@@ -126,18 +132,15 @@ deny_ip(container, ip)
 │
 ├── safe_ip(ip)                 validate + normalize
 │
-├── nft delete element          remove from allow set
+├── nft delete element          remove from t40_project_allow set
 │   (best-effort, catch         (IP may not be in set if
 │    ExecError)                  already denied earlier)
 │
-├── remove from live.allowed    always runs regardless
-│                               of nft success
-│
-├── nft add element             add to deny_v4/v6 set
+├── nft add element             add to t20_security_deny_v4/v6 set
 │   (best-effort)               (blocks dnsmasq re-allow)
 │
-└── append to deny.list         (deduplicated; deny decisions
-                                 stick across restarts)
+└── upsert -ip into policy/live (flips any prior allow; deny
+                                 decisions stick across restarts)
 ```
 
 **`allow_ip` flow:**
@@ -147,15 +150,14 @@ allow_ip(container, ip)
 │
 ├── safe_ip(ip)                 validate + normalize
 │
-├── ip in deny.list?
-│   └── yes → remove from deny.list     (un-deny)
-│             + nft delete from deny set
+├── ip currently denied?
+│   └── yes → nft delete from t20_security_deny set     (un-deny)
 │
-├── nft add element             add to allow set
+├── nft add element             add to t40_project_allow set
 │                               (timeout 0s on the dnsmasq tier,
 │                                so it never auto-expires)
 │
-└── append to live.allowed      (deduplicated)
+└── upsert +ip into policy/live (flips any prior deny of this IP)
 ```
 
 **`shield_up` (effective IP merge):**
@@ -163,24 +165,26 @@ allow_ip(container, ip)
 ```text
 StateBundle.read_effective_ips()
 │
-├── read_allowed_ips()
-|   |
-│   ├── profile.allowed ──┐
-│   └── live.allowed ─────┤
-│                         │
-│                         ▼
-│              union (dedup, profile-first)
+├── resolved.ips             literal allow IPs + resolved
+│                            allow-domains (dig/getent tiers)
 │
-├── read_denied_ips()
-|   |
-│   └── deny.list ──→ deny set
+├── composed policy/ tiers   current literal allow IPs from the
+│   + policy/live overlay    tier files folded with the +/- overlay
+│                            │
+│                            ▼
+│                 union (dedup, resolved-first)
+│
+├── read_denied_ips()        security-deny tier + overlay denies
+│                            │
+│                            ▼
+│                         deny sets
 │
 └── effective = allowed − denied
          │
          ▼
   add_elements_dual()       flat IP list to nft
-  (nft/rules.py boundary)   (deny.list already subtracted;
-                             deny sets repopulated from deny.list)
+  (nft/rules.py boundary)   (denied IPs already subtracted;
+                             deny sets repopulated from composed denies)
 ```
 
 The OCI hook does not merge at start time — it applies the pre-generated

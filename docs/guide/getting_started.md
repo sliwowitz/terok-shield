@@ -90,8 +90,8 @@ terok-shield allow my-container 203.0.113.10
 terok-shield deny my-container example.com
 ```
 
-Changes take effect immediately — no container restart needed. Allowed IPs are
-persisted to `live.allowed`, and denying a preset IP persists it to `deny.list`,
+Changes take effect immediately — no container restart needed. Allow and deny
+decisions are persisted to the `policy/live` overlay (as `+` and `-` lines),
 so both survive `down`/`up` bypass cycles and container restarts.
 
 ## Inspect the firewall
