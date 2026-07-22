@@ -36,7 +36,7 @@ PASTA_HOST_LOOPBACK_MAP = "169.254.1.2"
 # (169.254.169.254).  Rejected ABOVE the override tier, so it is absolute:
 # not even an explicit operator override can reach it (SSRF/metadata floor).
 HARD_DENY_RANGES: tuple[str, ...] = (
-    "169.254.0.0/16",  # RFC 3927 IPv4 link-local — includes cloud-metadata IMDS
+    "169.254.0.0/16",  # RFC 3927 IPv4 link-local — includes cloud-metadata IMDS  # NOSONAR
     "fe80::/10",  # RFC 4291 IPv6 link-local
 )
 
