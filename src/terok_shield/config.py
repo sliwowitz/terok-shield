@@ -11,7 +11,7 @@ a mode backend must satisfy.
 from __future__ import annotations
 
 import enum
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -183,8 +183,19 @@ class ShieldModeBackend(Protocol):
     and preview.
     """
 
-    def pre_start(self, container: str, profiles: list[str]) -> list[str]:
-        """Prepare for container start; return extra podman args."""
+    def pre_start(
+        self,
+        container: str,
+        profiles: list[str],
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+    ) -> list[str]:
+        """Prepare for container start; return extra podman args.
+
+        *security_deny* / *provider_allow* are the caller-generated t20 / t30
+        tiers (see [`Shield.pre_start`][terok_shield.Shield.pre_start]).
+        """
         ...
 
     def allow_ip(self, container: str, ip: str) -> None:

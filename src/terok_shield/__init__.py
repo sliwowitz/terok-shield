@@ -19,7 +19,7 @@ helpers.  Heavy imports are deferred until ``Shield`` is instantiated.
 
 import importlib as _importlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
@@ -346,11 +346,25 @@ class Shield:
             "audit_enabled": self.config.audit_enabled,
         }
 
-    def pre_start(self, container: str, profiles: list[str] | None = None) -> list[str]:
-        """Prepare shield for container start.  Returns extra podman args."""
+    def pre_start(
+        self,
+        container: str,
+        profiles: list[str] | None = None,
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+    ) -> list[str]:
+        """Prepare shield for container start.  Returns extra podman args.
+
+        *security_deny* / *provider_allow* are the generated t20 / t30 tiers
+        (executor's roster projection, carried by sandbox); shield writes them
+        into the bundle so callers pass data, never touch the layout.
+        """
         if profiles is None:
             profiles = list(self.config.default_profiles)
-        result = self._mode.pre_start(container, profiles)
+        result = self._mode.pre_start(
+            container, profiles, security_deny=security_deny, provider_allow=provider_allow
+        )
         self.audit.log_event(container, "setup", detail=f"profiles={','.join(profiles)}")
         return result
 

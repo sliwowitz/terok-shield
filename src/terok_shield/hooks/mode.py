@@ -22,7 +22,7 @@ Orchestrates collaborators per lifecycle phase:
 import ipaddress
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -119,12 +119,27 @@ class HookMode:
 
     # ── Setup (pre_start) ───────────────────────────────
 
-    def pre_start(self, container: str, profiles: list[str]) -> list[str]:
+    def pre_start(
+        self,
+        container: str,
+        profiles: list[str],
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+    ) -> list[str]:
         """Prepare for container start in hook mode.
 
         Installs hooks, composes profiles, resolves DNS, writes
         allowlist, detects DNS tier, sets annotations, and returns
         the podman CLI arguments needed for shield protection.
+
+        Args:
+            security_deny: Hosts/IPs an upstream layer (executor's roster
+                projection, carried by sandbox) generates for the t20
+                security-deny tier — vault hosts denied direct egress.
+            provider_allow: Hosts/IPs generated for the t30 provider-allow
+                tier — agent/provider egress endpoints.  Shield owns writing
+                these tiers so callers pass data, never touch the bundle.
 
         Raises:
             ShieldNeedsSetup: When global hooks are not installed
@@ -151,6 +166,7 @@ class HookMode:
         # the builder reads ports from the bundle (SSOT): later up/down
         # rebuilds use the same source.
         entries = self._profiles.compose_profiles(profiles)
+        self._write_generated_tiers(sd, security_deny, provider_allow)
         self._write_policy_and_resolve(sd, entries, tier)
         StateBundle(sd).upstream_dns.write_text(f"{upstream_dns}\n")
         StateBundle(sd).dns_tier.write_text(f"{tier.value}\n")
@@ -213,6 +229,24 @@ class HookMode:
             "NET_RAW",
         ]
         return args
+
+    def _write_generated_tiers(
+        self, sd: Path, security_deny: Sequence[str], provider_allow: Sequence[str]
+    ) -> None:
+        """Persist the caller-generated t20/t30 tiers into the policy bundle.
+
+        These are the upstream-owned tiers Phase 1 left empty: t20 vault-host
+        denies and t30 provider-allow endpoints, projected by the executor
+        roster and handed in by sandbox.  Shield owns the on-disk layout, so
+        it renders the ``-``/``+`` policy lines and writes them here rather
+        than exposing the bundle;
+        [`EffectivePolicy`][terok_shield.state.EffectivePolicy] already
+        composes both tiers into resolution, dnsmasq domains, and the ruleset.
+        Content-stable (empty input clears the tier).
+        """
+        bundle = StateBundle(sd)
+        bundle.write_tier("security_deny", "".join(f"-{h}\n" for h in security_deny))
+        bundle.write_tier("provider_allow", "".join(f"+{h}\n" for h in provider_allow))
 
     def _write_policy_and_resolve(self, sd: Path, entries: list[str], tier: DnsTier) -> None:
         """Write the composed profiles as the project-allow tier; statically resolve only where needed.
