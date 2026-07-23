@@ -25,15 +25,19 @@ if TYPE_CHECKING:
 
 def _handle_watch(shield: Shield, container: str) -> None:
     """Stream blocked-access events as JSON lines."""
+    from .._confine import confine_to_state
     from ..watch import run_watch
 
+    confine_to_state(shield.config.state_dir)
     run_watch(shield.config.state_dir, container)
 
 
 def _handle_simple_clearance(shield: Shield, container: str) -> None:
     """Run the terminal clearance fallback for hosts without the D-Bus hub."""
+    from .._confine import confine_to_state
     from ..simple_clearance import run_simple_clearance
 
+    confine_to_state(shield.config.state_dir)
     run_simple_clearance(shield.config.state_dir, container)
 
 
