@@ -24,7 +24,7 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from terok_util import CommandDef
+from terok_util import CommandDef, configure
 
 from .. import Shield, ShieldConfig, ShieldMode
 from ..commands import COMMANDS, needs_container
@@ -40,6 +40,9 @@ from ..validation import validate_container_name
 
 def main(argv: list[str] | None = None) -> None:
     """Run the terok-shield CLI."""
+    # One-time unified logging setup: routes every ``getLogger(__name__)`` in
+    # the library to journald (when present) or stderr, with no call-site edits.
+    configure(identifier="terok-shield")
     if argv is None:
         argv = sys.argv[1:]
 
