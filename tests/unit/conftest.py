@@ -26,6 +26,17 @@ sys.modules.setdefault("_oci_state", _oci_state_pkg)
 from ..testfs import CONFIG_FILENAME, CONFIG_ROOT_NAME, STATE_ROOT_NAME
 
 
+@pytest.fixture(autouse=True)
+def _no_self_confinement(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralise the irreversible self-floor so in-process tests never confine pytest.
+
+    ``confine_to_state`` calls Landlock ``restrict_self`` (process-wide and
+    permanent) and ``harden_self`` — stub it out for every unit test.  The real
+    thing is proved on the live kernel in a subprocess (``test_confine``).
+    """
+    monkeypatch.setattr("terok_shield._confine.confine_to_state", lambda _state_dir: None)
+
+
 class _ShieldConfigKwargs(TypedDict, total=False):
     """Optional ``ShieldConfig`` kwargs accepted by ``make_config``."""
 
