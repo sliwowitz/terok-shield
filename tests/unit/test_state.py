@@ -165,6 +165,24 @@ def test_read_effective_ips_includes_runtime_allow_before_reresolve(tmp_path: Pa
     assert bundle.read_effective_ips() == [TEST_IP1, TEST_IP3]
 
 
+def test_read_override_ips_unions_literal_and_cache_ignoring_denies(tmp_path: Path) -> None:
+    """The t10 seed is literal + resolved override IPs; a deny does NOT subtract it."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("override").write_text(f"+{TEST_IP1}\n")  # literal override
+    bundle.override_resolved.write_text(f"{TEST_IP2}\n")  # resolved override domain
+    bundle.tier_path("security_deny").write_text(f"-{TEST_IP1}\n")  # deny is below the override
+    assert bundle.read_override_ips() == [TEST_IP1, TEST_IP2]
+
+
+def test_override_targets_lists_plus_entries(tmp_path: Path) -> None:
+    """override_targets returns the ``+`` override entries (domains + IPs) to resolve."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("override").write_text(f"+{TEST_DOMAIN}\n+{TEST_IP1}\n")
+    assert set(bundle.read_effective().override_targets()) == {TEST_DOMAIN, TEST_IP1}
+
+
 # ── ballast sync contract ────────────────────────────────────────────────────
 
 

@@ -190,11 +190,14 @@ class ShieldModeBackend(Protocol):
         *,
         security_deny: Sequence[str] = (),
         provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
     ) -> list[str]:
         """Prepare for container start; return extra podman args.
 
-        *security_deny* / *provider_allow* are the caller-generated t20 / t30
-        tiers (see [`Shield.pre_start`][terok_shield.Shield.pre_start]).
+        *security_deny* / *provider_allow* / *project_allow* / *override* are the
+        caller-generated t20 / t30 / t40 / t10 tiers
+        (see [`Shield.pre_start`][terok_shield.Shield.pre_start]).
         """
         ...
 

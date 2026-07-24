@@ -143,7 +143,12 @@ def test_pre_start_dispatches_and_logs(make_shield: ShieldHarnessFactory) -> Non
     result = harness.shield.pre_start("test-ctr", ["dev-standard"])
 
     harness.mode.pre_start.assert_called_once_with(
-        "test-ctr", ["dev-standard"], security_deny=(), provider_allow=()
+        "test-ctr",
+        ["dev-standard"],
+        security_deny=(),
+        provider_allow=(),
+        project_allow=(),
+        override=(),
     )
     assert result == ["--network", "pasta:"]
     harness.audit.log_event.assert_called_once_with(
@@ -161,7 +166,7 @@ def test_pre_start_uses_default_profiles(
 
     harness.shield.pre_start("test-ctr")
     harness.mode.pre_start.assert_called_once_with(
-        "test-ctr", ["base"], security_deny=(), provider_allow=()
+        "test-ctr", ["base"], security_deny=(), provider_allow=(), project_allow=(), override=()
     )
 
 

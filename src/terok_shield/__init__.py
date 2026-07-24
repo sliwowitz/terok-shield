@@ -353,17 +353,27 @@ class Shield:
         *,
         security_deny: Sequence[str] = (),
         provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
     ) -> list[str]:
         """Prepare shield for container start.  Returns extra podman args.
 
-        *security_deny* / *provider_allow* are the generated t20 / t30 tiers
-        (executor's roster projection, carried by sandbox); shield writes them
-        into the bundle so callers pass data, never touch the layout.
+        The four tier arguments are the orchestrator-generated policy tiers,
+        which shield writes into the bundle so callers pass data and never touch
+        the layout: *security_deny* → t20 (vault hosts denied direct),
+        *provider_allow* → t30 (provider egress), *project_allow* → t40 (git
+        remote + custom, merged with the composed profiles), *override* → t10
+        (break-glass allow above the deny; single host/IP only).
         """
         if profiles is None:
             profiles = list(self.config.default_profiles)
         result = self._mode.pre_start(
-            container, profiles, security_deny=security_deny, provider_allow=provider_allow
+            container,
+            profiles,
+            security_deny=security_deny,
+            provider_allow=provider_allow,
+            project_allow=project_allow,
+            override=override,
         )
         self.audit.log_event(container, "setup", detail=f"profiles={','.join(profiles)}")
         return result

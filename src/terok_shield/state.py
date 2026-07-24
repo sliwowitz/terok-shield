@@ -168,6 +168,17 @@ class EffectivePolicy:
         """Admitted domains + literal IPs to resolve (``localhost`` excluded) — the resolver input."""
         return _dedup([e.target for e in self._allows() if e.target != LOCALHOST])
 
+    def override_targets(self) -> list[str]:
+        """Break-glass override domains + literal IPs to resolve (``localhost`` excluded).
+
+        The t10 override is a *separate* above-deny nft set (see
+        [`_allows`][terok_shield.state.EffectivePolicy._allows]), so it is
+        resolved and seeded independently of the allow tiers.
+        """
+        return _dedup(
+            [e.target for e in self.override if e.action == "+" and e.target != LOCALHOST]
+        )
+
 
 STATE_DIR_MODE = 0o700
 """Permission mode for ``state_dir`` and its subdirectories.
@@ -280,6 +291,18 @@ class StateBundle:
         [`policy_mtime`][terok_shield.state.StateBundle.policy_mtime].
         """
         return self.state_dir / "resolved.ips"
+
+    @property
+    def override_resolved(self) -> Path:
+        """Derived per-container cache of resolved override IPs (the t10 set seed).
+
+        The t10 override sits *above* the security-deny tier and is a separate
+        nft set, so it is resolved and cached apart from the allow tiers.
+        Statically resolved at pre_start — break-glass entries are rare and
+        specific, and dnsmasq interception would populate t40 (below the deny),
+        defeating the override.
+        """
+        return self.state_dir / "override_resolved.ips"
 
     def policy_mtime(self) -> float:
         """Newest mtime among the policy files (``0.0`` when none exist yet).
@@ -409,6 +432,27 @@ class StateBundle:
         )
         seed = [ip for ip in cached if ip not in denied]
         return _dedup(seed + eff.effective_ips())
+
+    def read_override_ips(self) -> list[str]:
+        """The tier-10 override set seed: literal override IPs + resolved override domains.
+
+        Unions the current literal ``+`` override IPs with the statically
+        resolved [`override_resolved`][terok_shield.state.StateBundle.override_resolved]
+        cache.  Denies are *not* subtracted — the whole point of an override is
+        to sit above the security-deny tier.
+        """
+        eff = self.read_effective()
+        literal = ip_targets([e for e in eff.override if e.action == "+"])
+        cached = (
+            [
+                line.strip()
+                for line in self.override_resolved.read_text().splitlines()
+                if line.strip()
+            ]
+            if self.override_resolved.is_file()
+            else []
+        )
+        return _dedup(literal + cached)
 
     # ── Setup ──────────────────────────────────────────────
 
