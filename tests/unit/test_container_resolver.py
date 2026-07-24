@@ -89,8 +89,8 @@ class TestResolveStateDir:
                 assert resolver.resolve_state_dir("ctr") is None
 
 
-class TestExtractStateDir:
-    """Hardening: each type-check branch of ``_extract_state_dir`` hits ``None``.
+class TestAnnotations:
+    """Hardening: each type-check branch of ``_annotations`` hits ``None``.
 
     These are the tiny shape-guards that keep the resolver robust against
     a future podman release changing its JSON contract — each deserves a
@@ -98,10 +98,38 @@ class TestExtractStateDir:
     """
 
     def test_head_is_not_dict(self) -> None:
-        assert resolver._extract_state_dir([["not", "a", "dict"]]) is None
+        assert resolver._annotations([["not", "a", "dict"]]) is None
 
     def test_config_is_not_dict(self) -> None:
-        assert resolver._extract_state_dir([{"Config": "not-a-dict"}]) is None
+        assert resolver._annotations([{"Config": "not-a-dict"}]) is None
 
     def test_annotations_is_not_dict(self) -> None:
-        assert resolver._extract_state_dir([{"Config": {"Annotations": "not-a-dict"}}]) is None
+        assert resolver._annotations([{"Config": {"Annotations": "not-a-dict"}}]) is None
+
+
+class TestResolveShieldVersion:
+    """``resolve_shield_version`` reads the ``terok.shield.version`` annotation."""
+
+    def test_returns_version_int(self) -> None:
+        with mock.patch.object(resolver.shutil, "which", return_value="/usr/bin/podman"):
+            out = _fake_inspect_output({"terok.shield.version": "15"})
+            with mock.patch.object(
+                resolver.subprocess, "run", return_value=mock.MagicMock(returncode=0, stdout=out)
+            ):
+                assert resolver.resolve_shield_version("ctr") == 15
+
+    def test_missing_annotation_is_none(self) -> None:
+        with mock.patch.object(resolver.shutil, "which", return_value="/usr/bin/podman"):
+            out = _fake_inspect_output({})
+            with mock.patch.object(
+                resolver.subprocess, "run", return_value=mock.MagicMock(returncode=0, stdout=out)
+            ):
+                assert resolver.resolve_shield_version("ctr") is None
+
+    def test_non_integer_annotation_is_none(self) -> None:
+        with mock.patch.object(resolver.shutil, "which", return_value="/usr/bin/podman"):
+            out = _fake_inspect_output({"terok.shield.version": "v15"})
+            with mock.patch.object(
+                resolver.subprocess, "run", return_value=mock.MagicMock(returncode=0, stdout=out)
+            ):
+                assert resolver.resolve_shield_version("ctr") is None
