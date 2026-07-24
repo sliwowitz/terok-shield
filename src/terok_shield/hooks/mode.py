@@ -57,6 +57,7 @@ from ..nft.constants import (
 from ..nft.rules import (
     RulesetBuilder,
     add_deny_elements_dual,
+    add_override_elements_dual,
     delete_deny_elements_dual,
     parse_set_elements,
     restore_elements,
@@ -126,6 +127,8 @@ class HookMode:
         *,
         security_deny: Sequence[str] = (),
         provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
     ) -> list[str]:
         """Prepare for container start in hook mode.
 
@@ -138,12 +141,21 @@ class HookMode:
                 projection, carried by sandbox) generates for the t20
                 security-deny tier — vault hosts denied direct egress.
             provider_allow: Hosts/IPs generated for the t30 provider-allow
-                tier — agent/provider egress endpoints.  Shield owns writing
-                these tiers so callers pass data, never touch the bundle.
+                tier — agent/provider egress endpoints.
+            project_allow: Hosts/IPs authored by the orchestrator for the t40
+                project-allow tier (git remote, custom domains) — merged with
+                the composed profiles.
+            override: Hosts/IPs authored for the t10 break-glass override tier,
+                which sits *above* the security-deny.  Single host/IP only (no
+                CIDR); statically resolved and seeded into a separate nft set.
+                Shield owns writing every tier, so callers pass data, never
+                touch the bundle.
 
         Raises:
             ShieldNeedsSetup: When global hooks are not installed
                 (see ``WORKAROUND(hooks-dir-persist)``).
+            ValueError: When an *override* entry is a CIDR/range (a break-glass
+                override must name one host, never widen access to a subnet).
         """
         sd = self._config.state_dir.resolve()
         info = self._get_podman_info()
@@ -165,9 +177,10 @@ class HookMode:
         # ``loopback.ports`` is persisted before ``_write_ruleset`` runs so
         # the builder reads ports from the bundle (SSOT): later up/down
         # rebuilds use the same source.
-        entries = self._profiles.compose_profiles(profiles)
-        self._write_generated_tiers(sd, security_deny, provider_allow)
+        entries = self._profiles.compose_profiles(profiles) + list(project_allow)
+        self._write_generated_tiers(sd, security_deny, provider_allow, override)
         self._write_policy_and_resolve(sd, entries, tier)
+        self._resolve_override(sd)
         StateBundle(sd).upstream_dns.write_text(f"{upstream_dns}\n")
         StateBundle(sd).dns_tier.write_text(f"{tier.value}\n")
         StateBundle(sd).loopback_ports.write_text(
@@ -231,22 +244,44 @@ class HookMode:
         return args
 
     def _write_generated_tiers(
-        self, sd: Path, security_deny: Sequence[str], provider_allow: Sequence[str]
+        self,
+        sd: Path,
+        security_deny: Sequence[str],
+        provider_allow: Sequence[str],
+        override: Sequence[str],
     ) -> None:
-        """Persist the caller-generated t20/t30 tiers into the policy bundle.
+        """Persist the caller-generated t20/t30/t10 tiers into the policy bundle.
 
-        These are the upstream-owned tiers Phase 1 left empty: t20 vault-host
-        denies and t30 provider-allow endpoints, projected by the executor
-        roster and handed in by sandbox.  Shield owns the on-disk layout, so
-        it renders the ``-``/``+`` policy lines and writes them here rather
-        than exposing the bundle;
-        [`EffectivePolicy`][terok_shield.state.EffectivePolicy] already
-        composes both tiers into resolution, dnsmasq domains, and the ruleset.
+        These are the orchestrator-owned tiers Phase 1 left empty: t20 vault-host
+        denies, t30 provider-allow endpoints, and t10 break-glass overrides.
+        Shield owns the on-disk layout, so it renders the ``-``/``+`` policy lines
+        and writes them here rather than exposing the bundle;
+        [`EffectivePolicy`][terok_shield.state.EffectivePolicy] already composes
+        every tier into resolution, dnsmasq domains, and the ruleset.
         Content-stable (empty input clears the tier).
         """
         bundle = StateBundle(sd)
         bundle.write_tier("security_deny", "".join(f"-{h}\n" for h in security_deny))
         bundle.write_tier("provider_allow", "".join(f"+{h}\n" for h in provider_allow))
+        bundle.write_tier("override", "".join(f"+{h}\n" for h in _validate_override(override)))
+
+    def _resolve_override(self, sd: Path) -> None:
+        """Statically resolve the t10 break-glass targets into the override seed cache.
+
+        The override tier is a *separate* above-deny nft set, resolved
+        independently of the allow tiers and statically on every DNS tier —
+        break-glass entries are rare and specific, and dnsmasq interception
+        would populate t40 (below the deny), defeating the override.  An empty
+        override clears the cache.
+        """
+        bundle = StateBundle(sd)
+        targets = bundle.read_effective().override_targets()
+        if not targets:
+            bundle.override_resolved.unlink(missing_ok=True)
+            return
+        self._dns.resolve_and_cache(
+            targets, bundle.override_resolved, source_mtime=bundle.policy_mtime()
+        )
 
     def _write_policy_and_resolve(self, sd: Path, entries: list[str], tier: DnsTier) -> None:
         """Write the composed profiles as the project-allow tier; statically resolve only where needed.
@@ -291,9 +326,12 @@ class HookMode:
             set_timeout=set_timeout,
         )
         ips = StateBundle(sd).read_effective_ips()
+        override_ips = list(StateBundle(sd).read_override_ips())
         denied_ips = list(StateBundle(sd).read_denied_ips())
         ruleset = ruleset_builder.build_hook()
         ruleset += ruleset_builder.add_elements_dual(ips)
+        if override_ips:
+            ruleset += add_override_elements_dual(override_ips)
         if denied_ips:
             ruleset += add_deny_elements_dual(denied_ips)
         StateBundle(sd).ruleset.write_text(ruleset)
@@ -796,6 +834,19 @@ class HookMode:
 
 
 # ── Module-level helpers ────────────────────────────────
+
+
+def _validate_override(override: Sequence[str]) -> list[str]:
+    """Return the override hosts, rejecting CIDR/range entries.
+
+    A t10 break-glass override sits above the security-deny tier, so widening
+    it to a subnet would punch a whole range straight through the firewall.
+    Each entry must name a single host or IP; a ``/`` (CIDR) is a caller
+    contract violation and fails the launch closed.
+    """
+    if bad := [h for h in override if "/" in h]:
+        raise ValueError(f"t10 override entries must be single hosts/IPs, not CIDR: {bad}")
+    return list(override)
 
 
 def _dnsmasq_bind(runtime: ShieldRuntime) -> str:

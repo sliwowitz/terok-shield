@@ -28,10 +28,12 @@ from terok_shield.run import ExecError
 
 from ..testfs import BIN_DIR_NAME, HOOK_ENTRYPOINT_NAME, HOOKS_DIR_NAME
 from ..testnet import (
+    BROAD_CIDR_8,
     CONTAINER_HOSTNAME,
     IPV6_CLOUDFLARE,
     SLIRP4NETNS_GATEWAY,
     TEST_DOMAIN,
+    TEST_DOMAIN2,
     TEST_IP1,
     TEST_IP2,
     TEST_IP3,
@@ -1561,6 +1563,68 @@ def test_pre_start_clears_generated_tiers_when_absent(
     harness.mode.pre_start("test", ["dev-standard"])
 
     assert bundle.tier_path("provider_allow").read_text() == ""
+
+
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_pre_start_merges_project_allow_into_t40(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """pre_start(project_allow=…) merges authored hosts into the t40 project-allow tier."""
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = [TEST_DOMAIN2]
+
+    harness.mode.pre_start("test", ["dev-standard"], project_allow=[TEST_DOMAIN])
+
+    tier = StateBundle(config.state_dir).tier_path("project_allow").read_text()
+    assert f"+{TEST_DOMAIN}" in tier  # authored
+    assert f"+{TEST_DOMAIN2}" in tier  # composed profile — both land in t40
+
+
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_pre_start_writes_override_tier_and_seeds_t10(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """pre_start(override=…) writes t10 and seeds the override nft set (above the deny)."""
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+
+    harness.mode.pre_start("test", ["dev-standard"], override=[TEST_IP1])
+
+    bundle = StateBundle(config.state_dir)
+    assert f"+{TEST_IP1}" in bundle.tier_path("override").read_text()
+    ruleset = bundle.ruleset.read_text()
+    assert "t10_override_v4" in ruleset
+    assert TEST_IP1 in ruleset
+
+
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_pre_start_override_rejects_cidr(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """A CIDR in the override tier fails the launch closed — no subnet break-glass."""
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+
+    with pytest.raises(ValueError, match="CIDR"):
+        harness.mode.pre_start("test", ["dev-standard"], override=[BROAD_CIDR_8])
 
 
 # ── Container ID persistence ─────────────────────────────
