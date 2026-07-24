@@ -115,9 +115,7 @@ from pathlib import Path
 
 from terok_shield import Shield, ShieldConfig
 
-shield = Shield(
-    ShieldConfig(state_dir=Path.home() / ".local/state/terok/shield/containers/my-ctr")
-)
+shield = Shield(ShieldConfig(state_dir=Path.home() / ".local/state/terok/shield/containers/my-ctr"))
 extra_args = shield.pre_start("my-ctr", ["dev-standard"])
 # pass extra_args to podman run
 ```
