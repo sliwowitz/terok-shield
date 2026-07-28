@@ -602,7 +602,7 @@ def test_reload_writes_deny_sinkholes(tmp_path: Path) -> None:
     bundle.dnsmasq_pid.write_text("12345\n")
     bundle.dnsmasq_conf.write_text(f"listen-address={DNSMASQ_BIND_DEFAULT}\n")
 
-    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], [TEST_DOMAIN2])
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], deny_domains=[TEST_DOMAIN2])
 
     conf = bundle.dnsmasq_conf.read_text()
     assert f"nftset=/{TEST_DOMAIN}/" in conf

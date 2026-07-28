@@ -44,9 +44,9 @@ def reload(
     state_dir: Path,
     upstream_dns: str,
     domains: list[str],
+    *,
     deny_domains: Sequence[str] = (),
     override_domains: Sequence[str] = (),
-    *,
     container: str,
     runner: CommandRunner,
 ) -> None:

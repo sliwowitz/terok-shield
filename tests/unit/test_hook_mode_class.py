@@ -1825,6 +1825,33 @@ def test_refresh_rewrites_tiers_and_ruleset(
     assert TEST_IP1 not in ruleset
 
 
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_refresh_reuses_persisted_network_mode(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """refresh() derives its gateways from the bundle, never from a fresh ``podman info``.
+
+    A restart must rebuild for the network mode the container was launched
+    with — re-detecting could disagree with the mounts and annotations, and
+    would put a ``podman info`` probe on an interactive path.
+    """
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+    harness.mode.pre_start("test", ["dev-standard"])
+    assert StateBundle(config.state_dir).network_mode.read_text().strip() == "pasta"
+    harness.runner.run.reset_mock()
+
+    harness.mode.refresh(["dev-standard"])
+
+    assert not [c for c in harness.runner.run.call_args_list if "info" in c.args[0]]
+
+
 def test_refresh_without_prepared_bundle_raises(
     make_hook_mode: HookModeHarnessFactory,
     make_config: ConfigFactory,

@@ -173,22 +173,26 @@ class HookMode:
         upstream_dns = _upstream_dns_for_mode(mode)
         gw_v4, gw_v6 = self._gateways = _gateways_for_mode(mode)
 
-        # Resolve DNS, write allowlists, generate ruleset + dnsmasq config.
-        # ``loopback.ports`` is persisted before ``_write_ruleset`` runs so
-        # the builder reads ports from the bundle (SSOT): later up/down
-        # rebuilds use the same source.
-        entries = self._profiles.compose_profiles(profiles) + list(project_allow)
-        self._write_generated_tiers(sd, security_deny, provider_allow, override)
-        self._write_policy_and_resolve(sd, entries, tier)
-        self._resolve_override(sd)
-        self._resolve_security_deny(sd)
-        StateBundle(sd).upstream_dns.write_text(f"{upstream_dns}\n")
-        StateBundle(sd).dns_tier.write_text(f"{tier.value}\n")
-        StateBundle(sd).loopback_ports.write_text(
-            "".join(f"{p}\n" for p in self._config.loopback_ports)
+        # Persist the launch-detected facts first: they are what ``refresh``
+        # reuses instead of re-detecting, and ``_write_ruleset`` reads the
+        # ports back out of the bundle (SSOT) rather than off the config, so
+        # later up/down rebuilds share one source.
+        bundle = StateBundle(sd)
+        bundle.upstream_dns.write_text(f"{upstream_dns}\n")
+        bundle.dns_tier.write_text(f"{tier.value}\n")
+        bundle.network_mode.write_text(f"{mode}\n")
+        bundle.loopback_ports.write_text("".join(f"{p}\n" for p in self._config.loopback_ports))
+        self._author_policy(
+            sd,
+            profiles,
+            tier,
+            upstream_dns,
+            (gw_v4, gw_v6),
+            security_deny=security_deny,
+            provider_allow=provider_allow,
+            project_allow=project_allow,
+            override=override,
         )
-        self._write_ruleset(sd, tier, upstream_dns, gw_v4, gw_v6)
-        self._write_dnsmasq_config_or_scrub(sd, tier, upstream_dns)
 
         # Build podman args
         args = self._build_network_args(mode)
@@ -261,38 +265,69 @@ class HookMode:
         refreshes the static-resolution caches, and regenerates
         ``ruleset.nft`` + the dnsmasq config — so the OCI hook applies
         *current* policy at the next ``podman start`` instead of replaying
-        the bundle frozen at creation.  Deliberately reuses the persisted
-        DNS tier, upstream DNS, and loopback ports: the container's mounts
-        and annotations were built for those, and a fresh detection could
-        disagree with them.
+        the bundle frozen at creation.  Reuses every launch-detected fact the
+        bundle persisted — DNS tier, upstream DNS, network mode, loopback
+        ports — rather than re-detecting: the container's mounts and
+        annotations were built for those, a fresh detection could disagree
+        with them, and a restart stays free of ``podman info``.
 
         Raises:
             RuntimeError: When the bundle carries no persisted DNS tier /
-                upstream DNS (``pre_start`` never ran for this state dir).
+                upstream DNS / network mode (``pre_start`` never ran for this
+                state dir).
             ValueError: When an *override* entry is a CIDR/range (same
                 validation as ``pre_start``).
         """
         sd = self._config.state_dir.resolve()
-        tier_str = (
-            StateBundle(sd).dns_tier.read_text().strip()
-            if StateBundle(sd).dns_tier.is_file()
-            else ""
-        )
+        bundle = StateBundle(sd)
+        tier_str = bundle.dns_tier.read_text().strip() if bundle.dns_tier.is_file() else ""
+        mode = bundle.network_mode.read_text().strip() if bundle.network_mode.is_file() else ""
         upstream_dns = self._read_upstream_dns()
-        if not tier_str or not upstream_dns:
+        if not tier_str or not upstream_dns or not mode:
             raise RuntimeError(
-                "shield bundle has no persisted DNS tier / upstream DNS — "
+                "shield bundle has no persisted DNS tier / upstream DNS / network mode — "
                 "pre_start never completed for this container; re-create the task"
             )
-        tier = DnsTier(tier_str)
+        self._gateways = _gateways_for_mode(mode)
+        self._author_policy(
+            sd,
+            profiles,
+            DnsTier(tier_str),
+            upstream_dns,
+            self._gateways,
+            security_deny=security_deny,
+            provider_allow=provider_allow,
+            project_allow=project_allow,
+            override=override,
+        )
+
+    def _author_policy(
+        self,
+        sd: Path,
+        profiles: list[str],
+        tier: DnsTier,
+        upstream_dns: str,
+        gateways: tuple[str, str],
+        *,
+        security_deny: Sequence[str],
+        provider_allow: Sequence[str],
+        project_allow: Sequence[str],
+        override: Sequence[str],
+    ) -> None:
+        """Write every tier, refresh the seed caches, regenerate the artifacts.
+
+        The half of [`pre_start`][terok_shield.hooks.mode.HookMode.pre_start]
+        that [`refresh`][terok_shield.hooks.mode.HookMode.refresh] repeats.  A
+        launch and a plain restart must derive the *same* bundle from the same
+        tier data, so a new tier or a new resolution step belongs here — where
+        neither path can miss it.
+        """
         entries = self._profiles.compose_profiles(profiles) + list(project_allow)
         self._write_generated_tiers(sd, security_deny, provider_allow, override)
         self._write_policy_and_resolve(sd, entries, tier)
         self._resolve_override(sd)
         self._resolve_security_deny(sd)
-        mode = self._get_podman_info().network_mode or "pasta"
-        gw_v4, gw_v6 = self._gateways = _gateways_for_mode(mode)
-        self._write_ruleset(sd, tier, upstream_dns, gw_v4, gw_v6)
+        self._write_ruleset(sd, tier, upstream_dns, *gateways)
         self._write_dnsmasq_config_or_scrub(sd, tier, upstream_dns)
 
     def _write_generated_tiers(
@@ -323,16 +358,11 @@ class HookMode:
         The override tier is a *separate* above-deny nft set, resolved
         independently of the allow tiers and statically on every DNS tier —
         break-glass entries are rare and specific, and dnsmasq interception
-        would populate t40 (below the deny), defeating the override.  An empty
-        override clears the cache.
+        would populate t40 (below the deny), defeating the override.
         """
         bundle = StateBundle(sd)
-        targets = bundle.read_effective().override_targets()
-        if not targets:
-            bundle.override_resolved.unlink(missing_ok=True)
-            return
-        self._dns.resolve_and_cache(
-            targets, bundle.override_resolved, source_mtime=bundle.policy_mtime()
+        self._resolve_tier(
+            bundle, bundle.read_effective().override_targets(), bundle.override_resolved
         )
 
     def _resolve_security_deny(self, sd: Path) -> None:
@@ -344,16 +374,17 @@ class HookMode:
         and an address-level deny also catches direct-IP access that never
         consults the DNS plane.  Resolved statically on every DNS tier —
         dnsmasq interception only ever *adds* to allow sets, so it can play
-        no part in populating a deny.  An empty deny tier clears the cache.
+        no part in populating a deny.
         """
         bundle = StateBundle(sd)
-        targets = bundle.read_effective().deny_targets()
+        self._resolve_tier(bundle, bundle.read_effective().deny_targets(), bundle.deny_resolved)
+
+    def _resolve_tier(self, bundle: StateBundle, targets: list[str], cache: Path) -> None:
+        """Refresh one tier's static-resolution cache; an empty tier clears it."""
         if not targets:
-            bundle.deny_resolved.unlink(missing_ok=True)
+            cache.unlink(missing_ok=True)
             return
-        self._dns.resolve_and_cache(
-            targets, bundle.deny_resolved, source_mtime=bundle.policy_mtime()
-        )
+        self._dns.resolve_and_cache(targets, cache, source_mtime=bundle.policy_mtime())
 
     def _write_policy_and_resolve(self, sd: Path, entries: list[str], tier: DnsTier) -> None:
         """Write the composed profiles as the project-allow tier; statically resolve only where needed.
@@ -526,8 +557,8 @@ class HookMode:
             state_dir,
             upstream,
             domains,
-            dnsmasq.read_denied_domains(state_dir),
-            dnsmasq.read_override_domains(state_dir),
+            deny_domains=dnsmasq.read_denied_domains(state_dir),
+            override_domains=dnsmasq.read_override_domains(state_dir),
             container=container,
             runner=self._runner,
         )

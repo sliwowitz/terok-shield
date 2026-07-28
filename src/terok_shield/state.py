@@ -28,6 +28,7 @@ Bundle layout::
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
     ├── dns.tier                       # active DNS tier (dig/getent/dnsmasq)
+    ├── network.mode                   # rootless network mode (pasta/slirp4netns)
     ├── loopback.ports                 # per-container host-loopback TCP ports (newline-separated)
     ├── dnsmasq.conf                   # generated dnsmasq configuration
     ├── dnsmasq.pid                    # dnsmasq PID (in container netns)
@@ -59,6 +60,13 @@ from .policy import (
 def _dedup(items: list[str]) -> list[str]:
     """Deduplicate preserving first-seen order."""
     return list(dict.fromkeys(items))
+
+
+def _read_cached_ips(cache: Path) -> list[str]:
+    """Non-blank lines of a derived resolution cache; an absent cache is empty."""
+    if not cache.is_file():
+        return []
+    return [line.strip() for line in cache.read_text().splitlines() if line.strip()]
 
 
 BUNDLE_VERSION = 16
@@ -269,6 +277,17 @@ class StateBundle:
         return self.state_dir / "dns.tier"
 
     @property
+    def network_mode(self) -> Path:
+        """Path to the persisted rootless network mode (``pasta``/``slirp4netns``).
+
+        Detected once at ``pre_start`` and read back by ``HookMode.refresh``,
+        which derives the ruleset's gateway addresses from it — a restart
+        rebuilds the bundle without paying for a ``podman info`` probe, and
+        cannot pick a mode the running container was not launched with.
+        """
+        return self.state_dir / "network.mode"
+
+    @property
     def loopback_ports(self) -> Path:
         """Path to the per-container host-loopback TCP ports list.
 
@@ -459,12 +478,7 @@ class StateBundle:
         from — a denied *domain* must keep denying by address across every
         rebuild, or the bypass posture would silently un-deny it.
         """
-        cached = (
-            [line.strip() for line in self.deny_resolved.read_text().splitlines() if line.strip()]
-            if self.deny_resolved.is_file()
-            else []
-        )
-        return set(self.read_effective().deny_ips()) | set(cached)
+        return set(self.read_effective().deny_ips()) | set(_read_cached_ips(self.deny_resolved))
 
     def read_effective_ips(self) -> list[str]:
         """The tier-40 project-allow set seed: resolved allow IPs minus denied.
@@ -477,12 +491,7 @@ class StateBundle:
         """
         eff = self.read_effective()
         denied = set(eff.deny_ips())
-        cached = (
-            [line.strip() for line in self.resolved_cache.read_text().splitlines() if line.strip()]
-            if self.resolved_cache.is_file()
-            else []
-        )
-        seed = [ip for ip in cached if ip not in denied]
+        seed = [ip for ip in _read_cached_ips(self.resolved_cache) if ip not in denied]
         return _dedup(seed + eff.effective_ips())
 
     def read_override_ips(self) -> list[str]:
@@ -495,16 +504,7 @@ class StateBundle:
         """
         eff = self.read_effective()
         literal = ip_targets([e for e in eff.override if e.action == "+"])
-        cached = (
-            [
-                line.strip()
-                for line in self.override_resolved.read_text().splitlines()
-                if line.strip()
-            ]
-            if self.override_resolved.is_file()
-            else []
-        )
-        return _dedup(literal + cached)
+        return _dedup(literal + _read_cached_ips(self.override_resolved))
 
     # ── Setup ──────────────────────────────────────────────
 
