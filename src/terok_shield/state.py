@@ -182,9 +182,10 @@ class EffectivePolicy:
     def override_targets(self) -> list[str]:
         """Break-glass override domains + literal IPs to resolve (``localhost`` excluded).
 
-        The t10 override is a *separate* above-deny nft set (see
-        [`_allows`][terok_shield.state.EffectivePolicy._allows]), so it is
-        resolved and seeded independently of the allow tiers.
+        The t10 override is a *separate* above-deny nft set — not part of the
+        ordinary allow tiers
+        ([`allow_targets`][terok_shield.state.EffectivePolicy.allow_targets]),
+        so it is resolved and seeded independently.
         """
         return _dedup(
             [e.target for e in self.override if e.action == "+" and e.target != LOCALHOST]

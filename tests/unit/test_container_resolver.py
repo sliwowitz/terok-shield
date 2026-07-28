@@ -118,6 +118,11 @@ class TestResolveShieldVersion:
             ):
                 assert resolver.resolve_shield_version("ctr") == 15
 
+    def test_absent_container_is_none(self) -> None:
+        """No podman (or no inspect record) → "cannot determine", never a crash."""
+        with mock.patch.object(resolver.shutil, "which", return_value=None):
+            assert resolver.resolve_shield_version("ctr") is None
+
     def test_missing_annotation_is_none(self) -> None:
         with mock.patch.object(resolver.shutil, "which", return_value="/usr/bin/podman"):
             out = _fake_inspect_output({})
