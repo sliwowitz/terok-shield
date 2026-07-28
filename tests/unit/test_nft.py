@@ -36,6 +36,7 @@ from terok_shield.nft.rules import (
 )
 
 from ..testnet import (
+    AWS_IMDS_V6,
     IPV4_CIDR_HOST_BITS,
     IPV4_CIDR_HOST_BITS_CANONICAL,
     IPV6_CLOUDFLARE,
@@ -227,6 +228,22 @@ def test_hook_ruleset_tier_order_is_authority_order() -> None:
     private = rs.index(PRIVATE_RANGES[0])  # 10.0.0.0/8
     allow = rs.index("@t40_project_allow_v4")
     assert hard_deny < override < deny < private < allow
+
+
+def test_v6_imds_floor_is_absolute() -> None:
+    """The AWS v6 metadata endpoint is hard-denied ABOVE the override tier.
+
+    It lives inside ULA ``fc00::/7``, whose reject sits *below* the override
+    — so without its own t00 entry, a deliberate ULA carve-out override
+    would reach the v6 metadata service and the absolute-IMDS guarantee
+    would be v4-only.
+    """
+    rs = RulesetBuilder().build_hook()
+    imds = rs.index(f"ip6 daddr {AWS_IMDS_V6} ")
+    assert imds < rs.index("@t10_override_v4")
+    # Bare-address form: nft strips /128 on listing, so verification
+    # round-trips only the bare literal.
+    assert f"{AWS_IMDS_V6}/128" not in rs
 
 
 # ── Terminal deny rule (BLOCKED prefix) ───────────────

@@ -38,6 +38,13 @@ PASTA_HOST_LOOPBACK_MAP = "169.254.1.2"
 HARD_DENY_RANGES: tuple[str, ...] = (
     "169.254.0.0/16",  # RFC 3927 IPv4 link-local — includes cloud-metadata IMDS  # NOSONAR
     "fe80::/10",  # RFC 4291 IPv6 link-local
+    # AWS IMDS IPv6 endpoint.  Pinned here even though it falls inside ULA
+    # fc00::/7: the ULA reject lives in PRIVATE_RANGES, *below* the override
+    # tier, so without this entry an operator override carving out ULA space
+    # could reach the v6 metadata service — the absolute-IMDS guarantee
+    # would be v4-only.  Bare address (no /128): nft strips a /128 prefix
+    # when listing, so the verifier's literal round-trip needs the bare form.
+    "fd00:ec2::254",
 )
 
 # PRIVATE_RANGES — RFC 1918 + RFC 4193 (ULA): the private LAN.  Denied by
