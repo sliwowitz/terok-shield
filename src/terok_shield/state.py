@@ -23,6 +23,8 @@ Bundle layout::
     │   ├── 40-project-allow           #   → t40_project_allow
     │   └── live                       #   runtime overlay (folded into its tiers)
     ├── resolved.ips                   # derived: resolved allow IPs (t40 set seed)
+    ├── override_resolved.ips          # derived: resolved t10 override IPs (above-deny seed)
+    ├── deny_resolved.ips              # derived: resolved t20 security-deny IPs (deny seed)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
     ├── dns.tier                       # active DNS tier (dig/getent/dnsmasq)
@@ -73,9 +75,11 @@ stale on-disk entrypoint — bump it whenever the entrypoint *protocol*
 changes even if the file layout itself is unchanged, so that
 ``terok setup`` rewrites the script instead of short-circuiting.
 
-Current shape (v16): v15 plus the derived ``deny_resolved.ips`` cache —
-the statically resolved t20 security-deny seed, which the deny set is
-repopulated from on every ``shield down``/``up`` rebuild.  (v15
+Current shape (v16): v15 plus two derived seed caches —
+``override_resolved.ips`` (t10 break-glass) and ``deny_resolved.ips``
+(t20 security-deny).  Both tiers are now statically resolved, so each is
+repopulated *by address* on every ``shield down``/``up`` rebuild instead
+of depending on the DNS plane to re-learn it.  (v15
 replaced the six v14 split allow/deny files with the tiered ``policy/``
 bundle of unified ``+``/``-`` files plus the derived ``resolved.ips``
 cache.)  Earlier shapes are recoverable via
