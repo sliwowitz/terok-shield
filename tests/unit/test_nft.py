@@ -682,6 +682,13 @@ def test_bypass_ruleset_includes_deny_sets() -> None:
     assert _DENY_LOG_PREFIX in rs
 
 
+def test_bypass_ruleset_keeps_override_above_deny() -> None:
+    """Bypass mode keeps the t10 override match above the deny — a break-glass
+    host must stay reachable in every posture that enforces the deny."""
+    rs = RulesetBuilder().build_bypass()
+    assert rs.index("@t10_override_v4") < rs.index("@t20_security_deny_v4")
+
+
 def test_bypass_ruleset_emits_loopback_port_rules() -> None:
     """Host-loopback-proxy port exceptions survive in bypass mode, before private-range reject."""
     ruleset = RulesetBuilder(loopback_ports=(9418,)).build_bypass()

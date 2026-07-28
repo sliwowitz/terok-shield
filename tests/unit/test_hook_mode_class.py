@@ -1610,6 +1610,66 @@ def test_pre_start_writes_override_tier_and_seeds_t10(
 
 
 @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_pre_start_statically_resolves_security_deny(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """t20 domains are statically resolved into the deny cache on every DNS tier.
+
+    The deny must hold by *address*: it is what ``shield down`` repopulates
+    the deny set from, and dnsmasq interception can never populate a deny.
+    The resolved IPs must reach the pre-generated ruleset's deny elements.
+    """
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+    bundle = StateBundle(config.state_dir)
+
+    def _fake_resolve(targets: list[str], cache_path: Path, **_kw: object) -> None:
+        if cache_path == bundle.deny_resolved:
+            cache_path.write_text(f"{TEST_IP2}\n")
+
+    harness.dns.resolve_and_cache.side_effect = _fake_resolve
+
+    harness.mode.pre_start("test", ["dev-standard"], security_deny=[TEST_DOMAIN])
+
+    deny_calls = [
+        c for c in harness.dns.resolve_and_cache.call_args_list if c.args[1] == bundle.deny_resolved
+    ]
+    assert len(deny_calls) == 1
+    assert TEST_DOMAIN in deny_calls[0].args[0]
+    ruleset = bundle.ruleset.read_text()
+    assert "t20_security_deny_v4" in ruleset
+    assert TEST_IP2 in ruleset
+
+
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_pre_start_clears_stale_deny_cache_when_deny_tier_empties(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """An emptied deny tier removes the stale resolved-deny cache."""
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+    bundle = StateBundle(config.state_dir)
+    bundle.ensure_dirs()
+    bundle.deny_resolved.write_text(f"{TEST_IP2}\n")  # left by a prior launch
+
+    harness.mode.pre_start("test", ["dev-standard"])
+
+    assert not bundle.deny_resolved.exists()
+
+
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
 def test_pre_start_override_rejects_cidr(
     _has_hooks: mock.Mock,
     monkeypatch: pytest.MonkeyPatch,
@@ -1698,6 +1758,82 @@ def test_shield_down_repopulates_deny_sets(
     # Verify deny elements were sent via nsenter
     deny_calls = [c for c in harness.runner.nft_via_nsenter.call_args_list if c.kwargs.get("stdin")]
     assert any(TEST_IP1 in (c.kwargs.get("stdin", "") or "") for c in deny_calls)
+
+
+@pytest.mark.parametrize("transition", ["up", "down"])
+def test_shield_transitions_reseed_override_set(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+    transition: str,
+) -> None:
+    """shield_up()/shield_down() re-seed the t10 override set from the bundle.
+
+    The table rebuild recreates every set empty; without the re-seed a
+    break-glass override would silently die (still t20-denied) after one
+    down/up cycle and only recover on container re-creation.
+    """
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.mode._container_ruleset = lambda _c: harness.ruleset
+    harness.runner.nft_via_nsenter.return_value = ""
+    harness.ruleset.build_hook.return_value = "hook ruleset"
+    harness.ruleset.verify_hook.return_value = []
+    harness.ruleset.add_elements_dual.return_value = ""
+    harness.ruleset.build_bypass.return_value = "bypass ruleset"
+    harness.ruleset.verify_bypass.return_value = [] if transition == "down" else ["not bypass"]
+
+    _b = StateBundle(config.state_dir)
+    _b.ensure_dirs()
+    _b.write_tier("override", f"+{TEST_IP1}\n")
+
+    getattr(harness.mode, f"shield_{transition}")("test-ctr")
+
+    stdins = [
+        c.kwargs.get("stdin", "") or "" for c in harness.runner.nft_via_nsenter.call_args_list
+    ]
+    assert any("t10_override_v4" in s and TEST_IP1 in s for s in stdins)
+
+
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_refresh_rewrites_tiers_and_ruleset(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """refresh() re-authors an existing bundle — current tier data replaces the frozen one.
+
+    A plain restart replays ``ruleset.nft`` through the OCI hook, so a
+    roster/config change between creation and restart must land in the
+    regenerated artifacts, not just the tier files.
+    """
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+    harness.mode.pre_start("test", ["dev-standard"], security_deny=[TEST_IP1])
+
+    harness.mode.refresh(["dev-standard"], security_deny=[TEST_IP2])
+
+    bundle = StateBundle(config.state_dir)
+    tier = bundle.tier_path("security_deny").read_text()
+    assert f"-{TEST_IP2}" in tier
+    assert f"-{TEST_IP1}" not in tier
+    ruleset = bundle.ruleset.read_text()
+    assert TEST_IP2 in ruleset
+    assert TEST_IP1 not in ruleset
+
+
+def test_refresh_without_prepared_bundle_raises(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """refresh() refuses a state dir pre_start never prepared (no persisted DNS tier)."""
+    harness = make_hook_mode(config=make_config())
+
+    with pytest.raises(RuntimeError, match="persisted DNS tier"):
+        harness.mode.refresh(["dev-standard"])
 
 
 from terok_shield.state import StateBundle

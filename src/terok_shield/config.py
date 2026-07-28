@@ -201,6 +201,23 @@ class ShieldModeBackend(Protocol):
         """
         ...
 
+    def refresh(
+        self,
+        profiles: list[str],
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
+    ) -> None:
+        """Recompute an existing container's policy bundle before a plain restart.
+
+        Same tier data as
+        [`pre_start`][terok_shield.config.ShieldModeBackend.pre_start], no
+        launch half — rewrites tiers, caches, and pre-applied artifacts only.
+        """
+        ...
+
     def allow_ip(self, container: str, ip: str) -> None:
         """Live-allow an IP for a running container."""
         ...

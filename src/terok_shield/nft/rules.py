@@ -157,7 +157,9 @@ class RulesetBuilder:
 
         Output policy is ``accept``, but the hard-deny floor and the
         security-deny tier (deny set + private ranges) are still enforced, and
-        every new connection is logged with the bypass prefix.
+        every new connection is logged with the bypass prefix.  The t10
+        override keeps its place *above* the deny — a break-glass host must
+        stay reachable in every posture that enforces the deny.
 
         Args:
             allow_all: If True (DISENGAGED), drop the hard-deny and private-range
@@ -166,6 +168,7 @@ class RulesetBuilder:
         sections = [self._preamble_lines()]
         if not allow_all:
             sections.append(self._range_reject(HARD_DENY_RANGES, PRIVATE_LOG_PREFIX))
+        sections.append(self._match(TIER_OVERRIDE, "accept"))
         sections.append(self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX))
         if not allow_all:
             sections.append(self._range_reject(PRIVATE_RANGES, PRIVATE_LOG_PREFIX))

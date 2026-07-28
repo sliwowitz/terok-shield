@@ -378,6 +378,36 @@ class Shield:
         self.audit.log_event(container, "setup", detail=f"profiles={','.join(profiles)}")
         return result
 
+    def refresh(
+        self,
+        container: str,
+        profiles: list[str] | None = None,
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
+    ) -> None:
+        """Recompute an existing container's policy bundle before a plain restart.
+
+        Same tier arguments as [`pre_start`][terok_shield.Shield.pre_start],
+        but for a container that already exists: rewrites the tiers and
+        static-resolution caches and regenerates the pre-applied artifacts
+        (``ruleset.nft``, dnsmasq config), so the next ``podman start``
+        enforces *current* policy instead of the bundle frozen at creation.
+        Returns nothing — the container keeps its launch-time podman args.
+        """
+        if profiles is None:
+            profiles = list(self.config.default_profiles)
+        self._mode.refresh(
+            profiles,
+            security_deny=security_deny,
+            provider_allow=provider_allow,
+            project_allow=project_allow,
+            override=override,
+        )
+        self.audit.log_event(container, "refresh", detail=f"profiles={','.join(profiles)}")
+
     def allow(self, container: str, target: str) -> list[str]:
         """Live-allow a domain or IP for a running container."""
         from .run import ExecError

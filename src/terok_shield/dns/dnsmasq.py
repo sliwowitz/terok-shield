@@ -45,6 +45,7 @@ def reload(
     upstream_dns: str,
     domains: list[str],
     deny_domains: Sequence[str] = (),
+    override_domains: Sequence[str] = (),
     *,
     container: str,
     runner: CommandRunner,
@@ -68,6 +69,8 @@ def reload(
         upstream_dns: Upstream DNS forwarder address.
         domains: Updated domain names for nftset auto-population.
         deny_domains: Denied domain names for DNS-plane NXDOMAIN sinkholes.
+        override_domains: t10 override domains — sinkhole punch-throughs
+            (see [`generate_config`][terok_shield.dns.dnsmasq.generate_config]).
         container: Container name — used to enter its netns for the relaunch.
         runner: Command runner that performs the in-netns relaunch.
 
@@ -102,6 +105,7 @@ def reload(
             listen_address=listen_address,
             log_path=log_path,
             deny_domains=deny_domains,
+            override_domains=override_domains,
         )
     )
 
@@ -165,6 +169,17 @@ def read_denied_domains(state_dir: Path) -> list[str]:
     return StateBundle(state_dir).read_effective().deny_domains()
 
 
+def read_override_domains(state_dir: Path) -> list[str]:
+    """Break-glass (t10) override domains from the composed policy bundle.
+
+    Fed to [`generate_config`][terok_shield.dns.dnsmasq.generate_config] as
+    sinkhole punch-throughs: an override host is usually *also* denied by
+    t20, and without the punch-through it would NXDOMAIN before its
+    statically seeded t10 set ever saw a packet.
+    """
+    return StateBundle(state_dir).read_effective().override_domains()
+
+
 # ── Container DNS setup ────────────────────────────────
 
 
@@ -179,6 +194,7 @@ def generate_config(
     listen_address: str,
     log_path: Path | None = None,
     deny_domains: Sequence[str] = (),
+    override_domains: Sequence[str] = (),
 ) -> str:
     """Generate a complete dnsmasq configuration.
 
@@ -201,6 +217,12 @@ def generate_config(
         deny_domains: Denied domains, sinkholed in the DNS plane (NXDOMAIN)
             so they fail fast and observably instead of resolving and then
             timing out against the packet filter.
+        override_domains: t10 break-glass override domains — treated as
+            allowed by the sinkhole generator (exact-name denies emit no
+            sinkhole, subdomain-of-denied-ancestor gets a punch-through)
+            without joining the ``--nftset`` population: the override's
+            addresses are statically seeded into the t10 set, the DNS plane
+            only has to keep the name resolvable.
 
     Raises:
         ValueError: If *upstream_dns* or *listen_address* is not a valid IP address.
@@ -226,7 +248,7 @@ def generate_config(
         except ValueError:
             logger.warning("generate_config: skipping invalid domain entry")
             continue
-    lines += deny_config_lines(domains, deny_domains, upstream_dns)
+    lines += deny_config_lines([*domains, *override_domains], deny_domains, upstream_dns)
     return "\n".join(lines) + "\n"
 
 

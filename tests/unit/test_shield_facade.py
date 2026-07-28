@@ -14,7 +14,7 @@ import pytest
 from terok_shield import ExecError, Shield, ShieldConfig, ShieldState, state
 
 from ..testfs import FAKE_HOOKS_DIR, NFT_BINARY
-from ..testnet import TEST_DOMAIN, TEST_IP1, TEST_IP2
+from ..testnet import TEST_DOMAIN, TEST_DOMAIN2, TEST_IP1, TEST_IP2
 
 ConfigFactory = Callable[..., ShieldConfig]
 
@@ -168,6 +168,29 @@ def test_pre_start_uses_default_profiles(
     harness.mode.pre_start.assert_called_once_with(
         "test-ctr", ["base"], security_deny=(), provider_allow=(), project_allow=(), override=()
     )
+
+
+def test_refresh_dispatches_and_logs(
+    make_shield: ShieldHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """refresh() delegates the tier data to the backend and audit-logs the event.
+
+    Same default-profiles fallback as pre_start — the restart path passes
+    ``None`` and gets the config's composed profile set.
+    """
+    harness = make_shield(config=make_config(default_profiles=("base",)))
+
+    harness.shield.refresh("test-ctr", security_deny=(TEST_DOMAIN,), override=(TEST_DOMAIN2,))
+
+    harness.mode.refresh.assert_called_once_with(
+        ["base"],
+        security_deny=(TEST_DOMAIN,),
+        provider_allow=(),
+        project_allow=(),
+        override=(TEST_DOMAIN2,),
+    )
+    harness.audit.log_event.assert_called_once_with("test-ctr", "refresh", detail="profiles=base")
 
 
 @pytest.mark.parametrize(

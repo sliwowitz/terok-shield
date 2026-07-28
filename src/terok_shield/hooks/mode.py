@@ -181,6 +181,7 @@ class HookMode:
         self._write_generated_tiers(sd, security_deny, provider_allow, override)
         self._write_policy_and_resolve(sd, entries, tier)
         self._resolve_override(sd)
+        self._resolve_security_deny(sd)
         StateBundle(sd).upstream_dns.write_text(f"{upstream_dns}\n")
         StateBundle(sd).dns_tier.write_text(f"{tier.value}\n")
         StateBundle(sd).loopback_ports.write_text(
@@ -243,6 +244,57 @@ class HookMode:
         ]
         return args
 
+    def refresh(
+        self,
+        profiles: list[str],
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
+    ) -> None:
+        """Recompute an existing container's policy bundle before a plain restart.
+
+        The policy-authoring half of
+        [`pre_start`][terok_shield.hooks.mode.HookMode.pre_start] without the
+        launch half: rewrites every tier from the caller's current data,
+        refreshes the static-resolution caches, and regenerates
+        ``ruleset.nft`` + the dnsmasq config — so the OCI hook applies
+        *current* policy at the next ``podman start`` instead of replaying
+        the bundle frozen at creation.  Deliberately reuses the persisted
+        DNS tier, upstream DNS, and loopback ports: the container's mounts
+        and annotations were built for those, and a fresh detection could
+        disagree with them.
+
+        Raises:
+            RuntimeError: When the bundle carries no persisted DNS tier /
+                upstream DNS (``pre_start`` never ran for this state dir).
+            ValueError: When an *override* entry is a CIDR/range (same
+                validation as ``pre_start``).
+        """
+        sd = self._config.state_dir.resolve()
+        tier_str = (
+            StateBundle(sd).dns_tier.read_text().strip()
+            if StateBundle(sd).dns_tier.is_file()
+            else ""
+        )
+        upstream_dns = self._read_upstream_dns()
+        if not tier_str or not upstream_dns:
+            raise RuntimeError(
+                "shield bundle has no persisted DNS tier / upstream DNS — "
+                "pre_start never completed for this container; re-create the task"
+            )
+        tier = DnsTier(tier_str)
+        entries = self._profiles.compose_profiles(profiles) + list(project_allow)
+        self._write_generated_tiers(sd, security_deny, provider_allow, override)
+        self._write_policy_and_resolve(sd, entries, tier)
+        self._resolve_override(sd)
+        self._resolve_security_deny(sd)
+        mode = self._get_podman_info().network_mode or "pasta"
+        gw_v4, gw_v6 = self._gateways = _gateways_for_mode(mode)
+        self._write_ruleset(sd, tier, upstream_dns, gw_v4, gw_v6)
+        self._write_dnsmasq_config_or_scrub(sd, tier, upstream_dns)
+
     def _write_generated_tiers(
         self,
         sd: Path,
@@ -281,6 +333,26 @@ class HookMode:
             return
         self._dns.resolve_and_cache(
             targets, bundle.override_resolved, source_mtime=bundle.policy_mtime()
+        )
+
+    def _resolve_security_deny(self, sd: Path) -> None:
+        """Statically resolve the t20 security-deny targets into the deny seed cache.
+
+        Denied domains must deny by *address*: the deny set is enforced even
+        in the shield-down posture (bypass repopulates it from
+        [`read_denied_ips`][terok_shield.state.StateBundle.read_denied_ips]),
+        and an address-level deny also catches direct-IP access that never
+        consults the DNS plane.  Resolved statically on every DNS tier —
+        dnsmasq interception only ever *adds* to allow sets, so it can play
+        no part in populating a deny.  An empty deny tier clears the cache.
+        """
+        bundle = StateBundle(sd)
+        targets = bundle.read_effective().deny_targets()
+        if not targets:
+            bundle.deny_resolved.unlink(missing_ok=True)
+            return
+        self._dns.resolve_and_cache(
+            targets, bundle.deny_resolved, source_mtime=bundle.policy_mtime()
         )
 
     def _write_policy_and_resolve(self, sd: Path, entries: list[str], tier: DnsTier) -> None:
@@ -348,6 +420,7 @@ class HookMode:
                 listen_address=bind,
                 log_path=StateBundle(sd).dnsmasq_log,
                 deny_domains=dnsmasq.read_denied_domains(sd),
+                override_domains=dnsmasq.read_override_domains(sd),
             )
             StateBundle(sd).dnsmasq_conf.write_text(conf)
             StateBundle(sd).resolv_conf.write_text(f"nameserver {bind}\noptions ndots:0\n")
@@ -454,6 +527,7 @@ class HookMode:
             upstream,
             domains,
             dnsmasq.read_denied_domains(state_dir),
+            dnsmasq.read_override_domains(state_dir),
             container=container,
             runner=self._runner,
         )
@@ -564,12 +638,9 @@ class HookMode:
         # forget every learned IP after one down/up round trip.
         self._restore_allow_sets(container, snapshot, skip=())
 
-        # Repopulate deny sets so deny.list is enforced even when shield is down.
-        denied_ips = list(StateBundle(sd).read_denied_ips())
-        if denied_ips:
-            deny_cmd = add_deny_elements_dual(denied_ips)
-            if deny_cmd:
-                self._runner.nft_via_nsenter(container, stdin=deny_cmd)
+        # Repopulate deny sets so the deny policy is enforced even when shield
+        # is down, and the t10 override set so break-glass hosts stay above it.
+        self._reseed_deny_and_override(container, sd)
 
         output = self._runner.nft_via_nsenter(
             container,
@@ -634,12 +705,8 @@ class HookMode:
             if elements_cmd:
                 self._runner.nft_via_nsenter(container, stdin=elements_cmd)
 
-        # Repopulate deny sets from deny.list
-        denied_ips = list(StateBundle(sd).read_denied_ips())
-        if denied_ips:
-            deny_cmd = add_deny_elements_dual(denied_ips)
-            if deny_cmd:
-                self._runner.nft_via_nsenter(container, stdin=deny_cmd)
+        # Repopulate the deny sets and the t10 override set from the bundle
+        denied_ips = self._reseed_deny_and_override(container, sd)
 
         # Restore the snapshot, minus everything the rebuild already re-added
         # (a duplicate/overlapping element would abort the nft transaction)
@@ -678,6 +745,24 @@ class HookMode:
         stdin += ruleset.add_elements_dual(StateBundle(sd).read_effective_ips())
         self._runner.nft_via_nsenter(container, stdin=stdin)
 
+    def _reseed_deny_and_override(self, container: str, sd: Path) -> list[str]:
+        """Repopulate the t20 deny and t10 override sets after a table rebuild.
+
+        Both sets seed purely from the bundle (literals + static-resolution
+        caches), so unlike the dnsmasq-learned t40 they need no snapshot —
+        every ``shield down``/``up`` rebuild re-derives them.  The override
+        is re-seeded in *both* postures: it sits above the deny, and the
+        deny is enforced even when the shield is down.  Returns the denied
+        IPs so ``shield_up`` can exclude them from the snapshot restore.
+        """
+        denied_ips = list(StateBundle(sd).read_denied_ips())
+        if denied_ips and (deny_cmd := add_deny_elements_dual(denied_ips)):
+            self._runner.nft_via_nsenter(container, stdin=deny_cmd)
+        override_ips = list(StateBundle(sd).read_override_ips())
+        if override_ips and (override_cmd := add_override_elements_dual(override_ips)):
+            self._runner.nft_via_nsenter(container, stdin=override_cmd)
+        return denied_ips
+
     # ── Allow-set snapshot/restore (down/up round trips) ─
 
     def _snapshot_allow_sets(self, container: str) -> list[tuple[str, str, str]]:
@@ -685,8 +770,10 @@ class HookMode:
 
         Captures seeds and dnsmasq-learned elements right before a table
         rebuild.  A missing table or set yields no rows — there was nothing
-        to keep.  (Tiers 10/30 have no runtime population yet; extend this
-        snapshot when they gain one.)
+        to keep.  (Tiers 10/20 are re-seeded from the bundle by
+        ``_reseed_deny_and_override`` instead — they have no *learned*
+        state to preserve.  Tier 30 has no runtime population yet; extend
+        this snapshot when it gains one.)
         """
         rows: list[tuple[str, str, str]] = []
         for fam in ("v4", "v6"):
