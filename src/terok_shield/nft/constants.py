@@ -44,7 +44,7 @@ HARD_DENY_RANGES: tuple[str, ...] = (
     # could reach the v6 metadata service — the absolute-IMDS guarantee
     # would be v4-only.  Bare address (no /128): nft strips a /128 prefix
     # when listing, so the verifier's literal round-trip needs the bare form.
-    "fd00:ec2::254",
+    "fd00:ec2::254",  # AWS IMDS IPv6 endpoint  # NOSONAR
 )
 
 # PRIVATE_RANGES — RFC 1918 + RFC 4193 (ULA): the private LAN.  Denied by

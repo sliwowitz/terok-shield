@@ -142,7 +142,7 @@ class RulesetBuilder:
         body = self._join(
             self._preamble_lines(),
             self._range_reject(HARD_DENY_RANGES, PRIVATE_LOG_PREFIX),  # t00 absolute
-            self._match(TIER_OVERRIDE, "accept"),  # t10 break-glass
+            self._match(TIER_OVERRIDE, "accept", ALLOWED_LOG_PREFIX),  # t10 break-glass
             self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX),  # t20 deny set
             self._range_reject(PRIVATE_RANGES, PRIVATE_LOG_PREFIX),  # t20 RFC1918
             self._match(TIER_PROVIDER_ALLOW, "accept", ALLOWED_LOG_PREFIX),  # t30 provider
@@ -168,7 +168,7 @@ class RulesetBuilder:
         sections = [self._preamble_lines()]
         if not allow_all:
             sections.append(self._range_reject(HARD_DENY_RANGES, PRIVATE_LOG_PREFIX))
-        sections.append(self._match(TIER_OVERRIDE, "accept"))
+        sections.append(self._match(TIER_OVERRIDE, "accept", BYPASS_LOG_PREFIX))
         sections.append(self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX))
         if not allow_all:
             sections.append(self._range_reject(PRIVATE_RANGES, PRIVATE_LOG_PREFIX))
