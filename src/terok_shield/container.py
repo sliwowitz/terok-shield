@@ -33,38 +33,27 @@ import shutil
 import subprocess  # nosec B404 — podman is a trusted host binary
 from pathlib import Path
 
-from .config import ANNOTATION_STATE_DIR_KEY
+from .config import ANNOTATION_STATE_DIR_KEY, ANNOTATION_VERSION_KEY
 
 _log = logging.getLogger(__name__)
 
 _INSPECT_TIMEOUT_S = 10
 
 
-def resolve_state_dir(container: str) -> Path | None:
-    """Return the per-container ``state_dir`` from podman annotations, or ``None``.
+def _inspect_records(container: str) -> object | None:
+    """Run ``podman inspect --format=json`` for *container*; return parsed records or ``None``.
 
-    Calls ``podman inspect --format=json`` and pulls the
-    ``terok.shield.state_dir`` annotation out of the container's config.
-    Any failure — podman missing, container absent, annotation not set,
-    JSON malformed — collapses to ``None`` so callers can fall through.
-
-    Args:
-        container: Container name or ID (short or full) as podman knows it.
-
-    Returns:
-        The resolved ``Path`` if the annotation is present and absolute,
-        otherwise ``None``.
+    Any failure — podman missing, container absent, non-zero exit, malformed
+    JSON — collapses to ``None`` so callers fall through.  ``--`` bars podman
+    from reading a hostile *container* value as one of its own flags
+    (``--all``, ``--latest``, …) — the public contract accepts identifiers from
+    external callers that may not have validated them.
     """
     podman = shutil.which("podman")
     if not podman:
-        _log.warning("podman not on PATH — cannot resolve state_dir for %s", container)
+        _log.warning("podman not on PATH — cannot inspect %s", container)
         return None
     try:
-        # ``--`` bars podman from interpreting a hostile *container* value as
-        # one of its own flags (``--all``, ``--latest``, ``--format=bad`` …).
-        # The module's public contract accepts container identifiers from
-        # external callers that may not have validated them; ``--`` makes
-        # the positional boundary explicit regardless of what the caller did.
         result = subprocess.run(  # nosec B603
             [podman, "inspect", "--format=json", "--", container],
             check=False,
@@ -76,28 +65,21 @@ def resolve_state_dir(container: str) -> Path | None:
         _log.warning("podman inspect failed for %s: %s", container, exc)
         return None
     if result.returncode != 0:
-        # Warn — every failure here translates into a verdict that silently
-        # fails downstream.  Operators hitting this need to know *why*
-        # podman couldn't speak to its own state (sandbox / hardening
-        # interaction, stale pause process, missing socket, etc.) rather
-        # than just "no annotation".
+        # Warn — every failure here translates into a downstream miss.
+        # Operators need *why* podman couldn't speak to its own state.
         _log.warning(
-            "podman inspect %s returned %d: %s",
-            container,
-            result.returncode,
-            result.stderr.strip(),
+            "podman inspect %s returned %d: %s", container, result.returncode, result.stderr.strip()
         )
         return None
     try:
-        records = json.loads(result.stdout)
+        return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         _log.warning("podman inspect %s returned malformed JSON: %s", container, exc)
         return None
-    return _extract_state_dir(records)
 
 
-def _extract_state_dir(records: object) -> Path | None:
-    """Pull ``terok.shield.state_dir`` out of one ``podman inspect`` record set."""
+def _annotations(records: object) -> dict | None:
+    """Pull the OCI annotations dict out of one ``podman inspect`` record set."""
     if not isinstance(records, list) or not records:
         return None
     head = records[0]
@@ -107,21 +89,59 @@ def _extract_state_dir(records: object) -> Path | None:
     if not isinstance(config, dict):
         return None
     annotations = config.get("Annotations")
-    if not isinstance(annotations, dict):
+    return annotations if isinstance(annotations, dict) else None
+
+
+def resolve_state_dir(container: str) -> Path | None:
+    """Return the per-container ``state_dir`` from podman annotations, or ``None``.
+
+    Reads the ``terok.shield.state_dir`` annotation out of the container's
+    config.  Any failure — podman missing, container absent, annotation not
+    set, non-absolute, JSON malformed — collapses to ``None`` so callers can
+    fall through.
+
+    Args:
+        container: Container name or ID (short or full) as podman knows it.
+
+    Returns:
+        The resolved ``Path`` if the annotation is present and absolute,
+        otherwise ``None``.
+    """
+    annotations = _annotations(_inspect_records(container))
+    if annotations is None:
         return None
     raw = annotations.get(ANNOTATION_STATE_DIR_KEY)
     if not isinstance(raw, str) or not raw:
         return None
     path = Path(raw)
     if not path.is_absolute():
-        _log.warning(
-            "container %r carries a non-absolute state_dir annotation: %r",
-            head.get("Name") or head.get("Id") or "?",
-            raw,
-        )
+        _log.warning("container carries a non-absolute state_dir annotation: %r", raw)
         return None
     try:
         return path.resolve()
     except OSError as exc:
         _log.warning("failed to resolve state_dir annotation %r: %s", raw, exc)
+        return None
+
+
+def resolve_shield_version(container: str) -> int | None:
+    """Return the bundle version a container was prepared with, or ``None``.
+
+    Reads the ``terok.shield.version`` OCI annotation stamped by
+    [`Shield.pre_start`][terok_shield.Shield.pre_start].  ``None`` when the
+    container is absent, unshielded, or the annotation is missing / non-integer
+    — callers treat that as "cannot determine" and fall through rather than
+    block.  An orchestrator compares this against
+    [`BUNDLE_VERSION`][terok_shield.state.BUNDLE_VERSION] to refuse restarting a
+    container whose bundle predates the installed shield (fail-fast, re-create).
+    """
+    annotations = _annotations(_inspect_records(container))
+    if annotations is None:
+        return None
+    raw = annotations.get(ANNOTATION_VERSION_KEY)
+    if not isinstance(raw, str):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
         return None

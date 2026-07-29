@@ -16,6 +16,7 @@ from terok_shield.dns.dnsmasq import (
     nftset_entry,
     read_denied_domains,
     read_merged_domains,
+    read_override_domains,
     reload,
 )
 from terok_shield.nft.constants import (
@@ -551,6 +552,49 @@ def test_read_denied_domains_composes_from_policy(tmp_path: Path) -> None:
     assert read_denied_domains(tmp_path) == [TEST_DOMAIN2]
 
 
+def test_read_override_domains_composes_from_policy(tmp_path: Path) -> None:
+    """read_override_domains() surfaces '+' t10 domains from the tiered bundle."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("override", f"+{TEST_DOMAIN}\n")
+    assert read_override_domains(tmp_path) == [TEST_DOMAIN]
+
+
+def test_generate_config_override_punches_through_exact_deny(tmp_path: Path) -> None:
+    """A t10 override at exactly a denied name suppresses its sinkhole.
+
+    The override host is usually *also* t20-denied — without the
+    punch-through it would NXDOMAIN before the statically seeded t10 set
+    ever saw a packet — while staying out of the ``nftset=`` population
+    (its addresses live in the t10 set, not t40).
+    """
+    config = generate_config(
+        PASTA_DNS,
+        [],
+        tmp_path / "dnsmasq.pid",
+        listen_address=DNSMASQ_BIND_DEFAULT,
+        deny_domains=[TEST_DOMAIN],
+        override_domains=[TEST_DOMAIN],
+    )
+    assert f"local=/{TEST_DOMAIN}/" not in config
+    assert f"nftset=/{TEST_DOMAIN}/" not in config
+
+
+def test_generate_config_override_subdomain_gets_punch_through(tmp_path: Path) -> None:
+    """A t10 override below a denied ancestor gets a server=/sub/upstream punch-through."""
+    sub = f"api.{TEST_DOMAIN}"
+    config = generate_config(
+        PASTA_DNS,
+        [],
+        tmp_path / "dnsmasq.pid",
+        listen_address=DNSMASQ_BIND_DEFAULT,
+        deny_domains=[TEST_DOMAIN],
+        override_domains=[sub],
+    )
+    assert f"local=/{TEST_DOMAIN}/" in config
+    assert f"server=/{sub}/{PASTA_DNS}" in config
+
+
 def test_reload_writes_deny_sinkholes(tmp_path: Path) -> None:
     """reload() regenerates the config with the deny sinkholes included."""
     bundle = StateBundle(tmp_path)
@@ -558,7 +602,7 @@ def test_reload_writes_deny_sinkholes(tmp_path: Path) -> None:
     bundle.dnsmasq_pid.write_text("12345\n")
     bundle.dnsmasq_conf.write_text(f"listen-address={DNSMASQ_BIND_DEFAULT}\n")
 
-    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], [TEST_DOMAIN2])
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], deny_domains=[TEST_DOMAIN2])
 
     conf = bundle.dnsmasq_conf.read_text()
     assert f"nftset=/{TEST_DOMAIN}/" in conf

@@ -150,6 +150,9 @@ EXPECTED_PRIVATE_RANGES: tuple[str, ...] = (
     "fc00::/7",
     "fe80::/10",
 )
+# ── Cloud metadata (IMDS) endpoints — the absolute hard-deny floor ──
+AWS_IMDS_V6 = "fd00:ec2::254"  # AWS IPv6 metadata endpoint (ULA space)
+
 # ── Normalization test pairs (non-canonical → canonical) ──
 
 IPV6_VERBOSE = "2001:0db8:0000:0000:0000:0000:0000:0001"  # Verbose IPv6 form

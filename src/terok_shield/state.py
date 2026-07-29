@@ -23,9 +23,12 @@ Bundle layout::
     │   ├── 40-project-allow           #   → t40_project_allow
     │   └── live                       #   runtime overlay (folded into its tiers)
     ├── resolved.ips                   # derived: resolved allow IPs (t40 set seed)
+    ├── override_resolved.ips          # derived: resolved t10 override IPs (above-deny seed)
+    ├── deny_resolved.ips              # derived: resolved t20 security-deny IPs (deny seed)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
     ├── dns.tier                       # active DNS tier (dig/getent/dnsmasq)
+    ├── network.mode                   # rootless network mode (pasta/slirp4netns)
     ├── loopback.ports                 # per-container host-loopback TCP ports (newline-separated)
     ├── dnsmasq.conf                   # generated dnsmasq configuration
     ├── dnsmasq.pid                    # dnsmasq PID (in container netns)
@@ -59,7 +62,14 @@ def _dedup(items: list[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-BUNDLE_VERSION = 15
+def _read_cached_ips(cache: Path) -> list[str]:
+    """Non-blank lines of a derived resolution cache; an absent cache is empty."""
+    if not cache.is_file():
+        return []
+    return [line.strip() for line in cache.read_text().splitlines() if line.strip()]
+
+
+BUNDLE_VERSION = 16
 """Integer version of the state bundle layout.
 
 Bumped whenever the file layout changes in a backwards-incompatible way.
@@ -73,11 +83,14 @@ stale on-disk entrypoint — bump it whenever the entrypoint *protocol*
 changes even if the file layout itself is unchanged, so that
 ``terok setup`` rewrites the script instead of short-circuiting.
 
-Current shape (v15): the six v14 split allow/deny files
-(``profile.allowed``/``.domains``, ``live.allowed``/``.domains``,
-``deny.list``, ``denied.domains``) are replaced by the tiered ``policy/``
+Current shape (v16): v15 plus two derived seed caches —
+``override_resolved.ips`` (t10 break-glass) and ``deny_resolved.ips``
+(t20 security-deny).  Both tiers are now statically resolved, so each is
+repopulated *by address* on every ``shield down``/``up`` rebuild instead
+of depending on the DNS plane to re-learn it.  (v15
+replaced the six v14 split allow/deny files with the tiered ``policy/``
 bundle of unified ``+``/``-`` files plus the derived ``resolved.ips``
-cache.  Earlier shapes are recoverable via
+cache.)  Earlier shapes are recoverable via
 ``git log -L /^BUNDLE_VERSION/:src/terok_shield/state.py``.
 """
 
@@ -156,8 +169,18 @@ class EffectivePolicy:
         return [d for d in self.allow_domains() if d not in denied]
 
     def deny_ips(self) -> list[str]:
-        """IPs to load into the tier-20 security-deny set."""
+        """Literal denied IPs — the non-resolved part of the tier-20 set seed."""
         return _dedup(ip_targets(self._denies()))
+
+    def deny_targets(self) -> list[str]:
+        """Denied domains + literal IPs to resolve (``localhost`` excluded) — the deny-resolver input.
+
+        The t20 security-deny must hold *addresses* to survive a
+        ``shield down`` rebuild and to catch direct-IP access that never
+        touches the DNS plane, so its domains are statically resolved into
+        [`deny_resolved`][terok_shield.state.StateBundle.deny_resolved]
+        (mirroring the t10 override treatment)."""
+        return _dedup([e.target for e in self._denies() if e.target != LOCALHOST])
 
     def effective_ips(self) -> list[str]:
         """Admitted literal IPs minus denied (the non-resolved part of the set seed)."""
@@ -167,6 +190,28 @@ class EffectivePolicy:
     def allow_targets(self) -> list[str]:
         """Admitted domains + literal IPs to resolve (``localhost`` excluded) — the resolver input."""
         return _dedup([e.target for e in self._allows() if e.target != LOCALHOST])
+
+    def override_targets(self) -> list[str]:
+        """Break-glass override domains + literal IPs to resolve (``localhost`` excluded).
+
+        The t10 override is a *separate* above-deny nft set — not part of the
+        ordinary allow tiers
+        ([`allow_targets`][terok_shield.state.EffectivePolicy.allow_targets]),
+        so it is resolved and seeded independently.
+        """
+        return _dedup(
+            [e.target for e in self.override if e.action == "+" and e.target != LOCALHOST]
+        )
+
+    def override_domains(self) -> list[str]:
+        """Break-glass override domains — the DNS-plane punch-through set.
+
+        A t10 override host is usually *also* denied by t20 (that is the
+        point of an override), so the dnsmasq sinkhole generator must treat
+        these names as allowed — otherwise the override host would NXDOMAIN
+        and the statically seeded t10 set would never see a connection.
+        """
+        return _dedup(domain_targets([e for e in self.override if e.action == "+"]))
 
 
 STATE_DIR_MODE = 0o700
@@ -232,6 +277,17 @@ class StateBundle:
         return self.state_dir / "dns.tier"
 
     @property
+    def network_mode(self) -> Path:
+        """Path to the persisted rootless network mode (``pasta``/``slirp4netns``).
+
+        Detected once at ``pre_start`` and read back by ``HookMode.refresh``,
+        which derives the ruleset's gateway addresses from it — a restart
+        rebuilds the bundle without paying for a ``podman info`` probe, and
+        cannot pick a mode the running container was not launched with.
+        """
+        return self.state_dir / "network.mode"
+
+    @property
     def loopback_ports(self) -> Path:
         """Path to the per-container host-loopback TCP ports list.
 
@@ -280,6 +336,31 @@ class StateBundle:
         [`policy_mtime`][terok_shield.state.StateBundle.policy_mtime].
         """
         return self.state_dir / "resolved.ips"
+
+    @property
+    def override_resolved(self) -> Path:
+        """Derived per-container cache of resolved override IPs (the t10 set seed).
+
+        The t10 override sits *above* the security-deny tier and is a separate
+        nft set, so it is resolved and cached apart from the allow tiers.
+        Statically resolved at pre_start — break-glass entries are rare and
+        specific, and dnsmasq interception would populate t40 (below the deny),
+        defeating the override.
+        """
+        return self.state_dir / "override_resolved.ips"
+
+    @property
+    def deny_resolved(self) -> Path:
+        """Derived per-container cache of resolved security-deny IPs (the t20 set seed).
+
+        Denied domains must reach the packet filter as addresses: the deny
+        set is what survives a ``shield down`` (bypass keeps enforcing it),
+        and an address-level deny also catches direct-IP access that never
+        consults the DNS plane.  Statically resolved at pre_start on every
+        DNS tier, cached apart from the allow-side ``resolved.ips`` so the
+        two invalidate independently.
+        """
+        return self.state_dir / "deny_resolved.ips"
 
     def policy_mtime(self) -> float:
         """Newest mtime among the policy files (``0.0`` when none exist yet).
@@ -388,8 +469,16 @@ class StateBundle:
     # ── State readers ──────────────────────────────────────
 
     def read_denied_ips(self) -> set[str]:
-        """Refused IPs composed from the security-deny tier + the runtime overlay."""
-        return set(self.read_effective().deny_ips())
+        """The tier-20 security-deny set seed: literal denied IPs + resolved denied domains.
+
+        Unions the current literal ``-`` IPs (security-deny tier + runtime
+        overlay) with the statically resolved
+        [`deny_resolved`][terok_shield.state.StateBundle.deny_resolved]
+        cache.  This is what ``shield down``/``up`` repopulate the deny set
+        from — a denied *domain* must keep denying by address across every
+        rebuild, or the bypass posture would silently un-deny it.
+        """
+        return set(self.read_effective().deny_ips()) | set(_read_cached_ips(self.deny_resolved))
 
     def read_effective_ips(self) -> list[str]:
         """The tier-40 project-allow set seed: resolved allow IPs minus denied.
@@ -402,13 +491,20 @@ class StateBundle:
         """
         eff = self.read_effective()
         denied = set(eff.deny_ips())
-        cached = (
-            [line.strip() for line in self.resolved_cache.read_text().splitlines() if line.strip()]
-            if self.resolved_cache.is_file()
-            else []
-        )
-        seed = [ip for ip in cached if ip not in denied]
+        seed = [ip for ip in _read_cached_ips(self.resolved_cache) if ip not in denied]
         return _dedup(seed + eff.effective_ips())
+
+    def read_override_ips(self) -> list[str]:
+        """The tier-10 override set seed: literal override IPs + resolved override domains.
+
+        Unions the current literal ``+`` override IPs with the statically
+        resolved [`override_resolved`][terok_shield.state.StateBundle.override_resolved]
+        cache.  Denies are *not* subtracted — the whole point of an override is
+        to sit above the security-deny tier.
+        """
+        eff = self.read_effective()
+        literal = ip_targets([e for e in eff.override if e.action == "+"])
+        return _dedup(literal + _read_cached_ips(self.override_resolved))
 
     # ── Setup ──────────────────────────────────────────────
 

@@ -36,6 +36,7 @@ from terok_shield.nft.rules import (
 )
 
 from ..testnet import (
+    AWS_IMDS_V6,
     IPV4_CIDR_HOST_BITS,
     IPV4_CIDR_HOST_BITS_CANONICAL,
     IPV6_CLOUDFLARE,
@@ -56,6 +57,8 @@ _DENY_V4_SET = "set t20_security_deny_v4 { type ipv4_addr; flags interval; }"
 _DENY_V6_SET = "set t20_security_deny_v6 { type ipv6_addr; flags interval; }"
 _ALLOW_LOG_PREFIX = "TEROK_SHIELD_ALLOWED"
 _DENY_LOG_PREFIX = "TEROK_SHIELD_DENIED"
+_ALLOWED_LOG_PREFIX = "TEROK_SHIELD_ALLOWED"
+_BYPASS_LOG_PREFIX = "TEROK_SHIELD_BYPASS"
 _BLOCKED_LOG_PREFIX = "TEROK_SHIELD_BLOCKED"
 _ADMIN_PROHIBITED = "admin-prohibited"
 _INPUT_CHAIN = "chain input"
@@ -227,6 +230,22 @@ def test_hook_ruleset_tier_order_is_authority_order() -> None:
     private = rs.index(PRIVATE_RANGES[0])  # 10.0.0.0/8
     allow = rs.index("@t40_project_allow_v4")
     assert hard_deny < override < deny < private < allow
+
+
+def test_v6_imds_floor_is_absolute() -> None:
+    """The AWS v6 metadata endpoint is hard-denied ABOVE the override tier.
+
+    It lives inside ULA ``fc00::/7``, whose reject sits *below* the override
+    — so without its own t00 entry, a deliberate ULA carve-out override
+    would reach the v6 metadata service and the absolute-IMDS guarantee
+    would be v4-only.
+    """
+    rs = RulesetBuilder().build_hook()
+    imds = rs.index(f"ip6 daddr {AWS_IMDS_V6} ")
+    assert imds < rs.index("@t10_override_v4")
+    # Bare-address form: nft strips /128 on listing, so verification
+    # round-trips only the bare literal.
+    assert f"{AWS_IMDS_V6}/128" not in rs
 
 
 # ── Terminal deny rule (BLOCKED prefix) ───────────────
@@ -680,6 +699,30 @@ def test_bypass_ruleset_includes_deny_sets() -> None:
     assert "t20_security_deny_v4" in rs
     assert "t20_security_deny_v6" in rs
     assert _DENY_LOG_PREFIX in rs
+
+
+def test_bypass_ruleset_keeps_override_above_deny() -> None:
+    """Bypass mode keeps the t10 override match above the deny — a break-glass
+    host must stay reachable in every posture that enforces the deny."""
+    rs = RulesetBuilder().build_bypass()
+    assert rs.index("@t10_override_v4") < rs.index("@t20_security_deny_v4")
+
+
+def _rule_for(ruleset: str, set_name: str) -> str:
+    """The single rule line matching *set_name* in *ruleset*."""
+    return next(ln for ln in ruleset.splitlines() if f"@{set_name} " in ln)
+
+
+def test_override_accept_is_audited_in_both_postures() -> None:
+    """A break-glass accept carries an NFLOG tag — it is terminal, so nothing else logs it.
+
+    The t10 verdict ends evaluation before the tiers (and, in bypass, before
+    the catch-all ``ct state new`` log), so an untagged accept would make
+    exactly the traffic an auditor cares about most the only traffic that
+    leaves no trace.
+    """
+    assert _ALLOWED_LOG_PREFIX in _rule_for(RulesetBuilder().build_hook(), "t10_override_v4")
+    assert _BYPASS_LOG_PREFIX in _rule_for(RulesetBuilder().build_bypass(), "t10_override_v4")
 
 
 def test_bypass_ruleset_emits_loopback_port_rules() -> None:

@@ -41,7 +41,7 @@ ANN_STATE_DIR = "terok.shield.state_dir"
 ANN_VERSION = "terok.shield.version"
 """OCI annotation carrying the bundle version this container was prepared with."""
 
-BUNDLE_VERSION = 15
+BUNDLE_VERSION = 16
 """Wire-protocol version for the hook ↔ pre_start state-bundle contract.
 
 Bumped whenever the on-disk file layout, the hook → reader argv

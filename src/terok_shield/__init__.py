@@ -19,7 +19,7 @@ helpers.  Heavy imports are deferred until ``Shield`` is instantiated.
 
 import importlib as _importlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
@@ -346,13 +346,67 @@ class Shield:
             "audit_enabled": self.config.audit_enabled,
         }
 
-    def pre_start(self, container: str, profiles: list[str] | None = None) -> list[str]:
-        """Prepare shield for container start.  Returns extra podman args."""
+    def pre_start(
+        self,
+        container: str,
+        profiles: list[str] | None = None,
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
+    ) -> list[str]:
+        """Prepare shield for container start.  Returns extra podman args.
+
+        The four tier arguments are the orchestrator-generated policy tiers,
+        which shield writes into the bundle so callers pass data and never touch
+        the layout: *security_deny* → t20 (vault hosts denied direct),
+        *provider_allow* → t30 (provider egress), *project_allow* → t40 (git
+        remote + custom, merged with the composed profiles), *override* → t10
+        (break-glass allow above the deny; single host/IP only).
+        """
         if profiles is None:
             profiles = list(self.config.default_profiles)
-        result = self._mode.pre_start(container, profiles)
+        result = self._mode.pre_start(
+            container,
+            profiles,
+            security_deny=security_deny,
+            provider_allow=provider_allow,
+            project_allow=project_allow,
+            override=override,
+        )
         self.audit.log_event(container, "setup", detail=f"profiles={','.join(profiles)}")
         return result
+
+    def refresh(
+        self,
+        container: str,
+        profiles: list[str] | None = None,
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
+    ) -> None:
+        """Recompute an existing container's policy bundle before a plain restart.
+
+        Same tier arguments as [`pre_start`][terok_shield.Shield.pre_start],
+        but for a container that already exists: rewrites the tiers and
+        static-resolution caches and regenerates the pre-applied artifacts
+        (``ruleset.nft``, dnsmasq config), so the next ``podman start``
+        enforces *current* policy instead of the bundle frozen at creation.
+        Returns nothing — the container keeps its launch-time podman args.
+        """
+        if profiles is None:
+            profiles = list(self.config.default_profiles)
+        self._mode.refresh(
+            profiles,
+            security_deny=security_deny,
+            provider_allow=provider_allow,
+            project_allow=project_allow,
+            override=override,
+        )
+        self.audit.log_event(container, "refresh", detail=f"profiles={','.join(profiles)}")
 
     def allow(self, container: str, target: str) -> list[str]:
         """Live-allow a domain or IP for a running container."""

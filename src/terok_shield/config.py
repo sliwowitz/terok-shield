@@ -11,7 +11,7 @@ a mode backend must satisfy.
 from __future__ import annotations
 
 import enum
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -183,8 +183,39 @@ class ShieldModeBackend(Protocol):
     and preview.
     """
 
-    def pre_start(self, container: str, profiles: list[str]) -> list[str]:
-        """Prepare for container start; return extra podman args."""
+    def pre_start(
+        self,
+        container: str,
+        profiles: list[str],
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
+    ) -> list[str]:
+        """Prepare for container start; return extra podman args.
+
+        *security_deny* / *provider_allow* / *project_allow* / *override* are the
+        caller-generated t20 / t30 / t40 / t10 tiers
+        (see [`Shield.pre_start`][terok_shield.Shield.pre_start]).
+        """
+        ...
+
+    def refresh(
+        self,
+        profiles: list[str],
+        *,
+        security_deny: Sequence[str] = (),
+        provider_allow: Sequence[str] = (),
+        project_allow: Sequence[str] = (),
+        override: Sequence[str] = (),
+    ) -> None:
+        """Recompute an existing container's policy bundle before a plain restart.
+
+        Same tier data as
+        [`pre_start`][terok_shield.config.ShieldModeBackend.pre_start], no
+        launch half — rewrites tiers, caches, and pre-applied artifacts only.
+        """
         ...
 
     def allow_ip(self, container: str, ip: str) -> None:

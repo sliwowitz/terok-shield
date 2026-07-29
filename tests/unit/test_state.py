@@ -165,6 +165,54 @@ def test_read_effective_ips_includes_runtime_allow_before_reresolve(tmp_path: Pa
     assert bundle.read_effective_ips() == [TEST_IP1, TEST_IP3]
 
 
+def test_read_override_ips_unions_literal_and_cache_ignoring_denies(tmp_path: Path) -> None:
+    """The t10 seed is literal + resolved override IPs; a deny does NOT subtract it."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("override").write_text(f"+{TEST_IP1}\n")  # literal override
+    bundle.override_resolved.write_text(f"{TEST_IP2}\n")  # resolved override domain
+    bundle.tier_path("security_deny").write_text(f"-{TEST_IP1}\n")  # deny is below the override
+    assert bundle.read_override_ips() == [TEST_IP1, TEST_IP2]
+
+
+def test_override_targets_lists_plus_entries(tmp_path: Path) -> None:
+    """override_targets returns the ``+`` override entries (domains + IPs) to resolve."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("override").write_text(f"+{TEST_DOMAIN}\n+{TEST_IP1}\n")
+    assert set(bundle.read_effective().override_targets()) == {TEST_DOMAIN, TEST_IP1}
+
+
+def test_read_denied_ips_unions_resolved_cache(tmp_path: Path) -> None:
+    """The t20 seed unions literal ``-`` IPs with the resolved deny cache.
+
+    A denied *domain* only denies by address once resolved — the cache is
+    what keeps the deny enforced across ``shield down``/``up`` rebuilds.
+    """
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("security_deny").write_text(f"-{TEST_IP1}\n-{TEST_DOMAIN}\n")
+    bundle.deny_resolved.write_text(f"{TEST_IP2}\n")  # resolved deny domain
+    assert bundle.read_denied_ips() == {TEST_IP1, TEST_IP2}
+
+
+def test_deny_targets_lists_domains_and_ips(tmp_path: Path) -> None:
+    """deny_targets returns every ``-`` entry (security-deny + live) — the deny-resolver input."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("security_deny").write_text(f"-{TEST_DOMAIN}\n")
+    bundle.policy_live.write_text(f"-{TEST_IP2}\n")
+    assert set(bundle.read_effective().deny_targets()) == {TEST_DOMAIN, TEST_IP2}
+
+
+def test_override_domains_lists_only_domains(tmp_path: Path) -> None:
+    """override_domains returns the ``+`` override domains (no IPs) — the sinkhole punch-through set."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.tier_path("override").write_text(f"+{TEST_DOMAIN}\n+{TEST_IP1}\n")
+    assert bundle.read_effective().override_domains() == [TEST_DOMAIN]
+
+
 # ── ballast sync contract ────────────────────────────────────────────────────
 
 
