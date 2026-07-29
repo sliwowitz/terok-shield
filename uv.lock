@@ -1439,7 +1439,7 @@ test = [
 requires-dist = [
     { name = "pydantic", specifier = "~=2.13" },
     { name = "pyyaml", specifier = "~=6.0" },
-    { name = "terok-util", git = "https://github.com/sliwowitz/terok-util?rev=feat%2Funified-logging" },
+    { name = "terok-util", url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a4/terok_util-0.3.1a4-py3-none-any.whl" },
 ]
 
 [package.metadata.requires-dev]
@@ -1470,12 +1470,22 @@ test = [
 
 [[package]]
 name = "terok-util"
-version = "0.3.1a4.dev87+g969a358c4"
-source = { git = "https://github.com/sliwowitz/terok-util?rev=feat%2Funified-logging#969a358c451e44128c3cb5f59b4f50a7bc003a7d" }
+version = "0.3.1a4"
+source = { url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a4/terok_util-0.3.1a4-py3-none-any.whl" }
 dependencies = [
     { name = "jinja2" },
     { name = "platformdirs" },
     { name = "ruamel-yaml" },
+]
+wheels = [
+    { url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a4/terok_util-0.3.1a4-py3-none-any.whl", hash = "sha256:8878f21e8101c5d70e17c7c44737ea5ea1390226738c0e9221f91d7dedfb38b3" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "jinja2", specifier = "~=3.1" },
+    { name = "platformdirs", specifier = "~=4.10" },
+    { name = "ruamel-yaml", specifier = "==0.19.1" },
 ]
 
 [[package]]
