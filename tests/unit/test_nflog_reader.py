@@ -24,6 +24,8 @@ from terok_shield.resources import nflog_reader as reader
 from ..testfs import (
     AUDIT_FILENAME,
     DNSMASQ_LOG_FILENAME,
+    EVENTS_RUNTIME_SUBPATH,
+    INGESTER_SOCKET_FILENAME,
     READER_EVENTS_SOCK_FILENAME,
     RUN_USER_PREFIX,
 )
@@ -168,7 +170,9 @@ class TestSelectEmitter:
         cid = "cafef00d" * 8
         emitter = reader._select_emitter("socket", container_id=cid)
         assert isinstance(emitter, reader.SocketEmitter)
-        assert emitter._path == tmp_path / "terok" / "events" / f"{cid[:12]}.sock"
+        assert emitter._path == (
+            tmp_path / EVENTS_RUNTIME_SUBPATH / cid[:12] / INGESTER_SOCKET_FILENAME
+        )
 
     def test_socket_emitter_uses_explicit_hub_socket(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -396,11 +400,11 @@ class TestResolveHubSocketPath:
     def test_container_id_builds_per_container_path(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """The 12-char short ID becomes the basename — AF_UNIX path limit avoidance."""
+        """The 12-char short ID becomes the lane directory."""
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
         cid = "f" * 64  # full podman UUID shape
         assert reader._resolve_hub_socket_path(container_id=cid) == (
-            tmp_path / "terok" / "events" / f"{cid[:12]}.sock"
+            tmp_path / EVENTS_RUNTIME_SUBPATH / cid[:12] / INGESTER_SOCKET_FILENAME
         )
 
     def test_neither_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -416,7 +420,8 @@ class TestResolveHubSocketPath:
         # Per-container branch still composes the path beneath /run/user/<uid>.
         path = reader._resolve_hub_socket_path(container_id="abc")
         assert str(path).startswith(RUN_USER_PREFIX)
-        assert path.name == "abc.sock"
+        assert path.parent.name == "abc"
+        assert path.name == INGESTER_SOCKET_FILENAME
 
 
 class TestResolveBinary:

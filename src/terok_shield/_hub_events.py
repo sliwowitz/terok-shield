@@ -10,13 +10,14 @@ stdlib-only so the reader script resource (which bypasses the package)
 can mirror the same wire format without importing this module.
 
 Every emit targets the *per-container* ingester socket under
-``$XDG_RUNTIME_DIR/terok/events/<short_id>.sock``, where ``<short_id>``
-is the 12-char prefix of the container id — the same addressing the
-NFLOG reader uses, and deliberately distinct from the varlink
-subscriber socket at ``terok/clearance/<id>.sock`` that operator UIs
-glob.  Callers therefore supply ``container_id`` (the full podman
-container UUID) on every call: the destination socket is per-container,
-so the id is what selects it.
+``$XDG_RUNTIME_DIR/terok/events/<short_id>/ingester.sock``, where
+``<short_id>`` is the 12-char prefix of the container id — the same
+addressing the NFLOG reader uses, and deliberately distinct from the
+varlink subscriber socket at
+``terok/clearance/<short_id>/hub.sock`` that operator UIs glob.  Callers
+therefore supply ``container_id`` (the full podman container UUID) on
+every call: the destination socket is per-container, so the id is what
+selects it.
 
 Fails silent when the hub isn't listening: flipping shield state must
 never be held up by a desktop-side daemon being absent.
@@ -35,6 +36,11 @@ from terok_shield._wire_sanitize import sanitize, sanitize_mapping
 from terok_shield.validation import validate_container_id
 
 _log = logging.getLogger(__name__)
+
+#: Per-container event socket layout, mirrored by the standalone
+#: ``resources/nflog_reader.py`` script.
+_EVENT_SOCKET_RELATIVE_ROOT = Path("terok") / "events"
+_INGESTER_SOCKET_BASENAME = "ingester.sock"
 
 #: Cap on the socket connect/send syscalls so a dead but unreaped hub
 #: (listener exists, accept thread wedged) can't block the shield CLI
@@ -60,7 +66,7 @@ def _per_container_hub_socket(container_id: str) -> Path:
     """
     validate_container_id(container_id)
     xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    return Path(xdg) / "terok" / "events" / f"{container_id[:12]}.sock"
+    return Path(xdg) / _EVENT_SOCKET_RELATIVE_ROOT / container_id[:12] / _INGESTER_SOCKET_BASENAME
 
 
 class HubEventEmitter:
@@ -122,7 +128,7 @@ class HubEventEmitter:
         """Write one JSON line to the per-container ingester socket, swallowing all I/O errors.
 
         *container_id* selects the destination socket
-        (``$XDG_RUNTIME_DIR/terok/events/<short_id>.sock`` where
+        (``$XDG_RUNTIME_DIR/terok/events/<short_id>/ingester.sock`` where
         ``<short_id> = container_id[:12]``); the caller — the shield
         CLI — knows the full UUID at every emit site.
 

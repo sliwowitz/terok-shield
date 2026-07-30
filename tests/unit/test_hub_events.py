@@ -16,7 +16,7 @@ import pytest
 
 from terok_shield._hub_events import HubEventEmitter, _per_container_hub_socket
 
-from ..testfs import RUN_USER_PREFIX
+from ..testfs import EVENTS_RUNTIME_SUBPATH, INGESTER_SOCKET_FILENAME, RUN_USER_PREFIX
 
 _CONTAINER = "test-ctr"
 # Shorter than the canonical 64-char podman UUID — the unix-socket
@@ -71,11 +71,11 @@ def hub_socket(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[_Soc
     """Spin up a throwaway AF_UNIX listener bound to the per-container path.
 
     Points ``XDG_RUNTIME_DIR`` at *tmp_path* so the emitter resolves to
-    ``tmp_path/terok/events/<container_id>.sock`` — the very path the
-    recorder is listening on.
+    ``tmp_path/terok/events/<short_id>/ingester.sock`` — the very path
+    the recorder is listening on.
     """
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    path = tmp_path / "terok" / "events" / f"{_CONTAINER_ID[:12]}.sock"
+    path = tmp_path / EVENTS_RUNTIME_SUBPATH / _CONTAINER_ID[:12] / INGESTER_SOCKET_FILENAME
     recorder = _SocketRecorder(path)
     recorder.start()
     try:
@@ -91,14 +91,17 @@ class TestPerContainerHubSocket:
         """The per-container path sits under ``$XDG_RUNTIME_DIR/terok/events``."""
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
         assert _per_container_hub_socket(_CONTAINER_ID) == (
-            tmp_path / "terok" / "events" / f"{_CONTAINER_ID[:12]}.sock"
+            tmp_path / EVENTS_RUNTIME_SUBPATH / _CONTAINER_ID[:12] / INGESTER_SOCKET_FILENAME
         )
 
     def test_falls_back_to_run_user_uid(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without XDG_RUNTIME_DIR we fall back to ``/run/user/<uid>``."""
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        assert _per_container_hub_socket(_CONTAINER_ID) == Path(
-            f"{RUN_USER_PREFIX}{os.getuid()}/terok/events/{_CONTAINER_ID[:12]}.sock"
+        assert _per_container_hub_socket(_CONTAINER_ID) == (
+            Path(f"{RUN_USER_PREFIX}{os.getuid()}")
+            / EVENTS_RUNTIME_SUBPATH
+            / _CONTAINER_ID[:12]
+            / INGESTER_SOCKET_FILENAME
         )
 
     def test_distinct_container_ids_route_to_distinct_sockets(
@@ -109,12 +112,16 @@ class TestPerContainerHubSocket:
         a = _per_container_hub_socket("aaaa11112222")
         b = _per_container_hub_socket("bbbb22223333")
         assert a != b
-        assert a.parent == b.parent
+        assert a.parent != b.parent
+        assert a.parent.parent == b.parent.parent
+        assert a.name == b.name == INGESTER_SOCKET_FILENAME
 
     def test_valid_hex_id_passes(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """A well-formed hex container id resolves to a path without raising."""
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-        assert _per_container_hub_socket(_CONTAINER_ID).name == f"{_CONTAINER_ID[:12]}.sock"
+        path = _per_container_hub_socket(_CONTAINER_ID)
+        assert path.parent.name == _CONTAINER_ID[:12]
+        assert path.name == INGESTER_SOCKET_FILENAME
 
     @pytest.mark.parametrize(
         "bad_id",
@@ -235,8 +242,12 @@ class TestHubEventEmitter:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
         cid_a = "a" * 16
         cid_b = "b" * 16
-        rec_a = _SocketRecorder(tmp_path / "terok" / "events" / f"{cid_a[:12]}.sock")
-        rec_b = _SocketRecorder(tmp_path / "terok" / "events" / f"{cid_b[:12]}.sock")
+        rec_a = _SocketRecorder(
+            tmp_path / EVENTS_RUNTIME_SUBPATH / cid_a[:12] / INGESTER_SOCKET_FILENAME
+        )
+        rec_b = _SocketRecorder(
+            tmp_path / EVENTS_RUNTIME_SUBPATH / cid_b[:12] / INGESTER_SOCKET_FILENAME
+        )
         rec_a.start()
         rec_b.start()
         try:
