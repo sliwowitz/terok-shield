@@ -18,7 +18,7 @@ from terok_shield.verbs.control import (
     _handle_reset,
 )
 from terok_shield.verbs.observe import _handle_logs, _handle_profiles, _handle_status
-from terok_shield.verbs.stream import _handle_watch
+from terok_shield.verbs.stream import _handle_simple_clearance, _handle_watch
 
 
 class TestCommandDefs:
@@ -135,11 +135,29 @@ class TestHandlers:
         _handle_status(shield, container="ctr")
         assert capsys.readouterr().out.strip() == "up"
 
-    def test_handle_watch_delegates_to_run_watch(self) -> None:
-        """_handle_watch calls run_watch with state_dir and container."""
+    def test_handle_watch_confines_then_delegates(self) -> None:
+        """_handle_watch applies the state-reader policy before running watch."""
         shield = mock.MagicMock()
-        with mock.patch("terok_shield.watch.run_watch") as mock_run:
+        calls = mock.Mock()
+        with (
+            mock.patch("terok_shield._confine.confine_to_state", calls.confine),
+            mock.patch("terok_shield.watch.run_watch", calls.run),
+        ):
             _handle_watch(shield, "ctr")
+        assert calls.mock_calls == [
+            mock.call.confine(shield.config.state_dir),
+            mock.call.run(shield.config.state_dir, "ctr"),
+        ]
+
+    def test_handle_simple_clearance_does_not_confine_controller(self) -> None:
+        """The Podman/verdict controller does not use the state-reader policy."""
+        shield = mock.MagicMock()
+        with (
+            mock.patch("terok_shield._confine.confine_to_state") as mock_confine,
+            mock.patch("terok_shield.simple_clearance.run_simple_clearance") as mock_run,
+        ):
+            _handle_simple_clearance(shield, "ctr")
+        mock_confine.assert_not_called()
         mock_run.assert_called_once_with(shield.config.state_dir, "ctr")
 
     def test_handle_quarantine_delegates_and_prints(

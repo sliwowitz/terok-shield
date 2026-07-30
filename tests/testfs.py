@@ -49,6 +49,7 @@ STATE_DIR_WITH_SPACES = "/path/with spaces/dir"
 # When ``XDG_RUNTIME_DIR`` is unset, shield/reader paths fall back to
 # ``/run/user/<uid>/...``.  Tests assert against this prefix.
 
+SYSTEM_RUNTIME_DIR = Path("/run")
 RUN_USER_PREFIX = "/run/user/"
 
 # ── Installer-baked reader script path (templated by ``terok-shield setup``) ──

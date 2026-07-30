@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Self-confinement floor for shield's long-lived reader daemons.
+"""Self-confinement floor for shield's long-lived state reader.
 
-``shield watch`` and ``shield simple-clearance`` are long-lived processes that
-only ever read their per-container ``state_dir`` (dnsmasq/audit logs, the domain
-cache, the DNS-tier marker) plus the shared runtime they import from, and write
-nothing outside that directory.  Before the loop starts they pin themselves to
-that lane with terok-util's process-hardening floor plus Landlock filesystem
-confinement, so a bug in a reader can neither read another container's state nor
-drop a payload outside its own.  NFLOG is a netlink socket, not a filesystem
-access, so confinement leaves it untouched.
+``shield watch`` only reads its per-container ``state_dir`` (dnsmasq/audit logs,
+the domain cache, and the DNS-tier marker) plus the shared runtime it imports
+from, and writes nothing outside that directory.  Before the loop starts it pins
+itself to that lane with terok-util's process-hardening floor plus Landlock
+filesystem confinement, so a bug in the reader can neither read another
+container's state nor drop a payload outside its own.  NFLOG is a netlink socket,
+not a filesystem access, so confinement leaves it untouched.
+
+``shield simple-clearance`` is deliberately outside this policy: it is a
+controller that invokes Podman and verdict subprocesses, not a state-only reader.
 """
 
 from __future__ import annotations
@@ -28,10 +30,7 @@ _logger = logging.getLogger(__name__)
 #: purpose: the payoff is the write-side and the cross-container read isolation,
 #: not a minimal system-read surface.
 _SYSTEM_READ_ROOTS: tuple[Path, ...] = (
-    *(
-        Path(p)
-        for p in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc", "/dev", "/run")
-    ),
+    *(Path(p) for p in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc", "/dev")),
     Path(sys.prefix),
     Path(sys.base_prefix),
 )
