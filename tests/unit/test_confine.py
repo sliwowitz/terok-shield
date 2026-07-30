@@ -21,7 +21,13 @@ import pytest
 
 import terok_shield._confine as _confine
 
-from ..testfs import SYSTEM_RUNTIME_DIR
+from ..testfs import (
+    AUDIT_FILENAME,
+    CONFINE_SECRET_FILENAME,
+    CONFINE_SIBLING_STATE_DIR_NAME,
+    CONFINE_STATE_DIR_NAME,
+    SYSTEM_RUNTIME_DIR,
+)
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Landlock is Linux-only")
 
@@ -72,11 +78,12 @@ def test_partial_filesystem_confinement_is_reported(tmp_path: Path) -> None:
 
 def test_watch_state_lane_excludes_sibling_state_and_system_runtime(tmp_path: Path) -> None:
     """Watch retains state access without exposing sibling state or runtime credentials."""
-    state_dir = tmp_path / "container-a"
-    sibling = tmp_path / "container-b"
+    state_dir = tmp_path / CONFINE_STATE_DIR_NAME
+    sibling = tmp_path / CONFINE_SIBLING_STATE_DIR_NAME
     for directory in (state_dir, sibling):
         directory.mkdir()
-    (sibling / "secret").write_text("another container's state")
+    sibling_secret = sibling / CONFINE_SECRET_FILENAME
+    sibling_secret.write_text("another container's state")
 
     probe = textwrap.dedent(
         f"""
@@ -92,11 +99,11 @@ def test_watch_state_lane_excludes_sibling_state_and_system_runtime(tmp_path: Pa
         confine_to_state(Path({str(state_dir)!r}))
 
         out = []
-        state_file = Path({str(state_dir)!r}, "audit.jsonl")
+        state_file = Path({str(state_dir)!r}, {AUDIT_FILENAME!r})
         state_file.write_text("x")
         out.append(f"state-read-write-{{state_file.read_text()}}")
         try:
-            Path({str(sibling)!r}, "secret").read_text()
+            Path({str(sibling_secret)!r}).read_text()
             out.append("sibling-read-LEAK")
         except PermissionError:
             out.append("sibling-read-denied")

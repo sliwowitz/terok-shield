@@ -58,6 +58,11 @@ _log = logging.getLogger("terok-shield.nflog-reader")
 _EVENT_SOCKET_RELATIVE_ROOT = Path("terok") / "events"
 _INGESTER_SOCKET_BASENAME = "ingester.sock"
 
+# Keep in sync with ``terok_shield.validation.SAFE_CONTAINER_ID``.  This
+# script is installed as a standalone resource and cannot import the
+# package when the OCI hook executes it.
+_SAFE_CONTAINER_ID = re.compile(r"^[0-9a-fA-F]{12,64}$")
+
 # ── Protocol constants duplicated from terok-shield core ──────────────
 # The script is standalone so it cannot import from the package.  Keep in sync
 # with the canonical definitions:
@@ -220,6 +225,20 @@ def _select_emitter(mode: str, container_id: str = "", hub_socket: str = "") -> 
     return SocketEmitter(_resolve_hub_socket_path(container_id, hub_socket))
 
 
+def _validate_container_id(container_id: str) -> str:
+    """Validate a podman container ID before using it as a path component.
+
+    Mirrors [`validate_container_id`][terok_shield.validation.validate_container_id]
+    because this resource must remain stdlib-only.
+
+    Raises:
+        ValueError: If the ID is not a 12-to-64-character hexadecimal string.
+    """
+    if not _SAFE_CONTAINER_ID.fullmatch(container_id):
+        raise ValueError(f"Unsafe container id: {container_id!r}")
+    return container_id
+
+
 def _resolve_hub_socket_path(container_id: str = "", hub_socket: str = "") -> Path:
     """Return the hub-ingester socket path the reader should connect to.
 
@@ -236,9 +255,12 @@ def _resolve_hub_socket_path(container_id: str = "", hub_socket: str = "") -> Pa
        and connect to) — the reader speaks raw line-JSON, not varlink,
        so the two roles need separate sockets.
 
-    Raises ``SystemExit`` when neither is supplied — the OCI bridge hook
-    always passes ``--container-id``, so a missing value indicates a
-    misconfigured direct CLI invocation rather than a runtime fallback.
+    Raises:
+        SystemExit: When neither argument is supplied.  The OCI bridge
+            hook always passes ``--container-id``, so a missing value
+            indicates a misconfigured direct CLI invocation.
+        ValueError: If the derived-path *container_id* is not a
+            12-to-64-character hexadecimal string.
 
     ``XDG_RUNTIME_DIR`` is honoured when set; the hook always exports it
     (``_oci_state.bootstrap_env``) before spawning the reader, so the
@@ -255,7 +277,7 @@ def _resolve_hub_socket_path(container_id: str = "", hub_socket: str = "") -> Pa
     # short-ID convention for the lane directory, matching terok-sandbox
     # supervisor's [`SupervisorPaths.for_container`][terok_sandbox.supervisor.main.SupervisorPaths.for_container]
     # — both sides agree on the same per-container ingester path.
-    short_id = container_id[:12]
+    short_id = _validate_container_id(container_id)[:12]
     xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
     return Path(xdg) / _EVENT_SOCKET_RELATIVE_ROOT / short_id / _INGESTER_SOCKET_BASENAME
 
