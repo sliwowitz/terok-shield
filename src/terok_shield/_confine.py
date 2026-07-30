@@ -41,13 +41,15 @@ def confine_to_state(state_dir: Path) -> None:
 
     Applies terok-util's hardening floor, then Landlock-confines the process to
     read+execute the system roots and read+write only *state_dir*.  Both are
-    best-effort and never raise: an old kernel or a missing capability degrades
-    to a debug line, so the daemon still runs (unconfined) rather than failing
-    to start.
+    best-effort and never raise: an old kernel may apply only its supported
+    subset or leave the daemon unconfined, with either outcome logged at debug
+    level rather than preventing startup.
     """
     report = harden_self()
     if not report.fully_hardened:
         _logger.debug("shield reader hardening partial: %s", report)
     fs = confine_filesystem(_SYSTEM_READ_ROOTS, [state_dir])
-    if not fs.confined:
+    if fs.partially_confined:
+        _logger.debug("shield reader filesystem-confinement partially applied: %s", fs.reason)
+    elif not fs.confined:
         _logger.debug("shield reader filesystem-confinement not applied: %s", fs.reason)
