@@ -24,6 +24,10 @@ from terok_shield.resources import nflog_reader as reader
 from ..testfs import (
     AUDIT_FILENAME,
     DNSMASQ_LOG_FILENAME,
+    EVENTS_RUNTIME_SUBPATH,
+    FORBIDDEN_ABSOLUTE,
+    FORBIDDEN_TRAVERSAL,
+    INGESTER_SOCKET_FILENAME,
     READER_EVENTS_SOCK_FILENAME,
     RUN_USER_PREFIX,
 )
@@ -168,7 +172,9 @@ class TestSelectEmitter:
         cid = "cafef00d" * 8
         emitter = reader._select_emitter("socket", container_id=cid)
         assert isinstance(emitter, reader.SocketEmitter)
-        assert emitter._path == tmp_path / "terok" / "events" / f"{cid[:12]}.sock"
+        assert emitter._path == (
+            tmp_path / EVENTS_RUNTIME_SUBPATH / cid[:12] / INGESTER_SOCKET_FILENAME
+        )
 
     def test_socket_emitter_uses_explicit_hub_socket(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -396,11 +402,11 @@ class TestResolveHubSocketPath:
     def test_container_id_builds_per_container_path(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """The 12-char short ID becomes the basename — AF_UNIX path limit avoidance."""
+        """The 12-char short ID becomes the lane directory."""
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
         cid = "f" * 64  # full podman UUID shape
         assert reader._resolve_hub_socket_path(container_id=cid) == (
-            tmp_path / "terok" / "events" / f"{cid[:12]}.sock"
+            tmp_path / EVENTS_RUNTIME_SUBPATH / cid[:12] / INGESTER_SOCKET_FILENAME
         )
 
     def test_neither_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -410,13 +416,38 @@ class TestResolveHubSocketPath:
             reader._resolve_hub_socket_path()
         assert "neither --hub-socket nor --container-id supplied" in str(excinfo.value)
 
+    @pytest.mark.parametrize(
+        "container_id",
+        [
+            pytest.param(FORBIDDEN_TRAVERSAL, id="path-traversal"),
+            pytest.param(FORBIDDEN_ABSOLUTE, id="absolute-path"),
+            pytest.param("dead/beef/cafe", id="slash"),
+            pytest.param("deadbeef", id="too-short"),
+            pytest.param("g" * 12, id="non-hex"),
+            pytest.param("a" * 65, id="too-long"),
+            pytest.param("deadbeefcafe\nfoo", id="newline"),
+        ],
+    )
+    def test_malformed_container_id_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        container_id: str,
+    ) -> None:
+        """Untrusted IDs cannot escape or redirect the derived event-socket lane."""
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        with pytest.raises(ValueError, match="Unsafe container id"):
+            reader._resolve_hub_socket_path(container_id=container_id)
+
     def test_xdg_missing_falls_back_to_run_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Direct CLI invocation without ``XDG_RUNTIME_DIR`` lands under ``/run/user/<uid>``."""
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
         # Per-container branch still composes the path beneath /run/user/<uid>.
-        path = reader._resolve_hub_socket_path(container_id="abc")
+        short_id = "abc123def456"
+        path = reader._resolve_hub_socket_path(container_id=short_id)
         assert str(path).startswith(RUN_USER_PREFIX)
-        assert path.name == "abc.sock"
+        assert path.parent.name == short_id
+        assert path.name == INGESTER_SOCKET_FILENAME
 
 
 class TestResolveBinary:

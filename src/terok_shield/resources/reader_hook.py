@@ -135,13 +135,13 @@ def _spawn_reader(
     *full_container_id* — the full podman container UUID (not truncated).
     Passed through as ``--container-id`` so the reader can resolve its
     per-container ingester socket at
-    ``$XDG_RUNTIME_DIR/terok/events/<short_id>.sock`` (where
+    ``$XDG_RUNTIME_DIR/terok/events/<short_id>/ingester.sock`` (where
     ``<short_id> = container_id[:12]``) — the path the per-container
     supervisor ingests on, deliberately distinct from the varlink
-    subscriber socket at ``terok/clearance/<id>.sock`` that operator
-    UIs glob.  The hook bails out earlier when the OCI state has no
-    ``id`` field, so ``--container-id`` is always populated by the time
-    we Popen the reader.
+    subscriber socket at ``terok/clearance/<short_id>/hub.sock`` that
+    operator UIs glob.  The hook bails out earlier when the OCI state has
+    no ``id`` field, so ``--container-id`` is always populated by the
+    time we Popen the reader.
     """
     reader = _reader_script_path()
     if not reader.exists():

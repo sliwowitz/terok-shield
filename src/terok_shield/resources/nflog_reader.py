@@ -52,6 +52,17 @@ from typing import Protocol
 
 _log = logging.getLogger("terok-shield.nflog-reader")
 
+# ── Per-container event socket layout ─────────────────────────────────
+# Mirrored inline because this resource ships stdlib-only and cannot
+# import the canonical constants from ``terok_shield._hub_events``.
+_EVENT_SOCKET_RELATIVE_ROOT = Path("terok") / "events"
+_INGESTER_SOCKET_BASENAME = "ingester.sock"
+
+# Keep in sync with ``terok_shield.validation.SAFE_CONTAINER_ID``.  This
+# script is installed as a standalone resource and cannot import the
+# package when the OCI hook executes it.
+_SAFE_CONTAINER_ID = re.compile(r"^[0-9a-fA-F]{12,64}$")
+
 # ── Protocol constants duplicated from terok-shield core ──────────────
 # The script is standalone so it cannot import from the package.  Keep in sync
 # with the canonical definitions:
@@ -214,6 +225,20 @@ def _select_emitter(mode: str, container_id: str = "", hub_socket: str = "") -> 
     return SocketEmitter(_resolve_hub_socket_path(container_id, hub_socket))
 
 
+def _validate_container_id(container_id: str) -> str:
+    """Validate a podman container ID before using it as a path component.
+
+    Mirrors [`validate_container_id`][terok_shield.validation.validate_container_id]
+    because this resource must remain stdlib-only.
+
+    Raises:
+        ValueError: If the ID is not a 12-to-64-character hexadecimal string.
+    """
+    if not _SAFE_CONTAINER_ID.fullmatch(container_id):
+        raise ValueError(f"Unsafe container id: {container_id!r}")
+    return container_id
+
+
 def _resolve_hub_socket_path(container_id: str = "", hub_socket: str = "") -> Path:
     """Return the hub-ingester socket path the reader should connect to.
 
@@ -222,16 +247,20 @@ def _resolve_hub_socket_path(container_id: str = "", hub_socket: str = "") -> Pa
     1. ``--hub-socket`` (verbatim) — operator / supervisor explicitly pointed
        us at a socket.  Wins outright.
     2. ``--container-id`` — build the per-container path under
-       ``$XDG_RUNTIME_DIR/terok/events/<container_id>.sock``.  The
+       ``$XDG_RUNTIME_DIR/terok/events/<short_id>/ingester.sock``.  The
        supervisor for *this* container ingests there.  This is the
        reader-facing *ingester* socket and is deliberately distinct from
-       the varlink subscriber socket at ``terok/clearance/<id>.sock``
-       (which operator UIs glob and connect to) — the reader speaks raw
-       line-JSON, not varlink, so the two roles need separate sockets.
+       the varlink subscriber socket at
+       ``terok/clearance/<short_id>/hub.sock`` (which operator UIs glob
+       and connect to) — the reader speaks raw line-JSON, not varlink,
+       so the two roles need separate sockets.
 
-    Raises ``SystemExit`` when neither is supplied — the OCI bridge hook
-    always passes ``--container-id``, so a missing value indicates a
-    misconfigured direct CLI invocation rather than a runtime fallback.
+    Raises:
+        SystemExit: When neither argument is supplied.  The OCI bridge
+            hook always passes ``--container-id``, so a missing value
+            indicates a misconfigured direct CLI invocation.
+        ValueError: If the derived-path *container_id* is not a
+            12-to-64-character hexadecimal string.
 
     ``XDG_RUNTIME_DIR`` is honoured when set; the hook always exports it
     (``_oci_state.bootstrap_env``) before spawning the reader, so the
@@ -244,14 +273,13 @@ def _resolve_hub_socket_path(container_id: str = "", hub_socket: str = "") -> Pa
         raise SystemExit(
             "neither --hub-socket nor --container-id supplied; cannot resolve hub socket"
         )
-    # AF_UNIX's ``sun_path`` is 108 bytes; the full 64-char container
-    # UUID under ``$XDG_RUNTIME_DIR/terok/events/<id>.sock`` lands
-    # right at the limit.  Use the 12-char podman short-ID convention,
-    # matching terok-sandbox supervisor's [`SupervisorPaths.for_container`][terok_sandbox.supervisor.main.SupervisorPaths.for_container]
-    # — both sides agree on the same per-container ingester socket name.
-    short_id = container_id[:12]
+    # AF_UNIX's ``sun_path`` is 108 bytes.  Use the 12-char podman
+    # short-ID convention for the lane directory, matching terok-sandbox
+    # supervisor's [`SupervisorPaths.for_container`][terok_sandbox.supervisor.main.SupervisorPaths.for_container]
+    # — both sides agree on the same per-container ingester path.
+    short_id = _validate_container_id(container_id)[:12]
     xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    return Path(xdg) / "terok" / "events" / f"{short_id}.sock"
+    return Path(xdg) / _EVENT_SOCKET_RELATIVE_ROOT / short_id / _INGESTER_SOCKET_BASENAME
 
 
 # ── nsenter re-exec ───────────────────────────────────────────────────
@@ -1021,9 +1049,10 @@ def _parse_args() -> argparse.Namespace:  # pragma: no cover — thin argparse w
         default="",
         help=(
             "Full podman container UUID used to construct the per-container "
-            "ingester socket path (``$XDG_RUNTIME_DIR/terok/events/<id>.sock``).  "
-            "Set by the OCI bridge hook from the container's full id; required "
-            "unless ``--hub-socket`` is given."
+            "ingester socket path "
+            "(``$XDG_RUNTIME_DIR/terok/events/<short_id>/ingester.sock``).  "
+            "Set by the OCI bridge hook from the container's full id; "
+            "required unless ``--hub-socket`` is given."
         ),
     )
     parser.add_argument(

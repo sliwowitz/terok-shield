@@ -49,6 +49,7 @@ STATE_DIR_WITH_SPACES = "/path/with spaces/dir"
 # When ``XDG_RUNTIME_DIR`` is unset, shield/reader paths fall back to
 # ``/run/user/<uid>/...``.  Tests assert against this prefix.
 
+SYSTEM_RUNTIME_DIR = Path("/run")
 RUN_USER_PREFIX = "/run/user/"
 
 # ── Installer-baked reader script path (templated by ``terok-shield setup``) ──
@@ -74,11 +75,16 @@ AUDIT_FILENAME = "audit.jsonl"
 HOOK_ERROR_LOG_FILENAME = "hook-error.log"
 TEST_CACHE_FILENAME = "test.resolved"
 TEST_SUBDIR_NAME = "subdir"
+CONFINE_STATE_DIR_NAME = "container-a"
+CONFINE_SIBLING_STATE_DIR_NAME = "container-b"
+CONFINE_SECRET_FILENAME = "secret"
 BIN_DIR_NAME = "bin"
 HOOKS_DIR_NAME = "hooks"
 HOOK_ENTRYPOINT_NAME = "terok-shield-hook"
 DNSMASQ_LOG_FILENAME = "dnsmasq.log"
 READER_EVENTS_SOCK_FILENAME = "events.sock"
+EVENTS_RUNTIME_SUBPATH = Path("terok") / "events"
+INGESTER_SOCKET_FILENAME = "ingester.sock"
 READER_SCRIPT_FILENAME = "reader.py"
 READER_PID_FILENAME = "reader.pid"
 HOOK_ENTRYPOINT_PATH = "/opt/terok-shield-hook"
