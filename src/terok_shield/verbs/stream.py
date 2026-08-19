@@ -4,9 +4,9 @@
 """Long-running event-stream verbs — watch, simple-clearance.
 
 ``watch`` is a state-only reader that multiplexes the DNS/audit/NFLOG sources
-into a confined JSON-lines feed.  ``simple-clearance`` is a controller that
-invokes Podman and verdict subprocesses, so it does not use the reader's
-filesystem policy.  Their heavy machinery
+into one JSON-lines feed; it runs confined to its ``state_dir`` lane.
+``simple-clearance`` is a controller that invokes Podman and verdict
+subprocesses, so it does not use the reader's filesystem policy.  Their heavy machinery
 ([`watch`][terok_shield.watch] / [`simple_clearance`][terok_shield.simple_clearance])
 is imported inside the handler bodies, so wiring these verbs — or resolving
 their group module for ``--help`` — pulls in none of it.

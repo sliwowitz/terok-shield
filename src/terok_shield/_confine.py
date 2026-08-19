@@ -3,13 +3,14 @@
 
 """Self-confinement floor for shield's long-lived state reader.
 
-``shield watch`` only reads its per-container ``state_dir`` (dnsmasq/audit logs,
-the domain cache, and the DNS-tier marker) plus the shared runtime it imports
-from, and writes nothing outside that directory.  Before the loop starts it pins
-itself to that lane with terok-util's process-hardening floor plus Landlock
-filesystem confinement, so a bug in the reader can neither read another
-container's state nor drop a payload outside its own.  NFLOG is a netlink socket,
-not a filesystem access, so confinement leaves it untouched.
+``shield watch`` reads only its per-container ``state_dir`` — dnsmasq and
+audit logs, the domain cache, the DNS-tier marker — plus the shared runtime
+it imports from.  It writes nothing outside ``state_dir``.  Before the loop
+starts, the reader pins itself to that lane: terok-util's process-hardening
+floor plus Landlock filesystem confinement.  A bug in the reader then cannot
+read another container's state and cannot write outside its own lane.  NFLOG
+is a netlink socket, not a filesystem access, so confinement leaves it
+untouched.
 
 ``shield simple-clearance`` is deliberately outside this policy: it is a
 controller that invokes Podman and verdict subprocesses, not a state-only reader.
@@ -26,9 +27,9 @@ from terok_util import confine_filesystem, harden_self
 _logger = logging.getLogger(__name__)
 
 #: Directories a confined reader may read and execute from — the shared runtime
-#: (interpreter, stdlib, site-packages) it keeps importing from.  Broad on
-#: purpose: the payoff is the write-side and the cross-container read isolation,
-#: not a minimal system-read surface.
+#: (interpreter, stdlib, site-packages) it keeps importing from.  The roots are
+#: deliberately broad: the payoff is write isolation and cross-container read
+#: isolation, not a minimal system-read surface.
 _SYSTEM_READ_ROOTS: tuple[Path, ...] = (
     *(Path(p) for p in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc", "/dev")),
     Path(sys.prefix),
@@ -39,11 +40,11 @@ _SYSTEM_READ_ROOTS: tuple[Path, ...] = (
 def confine_to_state(state_dir: Path) -> None:
     """Harden this process and pin its filesystem to *state_dir* plus system reads.
 
-    Applies terok-util's hardening floor, then Landlock-confines the process to
-    read+execute the system roots and read+write only *state_dir*.  Both are
-    best-effort and never raise: an old kernel may apply only its supported
-    subset or leave the daemon unconfined, with either outcome logged at debug
-    level rather than preventing startup.
+    Applies terok-util's hardening floor, then Landlock-confines the process:
+    read and execute the system roots, read and write only *state_dir*.  Both
+    steps are best-effort and never raise.  An old kernel may apply only its
+    supported subset, or may leave the daemon unconfined.  The reader logs
+    either outcome at debug level and starts anyway.
     """
     report = harden_self()
     if not report.fully_hardened:
