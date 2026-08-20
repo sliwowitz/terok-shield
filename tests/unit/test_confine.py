@@ -55,6 +55,20 @@ def test_state_policy_hardens_without_granting_system_runtime(tmp_path: Path) ->
     ]
 
 
+def test_full_confinement_is_silent(tmp_path: Path) -> None:
+    """Both floors fully applied → nothing to report, no debug lines."""
+    hardening = mock.Mock(fully_hardened=True)
+    filesystem = mock.Mock(confined=True, partially_confined=False)
+    with (
+        mock.patch.object(_confine, "harden_self", return_value=hardening),
+        mock.patch.object(_confine, "confine_filesystem", return_value=filesystem),
+        mock.patch.object(_confine._logger, "debug") as debug,
+    ):
+        _REAL_CONFINE_TO_STATE(tmp_path)
+
+    debug.assert_not_called()
+
+
 def test_partial_filesystem_confinement_is_reported(tmp_path: Path) -> None:
     """An installed partial policy is not misreported as absent."""
     hardening = mock.Mock(fully_hardened=True)

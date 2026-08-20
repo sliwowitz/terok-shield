@@ -59,6 +59,10 @@ def make_probe_result() -> Iterator[ProbeResultFactory]:
         mock_poller.poll = MagicMock(side_effect=poll_returns)
         if recvmsg_result is not None:
             mock_sock.recvmsg.return_value = recvmsg_result
+        else:
+            # Paths that reach recvmsg without a scripted result model an
+            # empty error queue; paths that never reach it are unaffected.
+            mock_sock.recvmsg.side_effect = OSError("queue empty")
         if send_side_effect is not None:
             mock_sock.send.side_effect = send_side_effect
 
@@ -130,6 +134,20 @@ def _make_ancdata(ee_errno: int, ee_origin: int, ee_type: int, ee_code: int) -> 
             OSError("send failed"),
             {"result": "icmp-error", "icmp_code": 3},
             id="first-send-error-still-detects-icmp",
+        ),
+        pytest.param(
+            [[], [(0, 8)]],
+            (b"\x00", _make_ancdata(113, _SO_EE_ORIGIN_ICMP, 3, 13), 0, (TEST_IP1, 443)),
+            OSError("cached ICMP errno"),
+            {"result": "icmp-error", "icmp_code": 13},
+            id="late-error-surfaces-on-the-re-poll",
+        ),
+        pytest.param(
+            [[], [(0, 8)]],
+            None,
+            OSError("cached ICMP errno"),
+            {"result": "timeout"},
+            id="re-poll-events-but-empty-error-queue",
         ),
     ],
 )
