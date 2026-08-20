@@ -105,6 +105,15 @@ markers = [
   "needs_hooks: requires OCI hooks (global hooks installed or per-container hooks-dir persistence)",
 ]
 
+# Branch coverage on: an untested branch is an untested behavior.  The
+# ``python -m`` shim and entrypoint guards carry no logic to test.
+[tool.coverage.run]
+branch = true
+omit = ["*/terok_shield/cli/__main__.py"]
+
+[tool.coverage.report]
+exclude_also = ['if __name__ == "__main__":']
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

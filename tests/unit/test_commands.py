@@ -186,3 +186,30 @@ class TestHandlers:
         with pytest.raises(ValueError) as ctx:
             _handle_preview(shield, allow_all=True)
         assert "--all requires --down" in str(ctx.value)
+
+
+class TestPrintEnvHint:
+    """``print_env_hint`` prints issues and the setup hint when present."""
+
+    def test_prints_issues_and_hint(self, capsys: pytest.CaptureFixture) -> None:
+        from terok_shield import EnvironmentCheck
+        from terok_shield.verbs._common import print_env_hint
+
+        env = EnvironmentCheck(
+            ok=False,
+            hooks="none",
+            health="degraded",
+            issues=["nft missing"],
+            setup_hint="run setup",
+        )
+        print_env_hint(env)
+        out = capsys.readouterr().out
+        assert "nft missing" in out
+        assert "run setup" in out
+
+    def test_silent_when_clean(self, capsys: pytest.CaptureFixture) -> None:
+        from terok_shield import EnvironmentCheck
+        from terok_shield.verbs._common import print_env_hint
+
+        print_env_hint(EnvironmentCheck(ok=True, hooks="per-container", health="ok"))
+        assert capsys.readouterr().out == ""
