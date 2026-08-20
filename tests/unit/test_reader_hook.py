@@ -447,8 +447,10 @@ class TestReapReader:
             mock.patch.object(reader_hook.time, "sleep"),
         ):
             reader_hook._reap_reader(tmp_path)
-        signals_sent = [call.args[1] for call in killpg.call_args_list]
-        assert signals_sent == [signal.SIGTERM, signal.SIGKILL]
+        assert killpg.call_args_list == [
+            mock.call(12345, signal.SIGTERM),
+            mock.call(12345, signal.SIGKILL),
+        ]
         assert not pid_file.exists()
 
     def test_already_gone_process_is_handled(self, tmp_path: Path) -> None:
@@ -816,7 +818,8 @@ class TestReapReaderReapsTheWholeGroup:
                 "-c",
                 (
                     "import subprocess, sys;"
-                    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
+                    "sleeper = [sys.executable, '-c', 'import time; time.sleep(60)'];"
+                    "child = subprocess.Popen(sleeper);"
                     "print('ready', flush=True);"
                     "child.wait()"
                 ),
@@ -843,6 +846,8 @@ class TestReapReaderReapsTheWholeGroup:
                 _time.sleep(0.05)
             assert not reader_hook._group_alive(head.pid), "the reader group survived the reap"
         finally:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(head.pid, signal.SIGKILL)
+            if reader_hook._group_alive(head.pid):
+                # Only a failed reap leaves survivors to clean up.
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(head.pid, signal.SIGKILL)
             head.wait()
