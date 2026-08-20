@@ -214,14 +214,14 @@ def _spawn_reader(
 def _reap_reader(sd: Path) -> None:
     """SIGTERM the NFLOG reader's process group at poststop, SIGKILL past 2 s.
 
-    The spawned PID is only the head of the reader: it re-execs the real
-    reader inside the container's netns through ``nsenter`` (and
-    ``podman unshare`` outside the rootless userns), so the process
-    doing the work is a grandchild.  ``start_new_session=True`` at spawn
-    made the head a session leader, so every process in that chain
-    shares its process group — signalling the *group* reaps them all.
-    Signalling only the head PID orphaned the grandchild on every
-    container stop, leaking one netns reader per restart.
+    The spawned PID is only the head of the reader.  The head re-execs
+    the real reader inside the container's netns through ``nsenter``
+    (plus ``podman unshare`` outside the rootless userns), so the
+    working process is a grandchild.  ``start_new_session=True`` at
+    spawn makes the head a session leader, and every process in the
+    chain shares its process group.  A signal to the group reaps them
+    all.  A signal to only the head PID orphans the grandchild at every
+    container stop and leaks one netns reader per restart.
 
     Validates the PID against the expected reader cmdline before
     sending signals — mirrors the ``_is_our_dnsmasq`` pattern in
@@ -270,8 +270,8 @@ def _group_alive(pgid: int) -> bool:
     """Return ``True`` while any process of group *pgid* survives.
 
     ``killpg`` with signal 0 probes without signalling.  A
-    ``PermissionError`` means the group id was recycled by another
-    user's process — ours is gone.
+    ``PermissionError`` means another user's process now holds the
+    recycled group id — ours is gone.
     """
     try:
         os.killpg(pgid, 0)

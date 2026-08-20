@@ -798,10 +798,10 @@ class TestReapReaderReapsTheWholeGroup:
     """The netns re-exec grandchild dies with the head — the leak's locking test.
 
     The head PID in ``reader.pid`` re-execs the real reader as a
-    grandchild in its own process group.  Reaping only the head orphaned
-    that grandchild on every container stop, leaking one netns reader
-    per restart.  This drives ``_reap_reader`` against a real two-level
-    process tree and asserts the whole group is gone.
+    grandchild in its own process group.  A reap of only the head
+    orphans that grandchild at every container stop and leaks one netns
+    reader per restart.  The test drives ``_reap_reader`` against a
+    real two-level process tree and asserts the whole group dies.
     """
 
     def test_grandchild_dies_with_the_head(self, tmp_path: Path) -> None:
