@@ -423,31 +423,31 @@ class TestReapReader:
             reader_hook._reap_reader(tmp_path)
         kill.assert_not_called()
 
-    def test_sigterm_sent_and_pid_file_removed(self, tmp_path: Path) -> None:
+    def test_sigterm_sent_to_the_group_and_pid_file_removed(self, tmp_path: Path) -> None:
         pid_file = tmp_path / "reader.pid"
         pid_file.write_text("12345\n")
-        # First poll sees the process gone → no SIGKILL.
+        # First poll sees the group drained → no SIGKILL.
         with (
-            mock.patch.object(_oci_state.os, "kill") as kill,
+            mock.patch.object(_oci_state.os, "killpg") as killpg,
             mock.patch.object(reader_hook, "_is_our_reader", return_value=True),
-            mock.patch.object(_oci_state, "pid_exists", return_value=False),
+            mock.patch.object(reader_hook, "_group_alive", return_value=False),
             mock.patch.object(reader_hook.time, "sleep"),
         ):
             reader_hook._reap_reader(tmp_path)
-        kill.assert_called_once_with(12345, signal.SIGTERM)
+        killpg.assert_called_once_with(12345, signal.SIGTERM)
         assert not pid_file.exists()
 
-    def test_sigkill_escalation_when_process_lingers(self, tmp_path: Path) -> None:
+    def test_sigkill_escalation_when_the_group_lingers(self, tmp_path: Path) -> None:
         pid_file = tmp_path / "reader.pid"
         pid_file.write_text("12345\n")
         with (
-            mock.patch.object(_oci_state.os, "kill") as kill,
+            mock.patch.object(_oci_state.os, "killpg") as killpg,
             mock.patch.object(reader_hook, "_is_our_reader", return_value=True),
-            mock.patch.object(_oci_state, "pid_exists", return_value=True),
+            mock.patch.object(reader_hook, "_group_alive", return_value=True),
             mock.patch.object(reader_hook.time, "sleep"),
         ):
             reader_hook._reap_reader(tmp_path)
-        signals_sent = [call.args[1] for call in kill.call_args_list]
+        signals_sent = [call.args[1] for call in killpg.call_args_list]
         assert signals_sent == [signal.SIGTERM, signal.SIGKILL]
         assert not pid_file.exists()
 
@@ -456,7 +456,7 @@ class TestReapReader:
         pid_file.write_text("12345\n")
         with (
             mock.patch.object(reader_hook, "_is_our_reader", return_value=True),
-            mock.patch.object(_oci_state.os, "kill", side_effect=ProcessLookupError),
+            mock.patch.object(_oci_state.os, "killpg", side_effect=ProcessLookupError),
         ):
             reader_hook._reap_reader(tmp_path)
         assert not pid_file.exists()
@@ -586,7 +586,7 @@ class TestReapReaderSIGTERMFailureBranches:
         pid_file.write_text("12345\n")
         with (
             mock.patch.object(reader_hook, "_is_our_reader", return_value=True),
-            mock.patch.object(_oci_state.os, "kill", side_effect=OSError("EPERM")),
+            mock.patch.object(_oci_state.os, "killpg", side_effect=OSError("EPERM")),
         ):
             reader_hook._reap_reader(tmp_path)
         assert not pid_file.exists()
@@ -792,3 +792,57 @@ class TestResolveDossierFromMeta:
         meta = tmp_path / "dossier.json"
         meta.write_text(json.dumps({"task": 42, "name": True}))
         assert _oci_state.resolve_dossier_from_meta(meta) == {"task": "42", "name": "True"}
+
+
+class TestReapReaderReapsTheWholeGroup:
+    """The netns re-exec grandchild dies with the head — the leak's locking test.
+
+    The head PID in ``reader.pid`` re-execs the real reader as a
+    grandchild in its own process group.  Reaping only the head orphaned
+    that grandchild on every container stop, leaking one netns reader
+    per restart.  This drives ``_reap_reader`` against a real two-level
+    process tree and asserts the whole group is gone.
+    """
+
+    def test_grandchild_dies_with_the_head(self, tmp_path: Path) -> None:
+        import contextlib
+        import os
+        import subprocess
+        import time as _time
+
+        head = subprocess.Popen(  # noqa: S603
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import subprocess, sys;"
+                    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
+                    "print('ready', flush=True);"
+                    "child.wait()"
+                ),
+            ],
+            stdout=subprocess.PIPE,
+            start_new_session=True,
+            text=True,
+        )
+        try:
+            assert head.stdout is not None
+            assert head.stdout.readline().strip() == "ready"  # grandchild is alive
+            (tmp_path / "reader.pid").write_text(f"{head.pid}\n")
+
+            with mock.patch.object(reader_hook, "_is_our_reader", return_value=True):
+                reader_hook._reap_reader(tmp_path)
+
+            # The head is this test's child: reap its zombie so it leaves
+            # the group, then only a surviving grandchild can hold it open.
+            head.wait(timeout=5)
+            deadline = _time.monotonic() + 5.0
+            while _time.monotonic() < deadline:
+                if not reader_hook._group_alive(head.pid):
+                    break
+                _time.sleep(0.05)
+            assert not reader_hook._group_alive(head.pid), "the reader group survived the reap"
+        finally:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(head.pid, signal.SIGKILL)
+            head.wait()

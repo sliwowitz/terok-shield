@@ -212,7 +212,16 @@ def _spawn_reader(
 
 
 def _reap_reader(sd: Path) -> None:
-    """SIGTERM the NFLOG reader at poststop, SIGKILL if it lingers past 2 s.
+    """SIGTERM the NFLOG reader's process group at poststop, SIGKILL past 2 s.
+
+    The spawned PID is only the head of the reader: it re-execs the real
+    reader inside the container's netns through ``nsenter`` (and
+    ``podman unshare`` outside the rootless userns), so the process
+    doing the work is a grandchild.  ``start_new_session=True`` at spawn
+    made the head a session leader, so every process in that chain
+    shares its process group — signalling the *group* reaps them all.
+    Signalling only the head PID orphaned the grandchild on every
+    container stop, leaking one netns reader per restart.
 
     Validates the PID against the expected reader cmdline before
     sending signals — mirrors the ``_is_our_dnsmasq`` pattern in
@@ -233,8 +242,10 @@ def _reap_reader(sd: Path) -> None:
         pid_file.unlink(missing_ok=True)
         return
     try:
-        # PID validated by ``_is_our_reader`` cmdline check above.
-        os.kill(pid, signal.SIGTERM)  # NOSONAR
+        # PID validated by ``_is_our_reader`` cmdline check above; the
+        # group id equals the head PID because spawn made it a session
+        # leader.
+        os.killpg(pid, signal.SIGTERM)  # NOSONAR
     except ProcessLookupError:
         pid_file.unlink(missing_ok=True)
         return
@@ -245,14 +256,28 @@ def _reap_reader(sd: Path) -> None:
 
     for _ in range(_REAP_POLL_TICKS):
         time.sleep(_REAP_POLL_INTERVAL_S)
-        if not _oci_state.pid_exists(pid):
+        if not _group_alive(pid):
             break
     else:
         with contextlib.suppress(ProcessLookupError, OSError):
-            # Reader didn't exit within the grace window; force-kill
-            # the same validated PID.
-            os.kill(pid, signal.SIGKILL)  # NOSONAR
+            # The group didn't drain within the grace window; force-kill
+            # the same validated group.
+            os.killpg(pid, signal.SIGKILL)  # NOSONAR
     pid_file.unlink(missing_ok=True)
+
+
+def _group_alive(pgid: int) -> bool:
+    """Return ``True`` while any process of group *pgid* survives.
+
+    ``killpg`` with signal 0 probes without signalling.  A
+    ``PermissionError`` means the group id was recycled by another
+    user's process — ours is gone.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
 
 
 def _reader_alive(pid_file: Path) -> bool:
