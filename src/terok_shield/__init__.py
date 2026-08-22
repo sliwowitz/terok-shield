@@ -66,6 +66,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ShieldNeedsSetup": ("terok_shield.run", "ShieldNeedsSetup"),
     "check_firewall_binaries": ("terok_shield.prereqs", "check_firewall_binaries"),
     "check_krun_binaries": ("terok_shield.prereqs", "check_krun_binaries"),
+    "recorded_dns_tier": ("terok_shield.state", "recorded_dns_tier"),
     # Command registry — re-exported for the terok integration layer.
     # ArgDef/CommandDef now live in terok-util; we route through it so
     # existing consumers (terok.lib.integrations.shield) keep working.
@@ -586,4 +587,5 @@ __all__ = [
     "ShieldMode",
     "ShieldRuntime",
     "ShieldState",
+    "recorded_dns_tier",
 ]

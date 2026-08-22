@@ -20,8 +20,15 @@ from ..config import DnsTier, detect_dns_tier
 from ..run import CommandRunner, ExecError, which_sbin_aware
 from . import dnsmasq
 
-# Throwaway config dnsmasq --test reads to probe state-dir access.
-_PROBE_NAME = ".apparmor-probe.conf"
+# Throwaway config dnsmasq --test reads to probe state-dir access.  The name
+# MUST start with ``dnsmasq.`` so the profile addendum's
+# ``owner .../shield/dnsmasq.* rwk`` grant covers it (see
+# terok-sandbox ``install_profile.sh``).  A name outside that glob would be
+# denied even with the correct profile installed, so the probe would report
+# confinement on every AppArmor host and shield would never use the dnsmasq
+# tier.  It also makes the probe a true test of the addendum: an old profile
+# that named the individual files, not the glob, correctly fails it.
+_PROBE_NAME = "dnsmasq.apparmor-probe.conf"
 _PROBE_CONTENT = "# terok-shield AppArmor access probe\n"
 _PROBE_TIMEOUT_S = 10  # dnsmasq --test only parses and exits
 

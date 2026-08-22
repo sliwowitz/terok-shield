@@ -17,9 +17,17 @@ reading its config there.
 shield handles this automatically: at pre-start it probes whether a
 confined dnsmasq can read the state dir (running `dnsmasq --test` — no
 root needed) and, if not, **falls back to the `dig` tier**. Egress
-filtering stays fully enforced; only DNS handling degrades — domain
-allowlists resolve statically at pre-start instead of tracking IP
-rotation live. The fallback is recorded in the per-container audit log.
+filtering stays fully enforced, and DNS keeps working. Shield still owns the
+container's `resolv.conf` on the fallback tiers. It points `resolv.conf` at
+the upstream forwarder the firewall allows, instead of podman's default.
+Podman's default lists the host's own nameservers. On a LAN one of those is a
+router, and the egress filter blocks the router as a private range. Only the
+*live* handling changes: on the fallback tiers domain allowlists resolve once
+at pre-start, not as each reply arrives.
+
+The fallback is **not silent**. Shield logs it at `WARNING` on the console,
+with this remedy, and in the per-container audit log. A later egress failure
+from a rotated address then traces back to a known cause.
 
 ## Keeping the dnsmasq tier
 

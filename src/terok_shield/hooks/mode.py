@@ -197,10 +197,14 @@ class HookMode:
         # Build podman args
         args = self._build_network_args(mode)
 
-        # Redirect container DNS through per-container dnsmasq via volume mount.
-        # See commit history for detailed rationale on why --dns cannot be used.
-        if tier == DnsTier.DNSMASQ:
-            args += ["--volume", f"{StateBundle(sd).resolv_conf}:/etc/resolv.conf:ro,Z"]
+        # WORKAROUND(pasta-dns-bind): bind-mount shield's own resolv.conf over
+        # the container's on every tier instead of using podman --dns. --dns
+        # makes pasta bind host port 53, which fails for a rootless container.
+        # Podman's default resolv.conf lists the host's own nameservers; on an
+        # AppArmor host one of those is a blocked LAN router, so the container
+        # resolves nothing (#1246). Drop this when rootless podman/pasta can
+        # set the container's resolvers without binding host port 53.
+        args += ["--volume", f"{StateBundle(sd).resolv_conf}:/etc/resolv.conf:ro,Z"]
 
         # Annotations: profiles, name, state_dir, version, dns.  loopback_ports
         # lives in the state bundle (per-container, written above), not as an
@@ -328,7 +332,7 @@ class HookMode:
         self._resolve_override(sd)
         self._resolve_security_deny(sd)
         self._write_ruleset(sd, tier, upstream_dns, *gateways)
-        self._write_dnsmasq_config_or_scrub(sd, tier, upstream_dns)
+        self._write_dns_artifacts(sd, tier, upstream_dns)
 
     def _write_generated_tiers(
         self,
@@ -439,29 +443,47 @@ class HookMode:
             ruleset += add_deny_elements_dual(denied_ips)
         StateBundle(sd).ruleset.write_text(ruleset)
 
-    def _write_dnsmasq_config_or_scrub(self, sd: Path, tier: DnsTier, upstream_dns: str) -> None:
-        """Pre-generate dnsmasq config for dnsmasq tier, or scrub stale artifacts."""
+    def _write_dns_artifacts(self, sd: Path, tier: DnsTier, upstream_dns: str) -> None:
+        """Write the container's ``resolv.conf`` on every tier, and its
+        ``dnsmasq.conf`` on the dnsmasq tier.
+
+        Shield owns the container's ``resolv.conf`` on every tier. The
+        alternative is podman's default ``resolv.conf``. That default lists
+        the host's own nameservers. On an AppArmor host such as Manjaro, one
+        of those is a LAN router. The egress filter rejects the router as a
+        private range, so the container resolves nothing (#1246).  The file is
+        bind-mounted read-only over the container's ``/etc/resolv.conf`` — see
+        ``WORKAROUND(pasta-dns-bind)`` in ``pre_start``.
+
+        - **dnsmasq tier**: point ``resolv.conf`` at the per-container dnsmasq
+          bind address. dnsmasq forwards to *upstream_dns* and adds each
+          resolved address to the allow sets.
+        - **dig / getent tiers**: no per-container dnsmasq runs, so point
+          ``resolv.conf`` straight at *upstream_dns*, the forwarder the
+          firewall allows. Name resolution then uses the forwarder. The nft
+          sets still gate egress, so this widens resolution only, never
+          reachability. This also removes the dnsmasq artifacts.
+        """
+        bundle = StateBundle(sd)
         if tier == DnsTier.DNSMASQ:
             bind = _dnsmasq_bind(self._config.runtime)
             domains = dnsmasq.read_merged_domains(sd)
             conf = dnsmasq.generate_config(
                 upstream_dns,
                 domains,
-                StateBundle(sd).dnsmasq_pid,
+                bundle.dnsmasq_pid,
                 listen_address=bind,
-                log_path=StateBundle(sd).dnsmasq_log,
+                log_path=bundle.dnsmasq_log,
                 deny_domains=dnsmasq.read_denied_domains(sd),
                 override_domains=dnsmasq.read_override_domains(sd),
             )
-            StateBundle(sd).dnsmasq_conf.write_text(conf)
-            StateBundle(sd).resolv_conf.write_text(f"nameserver {bind}\noptions ndots:0\n")
-        else:
-            for stale in (
-                StateBundle(sd).dnsmasq_conf,
-                StateBundle(sd).dnsmasq_pid,
-                StateBundle(sd).resolv_conf,
-            ):
-                stale.unlink(missing_ok=True)
+            bundle.dnsmasq_conf.write_text(conf)
+            bundle.resolv_conf.write_text(f"nameserver {bind}\noptions ndots:0\n")
+            return
+        bundle.dnsmasq_conf.unlink(missing_ok=True)
+        bundle.dnsmasq_pid.unlink(missing_ok=True)
+        bundle.dnsmasq_log.unlink(missing_ok=True)
+        bundle.resolv_conf.write_text(f"nameserver {upstream_dns}\noptions ndots:0\n")
 
     def _build_network_args(self, mode: str) -> list[str]:
         """Build rootless network arguments (pasta or slirp4netns)."""
@@ -486,18 +508,26 @@ class HookMode:
         ]
 
     def _detect_dns_tier(self, container: str, state_dir: Path) -> DnsTier:
-        """Pick the DNS tier, logging an advisory when AppArmor downgrades dnsmasq."""
+        """Pick the DNS tier. Warn on the console when AppArmor blocks dnsmasq.
+
+        AppArmor confinement is not a silent downgrade. This warns the operator
+        on the console (``logger.warning``) and in the audit log. The message
+        names the lost dnsmasq tier and the way to restore it. The operator
+        then sees the drop to static resolution at once, instead of tracing a
+        later egress failure back to it.
+        """
         tier, apparmor_blocked = apparmor.detect_dns_tier_under_apparmor(self._runner, state_dir)
         if apparmor_blocked:
-            self._audit.log_event(
-                container,
-                "setup",
-                detail=(
-                    f"DNS tier fell back to {tier.value}: AppArmor confines dnsmasq "
-                    f"from {state_dir}. Install the terok AppArmor profile to keep "
-                    "the dnsmasq tier — see docs/apparmor.md."
-                ),
+            detail = (
+                f"DNS tier fell back to '{tier.value}'. AppArmor confines dnsmasq from "
+                f"{state_dir}, so the per-container dnsmasq tier is not available. "
+                "Domain allowlists now resolve once at launch, not on each reply, so a "
+                "domain whose address rotates can fail. To restore the dnsmasq tier, "
+                "install the terok-shield AppArmor profile addendum. See docs/apparmor.md. "
+                "The terok orchestrator installs it with 'terok setup'."
             )
+            logger.warning("%s", detail)
+            self._audit.log_event(container, "setup", detail=detail)
         return tier
 
     def _get_podman_info(self) -> PodmanInfo:

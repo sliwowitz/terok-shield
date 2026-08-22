@@ -28,6 +28,7 @@ slots:
   alpine:
   void:
   mageia:
+  manjaro:
 
 phases:
   - name: installing shield hooks
