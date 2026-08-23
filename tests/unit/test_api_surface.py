@@ -35,6 +35,7 @@ EXPECTED_ALL = [
     "ShieldMode",
     "ShieldRuntime",
     "ShieldState",
+    "recorded_dns_tier",
 ]
 
 

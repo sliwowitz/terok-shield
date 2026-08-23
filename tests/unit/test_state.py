@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from terok_shield.state import BUNDLE_VERSION, STATE_DIR_MODE, StateBundle
+from terok_shield.state import (
+    BUNDLE_VERSION,
+    STATE_DIR_MODE,
+    StateBundle,
+    recorded_dns_tier,
+)
 
 from ..testfs import FAKE_STATE_DIR, READER_PID_FILENAME
 from ..testnet import TEST_DOMAIN, TEST_DOMAIN2, TEST_IP1, TEST_IP2, TEST_IP3
@@ -136,6 +141,30 @@ def test_ensure_dirs_repairs_loose_existing_mode(tmp_path: Path) -> None:
 def test_read_denied_ips_empty_when_no_policy(tmp_path: Path) -> None:
     """``StateBundle.read_denied_ips()`` returns an empty set with no policy."""
     assert StateBundle(tmp_path).read_denied_ips() == set()
+
+
+def test_read_dns_tier_none_when_unset(tmp_path: Path) -> None:
+    """No ``dns.tier`` file → ``None`` (never shielded / predates recording)."""
+    assert StateBundle(tmp_path).read_dns_tier() is None
+    assert recorded_dns_tier(tmp_path) is None
+
+
+@pytest.mark.parametrize("tier", ["dnsmasq", "dig", "getent"])
+def test_read_dns_tier_returns_recorded_value(tmp_path: Path, tier: str) -> None:
+    """The recorded tier is read back verbatim, trailing newline stripped."""
+    bundle = StateBundle(tmp_path)
+    bundle.dns_tier.write_text(f"{tier}\n")
+    assert bundle.read_dns_tier() == tier
+    assert recorded_dns_tier(tmp_path) == tier
+
+
+def test_read_dns_tier_none_for_unsupported_or_corrupt(tmp_path: Path) -> None:
+    """An unsupported string, or non-UTF-8 bytes, read as None — never a bad tier."""
+    bundle = StateBundle(tmp_path)
+    bundle.dns_tier.write_text("bogus\n")
+    assert bundle.read_dns_tier() is None
+    bundle.dns_tier.write_bytes(b"\xff\xfe not utf-8")
+    assert bundle.read_dns_tier() is None
 
 
 def test_read_denied_ips_composes_security_deny_and_live(tmp_path: Path) -> None:

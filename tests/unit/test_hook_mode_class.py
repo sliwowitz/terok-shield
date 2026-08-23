@@ -22,7 +22,7 @@ from terok_shield.config import (
 )
 from terok_shield.hooks.install import install_hooks
 from terok_shield.hooks.mode import HookMode, _covered
-from terok_shield.nft.constants import DNSMASQ_BIND_KRUN, PASTA_HOST_LOOPBACK_MAP
+from terok_shield.nft.constants import DNSMASQ_BIND_KRUN, PASTA_DNS, PASTA_HOST_LOOPBACK_MAP
 from terok_shield.nft.rules import RulesetBuilder
 from terok_shield.run import ExecError
 
@@ -1258,6 +1258,50 @@ class TestPreStartDnsTierBranches:
         assert TEST_IP1 in call_entries
         # No --dns flag for dig tier
         assert "--dns" not in args
+
+    @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+    def test_pre_start_dig_tier_writes_resolv_conf_at_upstream(
+        self,
+        _has_hooks: mock.Mock,
+        monkeypatch: pytest.MonkeyPatch,
+        make_hook_mode: HookModeHarnessFactory,
+    ) -> None:
+        """The dig and getent fallback still owns the container's resolv.conf.
+
+        This guards against #1246. On the AppArmor fallback tiers, shield used
+        to remove resolv.conf. The container then used podman's default, which
+        lists the host's own nameservers. On a LAN one of those is a router,
+        and the egress filter blocks the router as a private range. Shield now
+        writes resolv.conf, points it at the forwarder the firewall allows, and
+        bind-mounts it on this tier too.
+        """
+        _set_euid(monkeypatch, 0)
+        harness = make_hook_mode()
+        harness.runner.run.return_value = _MODERN_PODMAN_INFO
+        harness.runner.has.side_effect = lambda name: name != "dnsmasq"  # dig tier
+        harness.profiles.compose_profiles.return_value = [TEST_DOMAIN]
+
+        # Seed a stale query log from a prior dnsmasq-tier launch. The fallback
+        # must remove it, or `shield watch` shows historical queries after the
+        # downgrade.
+        sd = harness.config.state_dir.resolve()
+        seed = StateBundle(sd)
+        seed.ensure_dirs()
+        seed.dnsmasq_log.write_text("stale query\n")
+
+        args = harness.mode.pre_start("test", ["dev-standard"])
+
+        # resolv.conf is bind-mounted :ro on the fallback tier too.
+        volume_args = [args[i + 1] for i, a in enumerate(args) if a == "--volume"]
+        assert any("/etc/resolv.conf:ro,Z" in v for v in volume_args)
+        # ...and points at the upstream forwarder (pasta), not the dnsmasq
+        # loopback (no dnsmasq here) and not a leaked host nameserver.
+        resolv = StateBundle(sd).resolv_conf.read_text()
+        assert f"nameserver {PASTA_DNS}" in resolv
+        assert "127.0.0.1" not in resolv
+        # No dnsmasq artifacts on the fallback tier, including the stale log.
+        assert not StateBundle(sd).dnsmasq_conf.exists()
+        assert not StateBundle(sd).dnsmasq_log.exists()
 
     @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
     def test_pre_start_dnsmasq_tier_skips_pre_resolution(

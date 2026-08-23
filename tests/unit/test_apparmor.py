@@ -9,6 +9,7 @@ from unittest import mock
 
 from terok_shield.config import DnsTier, detect_dns_tier
 from terok_shield.dns.apparmor import (
+    _PROBE_NAME,
     detect_dns_tier_under_apparmor,
     dnsmasq_can_read_state_dir,
 )
@@ -99,6 +100,21 @@ def test_can_read_true_when_probe_unwritable(tmp_path: Path) -> None:
     missing = tmp_path / "absent-parent" / "shield"  # parent missing → write fails
     assert dnsmasq_can_read_state_dir(runner, missing) is True
     runner.run.assert_not_called()
+
+
+def test_probe_name_is_covered_by_the_dnsmasq_glob() -> None:
+    """The probe filename must match the profile's ``dnsmasq.*`` grant.
+
+    terok-sandbox's ``install_profile.sh`` grants
+    ``owner .../shield/dnsmasq.* rwk``.  A probe named outside that glob is
+    denied even with the correct profile installed, so shield would report
+    confinement on every AppArmor host and never use the dnsmasq tier.  The
+    grant and the probe live in different repos; this is the guard that keeps
+    them from drifting apart again.
+    """
+    from fnmatch import fnmatch
+
+    assert fnmatch(_PROBE_NAME, "dnsmasq.*")
 
 
 # ── detect_dns_tier_under_apparmor: wiring + apparmor_blocked flag ──

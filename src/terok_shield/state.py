@@ -276,6 +276,24 @@ class StateBundle:
         """Path to the persisted DNS tier value."""
         return self.state_dir / "dns.tier"
 
+    def read_dns_tier(self) -> str | None:
+        """The DNS tier this container launched with (``dnsmasq``/``dig``/``getent``).
+
+        Returns the value the OCI hook recorded at ``pre_start`` — the tier
+        actually enforcing this task's egress — or ``None`` when the file is
+        absent (the container was never shielded, or predates tier
+        recording).  A degraded tier (``dig``/``getent``) means domain
+        allowlisting fell back to static resolution with no IP-rotation
+        handling; the operator surfaces that alongside the shield posture.
+        """
+        try:
+            tier = self.dns_tier.read_text().strip()
+        except (OSError, ValueError):  # absent, or non-UTF-8 content
+            return None
+        # Only the tiers the OCI hook records (mirrors config.DnsTier's values);
+        # a stray or corrupt file reads as None, never an unsupported tier.
+        return tier if tier in {"dnsmasq", "dig", "getent"} else None
+
     @property
     def network_mode(self) -> Path:
         """Path to the persisted rootless network mode (``pasta``/``slirp4netns``).
@@ -434,7 +452,7 @@ class StateBundle:
 
     @property
     def resolv_conf(self) -> Path:
-        """Path to the resolv.conf bind-mounted over ``/etc/resolv.conf`` in dnsmasq tier."""
+        """Path to the resolv.conf bind-mounted over ``/etc/resolv.conf`` on every DNS tier."""
         return self.state_dir / "resolv.conf"
 
     # ── Container identity and observability ────────────────
@@ -524,3 +542,15 @@ class StateBundle:
         self.hooks_dir.chmod(STATE_DIR_MODE)
         self.policy_dir.mkdir(parents=True, exist_ok=True)
         self.policy_dir.chmod(STATE_DIR_MODE)
+
+
+def recorded_dns_tier(state_dir: Path) -> str | None:
+    """The DNS tier a shielded container launched with, read from *state_dir*.
+
+    Thin public wrapper over
+    [`StateBundle.read_dns_tier`][terok_shield.state.StateBundle.read_dns_tier]
+    so callers that only want the tier need not know the bundle layout.
+    Returns ``dnsmasq``/``dig``/``getent``, or ``None`` when no tier was
+    recorded.
+    """
+    return StateBundle(state_dir).read_dns_tier()
