@@ -109,7 +109,7 @@ def test_profile_loader_constructor(tmp_path: Path) -> None:
 def test_resolve_and_cache_accepts_cache_path(tmp_path: Path) -> None:
     """resolve_and_cache(entries, cache_path) writes to the given path."""
     runner = mock.MagicMock()
-    runner.dig_all.return_value = [TEST_IP1]
+    runner.lookup_all.return_value = [TEST_IP1]
     resolver = DnsResolver(runner=runner)
 
     cache_path = StateBundle(tmp_path).resolved_cache
@@ -122,14 +122,14 @@ def test_resolve_and_cache_accepts_cache_path(tmp_path: Path) -> None:
 def test_resolve_and_cache_reuses_fresh_cache(tmp_path: Path) -> None:
     """A fresh cache suppresses a second DNS lookup."""
     runner = mock.MagicMock()
-    runner.dig_all.return_value = [TEST_IP1]
+    runner.lookup_all.return_value = [TEST_IP1]
     resolver = DnsResolver(runner=runner)
     cache_path = StateBundle(tmp_path).resolved_cache
 
     resolver.resolve_and_cache([TEST_DOMAIN], cache_path)
-    runner.dig_all.reset_mock()
+    runner.lookup_all.reset_mock()
     assert resolver.resolve_and_cache([TEST_DOMAIN], cache_path, max_age=3600) == [TEST_IP1]
-    runner.dig_all.assert_not_called()
+    runner.lookup_all.assert_not_called()
 
 
 def test_allow_ip_records_in_overlay(

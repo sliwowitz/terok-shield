@@ -43,12 +43,13 @@ class DnsTier(enum.Enum):
 
     DNSMASQ: Per-container dnsmasq with ``--nftset`` auto-populates nft
         allow sets on every DNS query.  Handles IP rotation.
-    DIG: Static resolution at pre-start via ``dig`` (current fallback).
+    LOOKUP: Static resolution at pre-start via a one-shot lookup tool —
+        ``dig`` (bind) or ``drill`` (ldns, the Arch/Manjaro default).
     GETENT: Single-IP resolution via ``getent hosts`` (minimal fallback).
     """
 
     DNSMASQ = "dnsmasq"
-    DIG = "dig"
+    LOOKUP = "lookup"
     GETENT = "getent"
 
 
@@ -60,7 +61,7 @@ def detect_dns_tier(
     """Detect the best available DNS resolution tier.
 
     Probes for executables in priority order: dnsmasq (with nftset
-    support, and able to read its config) > dig > getent.
+    support, and able to read its config) > dig/drill > getent.
 
     Args:
         has: Returns True if the named executable exists on PATH.
@@ -70,14 +71,14 @@ def detect_dns_tier(
         dnsmasq_state_readable: Returns True if dnsmasq can read its
             config from the shield state directory.  Returns False when
             an enforcing AppArmor profile confines dnsmasq away from it,
-            so we fall back to ``dig`` rather than fail the launch.
+            so we fall back to the lookup tier rather than fail the launch.
             Defaults to ``lambda: True``; production callers pass a real
             probe.
     """
     if has("dnsmasq") and dnsmasq_nftset_ok() and dnsmasq_state_readable():
         return DnsTier.DNSMASQ
-    if has("dig"):
-        return DnsTier.DIG
+    if has("dig") or has("drill"):
+        return DnsTier.LOOKUP
     return DnsTier.GETENT
 
 

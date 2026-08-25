@@ -63,12 +63,12 @@ class CommandRunner(Protocol):
         """Inspect a container attribute via podman."""
         ...
 
-    def dig_all(self, domain: str, *, timeout: int = 10) -> list[str]:
+    def lookup_all(self, domain: str, *, timeout: int = 10) -> list[str]:
         """Resolve domain to both IPv4 and IPv6 addresses."""
         ...
 
     def getent_hosts(self, domain: str, *, timeout: int = 10) -> list[str]:
-        """Resolve domain via ``getent hosts`` (fallback when dig is missing)."""
+        """Resolve domain via ``getent hosts`` (fallback when no lookup tool exists)."""
         ...
 
 
@@ -185,28 +185,35 @@ class SubprocessRunner:
 
     # ── DNS resolution ──────────────────────────────────
 
-    def dig_all(self, domain: str, *, timeout: int = 10) -> list[str]:
-        """Resolve domain to both IPv4 and IPv6 addresses in a single query.
+    def lookup_all(self, domain: str, *, timeout: int = 10) -> list[str]:
+        """Resolve domain to both IPv4 and IPv6 addresses with the host's lookup tool.
 
-        Runs ``dig +short domain A domain AAAA`` and validates each line
-        with ``ipaddress``.  Returns empty list on lookup failure or
-        timeout.
+        Prefers ``dig`` (one two-type query) and falls back to ``drill``
+        (ldns, the Arch/Manjaro default; one type per invocation).
+        Validates each output line with ``ipaddress``.  Returns an empty
+        list on lookup failure or timeout.
 
         Raises:
-            DigNotFoundError: If ``dig`` is not installed.
+            LookupToolNotFoundError: If neither tool is installed.
         """
-        if not self.has("dig"):
-            raise DigNotFoundError(
-                "dig binary not found. Install DNS utilities:\n"
+        if self.has("dig"):
+            out = self.run(
+                ["dig", "+short", domain, "A", domain, "AAAA"],
+                check=False,
+                timeout=timeout,
+            )
+        elif self.has("drill"):
+            out = "\n".join(
+                self.run(["drill", "-Q", domain, rrtype], check=False, timeout=timeout)
+                for rrtype in ("A", "AAAA")
+            )
+        else:
+            raise LookupToolNotFoundError(
+                "no DNS lookup tool found. Install one:\n"
                 "  Debian/Ubuntu: sudo apt install dnsutils\n"
                 "  Fedora/RHEL:   sudo dnf install bind-utils\n"
-                "  Arch:          sudo pacman -S bind"
+                "  Arch/Manjaro:  sudo pacman -S ldns   (drill) or bind (dig)"
             )
-        out = self.run(
-            ["dig", "+short", domain, "A", domain, "AAAA"],
-            check=False,
-            timeout=timeout,
-        )
         result: list[str] = []
         for line in out.splitlines():
             addr = line.strip()
@@ -220,7 +227,7 @@ class SubprocessRunner:
         return result
 
     def getent_hosts(self, domain: str, *, timeout: int = 10) -> list[str]:
-        """Resolve domain via NSS (fallback when dig is missing or broken).
+        """Resolve domain via NSS (fallback when the lookup tool is missing or broken).
 
         Queries both address families explicitly: plain ``getent hosts``
         stops at the first family glibc resolves (AAAA for dual-stack
@@ -229,7 +236,7 @@ class SubprocessRunner:
         reject as "Host is unreachable" (terok#1119).
 
         *timeout* bounds each family query; on expiry that family yields
-        nothing (best-effort, matching ``dig_all``).
+        nothing (best-effort, matching ``lookup_all``).
         """
         result: list[str] = []
         for database in ("ahostsv4", "ahostsv6"):
@@ -265,11 +272,8 @@ class NftNotFoundError(RuntimeError):
     """Raised when the ``nft`` binary is not found on the host."""
 
 
-class DigNotFoundError(RuntimeError):
-    """Raised when the ``dig`` binary is not found on the host.
-
-    DNS resolution requires ``dig`` (from ``bind-utils`` / ``dnsutils``).
-    """
+class LookupToolNotFoundError(RuntimeError):
+    """Raised when neither ``dig`` nor ``drill`` is found on the host."""
 
 
 class ShieldNeedsSetup(RuntimeError):
@@ -291,7 +295,7 @@ def which_sbin_aware(name: str) -> str:
 
     Login shells on the Debian family exclude ``/usr/sbin`` from PATH, so
     a plain which() misses sbin-installed daemons (dnsmasq) — and the DNS
-    tier silently downgrades to dig.  ``shutil.which`` with an explicit
+    tier silently downgrades to the lookup tier.  ``shutil.which`` with an explicit
     ``path=`` keeps the executability check identical to PATH resolution.
     """
     for search_path in (None, *_SBIN_DIRS):

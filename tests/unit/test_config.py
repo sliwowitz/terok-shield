@@ -185,3 +185,17 @@ class TestShieldFileConfigAuditValidation:
         """audit.enabled must be a boolean."""
         with pytest.raises(ValidationError):
             ShieldFileConfig(audit={"enabled": "yes-please"})  # type: ignore[arg-type]
+
+
+class TestLookupTierDetection:
+    """The lookup tier accepts either one-shot resolver."""
+
+    def test_drill_alone_selects_the_lookup_tier(self) -> None:
+        from terok_shield.config import DnsTier, detect_dns_tier
+
+        assert detect_dns_tier(lambda name: name == "drill") is DnsTier.LOOKUP
+
+    def test_no_tool_falls_through_to_getent(self) -> None:
+        from terok_shield.config import DnsTier, detect_dns_tier
+
+        assert detect_dns_tier(lambda name: False) is DnsTier.GETENT

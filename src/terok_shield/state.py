@@ -27,7 +27,7 @@ Bundle layout::
     ├── deny_resolved.ips              # derived: resolved t20 security-deny IPs (deny seed)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
-    ├── dns.tier                       # active DNS tier (dig/getent/dnsmasq)
+    ├── dns.tier                       # active DNS tier (dnsmasq/lookup/getent)
     ├── network.mode                   # rootless network mode (pasta/slirp4netns)
     ├── loopback.ports                 # per-container host-loopback TCP ports (newline-separated)
     ├── dnsmasq.conf                   # generated dnsmasq configuration
@@ -292,7 +292,7 @@ class StateBundle:
             return None
         # Only the tiers the OCI hook records (mirrors config.DnsTier's values);
         # a stray or corrupt file reads as None, never an unsupported tier.
-        return tier if tier in {"dnsmasq", "dig", "getent"} else None
+        return tier if tier in {"dnsmasq", "lookup", "getent"} else None
 
     @property
     def network_mode(self) -> Path:

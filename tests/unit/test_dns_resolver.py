@@ -56,8 +56,8 @@ def make_resolver() -> ResolverHarnessFactory:
 
 
 def _dig_returns(runner: mock.MagicMock, mapping: dict[str, list[str]]) -> None:
-    """Answer ``dig_all`` per domain — thread-order-independent (the pool is concurrent)."""
-    runner.dig_all.side_effect = lambda domain, **_kw: list(mapping.get(domain, []))
+    """Answer ``lookup_all`` per domain — thread-order-independent (the pool is concurrent)."""
+    runner.lookup_all.side_effect = lambda domain, **_kw: list(mapping.get(domain, []))
 
 
 def _getent_returns(runner: mock.MagicMock, mapping: dict[str, list[str]]) -> None:
@@ -176,7 +176,7 @@ def test_resolve_domains_empty_input(make_resolver: ResolverHarnessFactory) -> N
     """resolve_domains() returns an empty list and skips DNS for empty input."""
     harness = make_resolver()
     assert harness.resolver.resolve_domains([]) == []
-    harness.runner.dig_all.assert_not_called()
+    harness.runner.lookup_all.assert_not_called()
     harness.runner.has.assert_not_called()  # no probe when there is nothing to resolve
 
 
@@ -222,8 +222,8 @@ def test_resolve_domains_uses_getent_when_dig_absent(
         result = harness.resolver.resolve_domains([CLOUDFLARE_DOMAIN, GOOGLE_DNS_DOMAIN])
 
     assert result == [TEST_IP1, TEST_IP2]
-    harness.runner.dig_all.assert_not_called()
-    assert sum("dig not found" in m for m in caplog.messages) == 1
+    harness.runner.lookup_all.assert_not_called()
+    assert sum("neither dig nor drill found" in m for m in caplog.messages) == 1
 
 
 def test_resolve_domains_getent_fallback_deduplicates(
@@ -250,7 +250,7 @@ def test_resolve_domains_empty_dig_retries_via_getent(
         result = harness.resolver.resolve_domains([CLOUDFLARE_DOMAIN])
 
     assert result == [TEST_IP1]
-    assert any("dig is broken" in m for m in caplog.messages)
+    assert any("the tool is broken" in m for m in caplog.messages)
 
 
 def test_resolve_domains_empty_dig_retry_is_per_domain(
@@ -295,7 +295,7 @@ def test_resolve_and_cache_returns_fresh_cache(
         TEST_IP1,
         TEST_IP2,
     ]
-    harness.runner.dig_all.assert_not_called()
+    harness.runner.lookup_all.assert_not_called()
 
 
 def test_resolve_and_cache_re_resolves_stale_cache(
@@ -311,7 +311,7 @@ def test_resolve_and_cache_re_resolves_stale_cache(
     os.utime(cache_path, (0, 0))
 
     assert harness.resolver.resolve_and_cache([TEST_DOMAIN], cache_path, max_age=3600) == [TEST_IP2]
-    harness.runner.dig_all.assert_called_once()
+    harness.runner.lookup_all.assert_called_once()
 
 
 def test_resolve_and_cache_re_resolves_when_source_is_newer(
@@ -330,7 +330,7 @@ def test_resolve_and_cache_re_resolves_when_source_is_newer(
         [TEST_DOMAIN], cache_path, max_age=3600, source_mtime=edited_after
     )
     assert result == [TEST_IP2]
-    harness.runner.dig_all.assert_called_once()
+    harness.runner.lookup_all.assert_called_once()
 
 
 def test_resolve_and_cache_keeps_cache_when_source_is_older(
@@ -348,7 +348,7 @@ def test_resolve_and_cache_keeps_cache_when_source_is_older(
         [TEST_DOMAIN], cache_path, max_age=3600, source_mtime=edited_before
     )
     assert result == [TEST_IP1]
-    harness.runner.dig_all.assert_not_called()
+    harness.runner.lookup_all.assert_not_called()
 
 
 def test_resolve_and_cache_mixed_entries(
@@ -417,7 +417,7 @@ def test_host_cache_hit_skips_resolution(
     result = second.resolver.resolve_and_cache([TEST_DOMAIN], cache_b)
 
     assert result == [TEST_IP1]
-    second.runner.dig_all.assert_not_called()  # served from the shared layer
+    second.runner.lookup_all.assert_not_called()  # served from the shared layer
     assert cache_b.read_text().split() == [TEST_IP1]  # materialized per-container
 
 

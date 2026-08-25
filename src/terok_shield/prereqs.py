@@ -58,7 +58,11 @@ def check_firewall_binaries() -> tuple[BinaryCheck, ...]:
     return (
         BinaryCheck("nft", which_sbin_aware("nft"), "nftables ruleset enforcement"),
         BinaryCheck("dnsmasq", which_sbin_aware("dnsmasq"), "local DNS caching resolver"),
-        BinaryCheck("dig", shutil.which("dig") or "", "DNS resolution for allowlist domains"),
+        BinaryCheck(
+            "dig/drill",
+            shutil.which("dig") or shutil.which("drill") or "",
+            "DNS resolution for allowlist domains",
+        ),
     )
 
 

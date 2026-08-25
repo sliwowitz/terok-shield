@@ -55,7 +55,7 @@ def test_tier_falls_back_to_dig_when_confined() -> None:
     """dnsmasq present + nftset-capable but AppArmor-confined → dig."""
     has = lambda n: n in {"dnsmasq", "dig"}  # noqa: E731
     tier = detect_dns_tier(has, lambda: True, lambda: False)
-    assert tier is DnsTier.DIG
+    assert tier is DnsTier.LOOKUP
 
 
 def test_tier_falls_back_to_getent_when_confined_and_no_dig() -> None:
@@ -131,7 +131,7 @@ def test_helper_downgrades_to_dig_when_confined(tmp_path: Path) -> None:
     """AppArmor-confined dnsmasq with dig present → dig tier, flagged, after probing."""
     runner = _fake_runner(readable=False)
     tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path)
-    assert tier is DnsTier.DIG
+    assert tier is DnsTier.LOOKUP
     assert apparmor_blocked is True
     assert _probed_apparmor(runner)
 
@@ -148,7 +148,7 @@ def test_helper_skips_probe_when_nftset_unsupported(tmp_path: Path) -> None:
     """dnsmasq without nftset is disqualified first — the AppArmor probe never runs."""
     runner = _fake_runner(nftset=False)
     tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path)
-    assert tier is DnsTier.DIG
+    assert tier is DnsTier.LOOKUP
     assert apparmor_blocked is False
     assert not _probed_apparmor(runner)
 
@@ -157,6 +157,6 @@ def test_helper_absent_dnsmasq_is_not_blocked(tmp_path: Path) -> None:
     """No dnsmasq → dig, not flagged, and no probe runs."""
     runner = _fake_runner(present=("dig",))
     tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path)
-    assert tier is DnsTier.DIG
+    assert tier is DnsTier.LOOKUP
     assert apparmor_blocked is False
     assert not _probed_apparmor(runner)

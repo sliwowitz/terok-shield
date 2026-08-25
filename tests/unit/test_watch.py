@@ -899,7 +899,7 @@ class TestRunWatchValidation:
         """run_watch() exits with error on dig tier."""
         sd = tmp_path / "state"
         sd.mkdir()
-        (sd / "dns.tier").write_text(DnsTier.DIG.value)
+        (sd / "dns.tier").write_text(DnsTier.LOOKUP.value)
         with pytest.raises(SystemExit, match="1"):
             run_watch(sd, _CONTAINER)
 

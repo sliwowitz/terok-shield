@@ -521,7 +521,7 @@ class TestCheckEnvironment:
         """Missing dig (and dnsmasq) reports getent degradation in environment check."""
         harness = make_shield()
         harness.runner.run.return_value = _podman_info_json("5.8.0")
-        harness.runner.has.side_effect = lambda cmd: cmd not in ("dig", "dnsmasq")
+        harness.runner.has.side_effect = lambda cmd: cmd not in ("dig", "drill", "dnsmasq")
         env = harness.shield.check_environment()
         assert any("dig" in i for i in env.issues)
         assert env.dns_tier == "getent"
@@ -550,7 +550,7 @@ class TestCheckEnvironment:
 
         harness.runner.run.side_effect = _run
         env = harness.shield.check_environment()
-        assert env.dns_tier == "dig"
+        assert env.dns_tier == "lookup"
         assert any("AppArmor" in i for i in env.issues)
 
     @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[])

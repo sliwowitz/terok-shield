@@ -149,7 +149,7 @@ def test_read_dns_tier_none_when_unset(tmp_path: Path) -> None:
     assert recorded_dns_tier(tmp_path) is None
 
 
-@pytest.mark.parametrize("tier", ["dnsmasq", "dig", "getent"])
+@pytest.mark.parametrize("tier", ["dnsmasq", "lookup", "getent"])
 def test_read_dns_tier_returns_recorded_value(tmp_path: Path, tier: str) -> None:
     """The recorded tier is read back verbatim, trailing newline stripped."""
     bundle = StateBundle(tmp_path)
