@@ -231,7 +231,7 @@ class SubprocessRunner:
 
         Queries both address families explicitly: plain ``getent hosts``
         stops at the first family glibc resolves (AAAA for dual-stack
-        names), which left ``allow_v4`` empty on the one host whose dig
+        names), which left ``allow_v4`` empty on the one host whose lookup tool
         crashes -- an allowed literal-IPv4 target then hit the terminal
         reject as "Host is unreachable" (terok#1119).
 

@@ -19,7 +19,7 @@ from terok_shield.run import (
     find_nft,
 )
 
-from ..testfs import NFT_BINARY, NFT_SBIN
+from ..testfs import DRILL_BINARY, NFT_BINARY, NFT_SBIN
 from ..testnet import (
     ALIAS_DOMAIN,
     IPV6_CLOUDFLARE,
@@ -349,7 +349,7 @@ def test_lookup_all_falls_back_to_drill(
     """Without dig, lookup_all() runs drill once per record type and merges."""
     runner._has_cache.clear()
     monkeypatch.setattr(
-        shutil, "which", lambda name, path=None: "/usr/bin/drill" if name == "drill" else None
+        shutil, "which", lambda name, path=None: DRILL_BINARY if name == "drill" else None
     )
     subprocess_run.side_effect = [
         _completed(stdout=f"{TEST_IP1}\n"),

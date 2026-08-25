@@ -168,7 +168,7 @@ class ShieldConfig:
     The one deliberate exception to the state_dir-only rule: ``None`` (the
     default) keeps resolution per-container; a path enables a host-level cache
     that lets many tasks with the same allowlist share one resolve. Only the
-    dig/getent tiers use it — the dnsmasq tier resolves on-demand at runtime.
+    lookup/getent tiers use it — the dnsmasq tier resolves on-demand at runtime.
     """
 
 

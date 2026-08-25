@@ -56,7 +56,8 @@ class DnsResolver:
     """Stateless DNS resolver — all persistence lives in the cache files.
 
     Depends on a [`CommandRunner`][terok_shield.dns.resolver.CommandRunner]
-    for ``dig`` / ``getent`` subprocess calls and, optionally, a host-level
+    for lookup-tool (``dig``/``drill``) and ``getent`` subprocess calls
+    and, optionally, a host-level
     cache directory shared across containers.
     """
 

@@ -109,7 +109,7 @@ class EnvironmentCheck:
         hooks: Hook installation type (``per-container``, ``global``,
             ``not-installed``).
         health: Environment health (``ok``, ``setup-needed``, ``stale-hooks``).
-        dns_tier: Active DNS resolution tier (``dnsmasq``, ``dig``, ``getent``).
+        dns_tier: Active DNS resolution tier (``dnsmasq``, ``lookup``, ``getent``).
         issues: List of human-readable issue descriptions.
         needs_setup: True if one-time setup is required.
         setup_hint: Setup instructions (empty if not needed).

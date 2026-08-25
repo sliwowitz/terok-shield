@@ -420,7 +420,7 @@ class HookMode:
         ``resolved.ips`` is removed so the ruleset seeds from literal IPs
         only.
 
-        The dig/getent fallback tiers have no DNS interception point, so
+        The lookup/getent fallback tiers have no DNS interception point, so
         statically resolving every admitted target into ``resolved.ips``
         (refreshed when stale or older than the authored policy) remains
         their only domain-enforcement mechanism.
@@ -474,7 +474,7 @@ class HookMode:
         - **dnsmasq tier**: point ``resolv.conf`` at the per-container dnsmasq
           bind address. dnsmasq forwards to *upstream_dns* and adds each
           resolved address to the allow sets.
-        - **dig / getent tiers**: no per-container dnsmasq runs, so point
+        - **lookup / getent tiers**: no per-container dnsmasq runs, so point
           ``resolv.conf`` straight at *upstream_dns*, the forwarder the
           firewall allows. Name resolution then uses the forwarder. The nft
           sets still gate egress, so this widens resolution only, never
@@ -1068,7 +1068,7 @@ def _is_dnsmasq_tier(state_dir: Path) -> bool:
     """Return True when the container's DNS tier is dnsmasq (or unknown).
 
     ``allow_domain`` / ``deny_domain`` are dnsmasq-specific enhancements
-    (future IP rotation tracking via ``--nftset``).  On dig/getent tiers
+    (future IP rotation tracking via ``--nftset``).  On lookup/getent tiers
     the static IP-level allow/deny in ``allow_ip``/``deny_ip`` already ran;
     the domain-tracking step is simply not available and callers skip it.
 
