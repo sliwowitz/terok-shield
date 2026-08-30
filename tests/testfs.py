@@ -62,6 +62,7 @@ NFT_BINARY = "/usr/bin/nft"
 NFT_SBIN = "/usr/sbin/nft"
 PODMAN_BINARY = "/usr/bin/podman"
 DIG_BINARY = "/usr/bin/dig"
+DRILL_BINARY = "/usr/bin/drill"
 DNSMASQ_SBIN = "/usr/sbin/dnsmasq"
 IP_SBIN = "/usr/sbin/ip"
 

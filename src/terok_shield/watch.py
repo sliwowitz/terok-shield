@@ -27,7 +27,7 @@ def run_watch(state_dir: Path, container: str) -> None:
     """Stream blocked-access events as JSON lines to stdout.
 
     Only meaningful under the dnsmasq tier — the query log and nftset
-    integration that feed the watchers do not exist in the dig/getent
+    integration that feed the watchers do not exist in the lookup/getent
     tiers.  Uses ``select`` so a single thread can multiplex the DNS
     log, audit log, and NFLOG socket without blocking on any one source.
 

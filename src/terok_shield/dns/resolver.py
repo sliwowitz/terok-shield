@@ -56,7 +56,8 @@ class DnsResolver:
     """Stateless DNS resolver — all persistence lives in the cache files.
 
     Depends on a [`CommandRunner`][terok_shield.dns.resolver.CommandRunner]
-    for ``dig`` / ``getent`` subprocess calls and, optionally, a host-level
+    for lookup-tool (``dig``/``drill``) and ``getent`` subprocess calls
+    and, optionally, a host-level
     cache directory shared across containers.
     """
 
@@ -125,17 +126,17 @@ class DnsResolver:
     def resolve_domains(self, domains: list[str]) -> list[str]:
         """Resolve domain names to IPs (A + AAAA), best-effort and concurrent.
 
-        Probes for ``dig`` once, then resolves every domain on a small thread
+        Probes for a lookup tool once, then resolves every domain on a small thread
         pool — a batch costs about its slowest single lookup. Unresolvable
         domains are skipped with a warning; results are deduplicated in
         first-seen (input) order.
         """
         if not domains:
             return []
-        if self._runner.has("dig"):
-            resolve = self._resolve_via_dig
+        if self._runner.has("dig") or self._runner.has("drill"):
+            resolve = self._resolve_via_lookup
         else:
-            logger.warning("dig not found — using getent for DNS resolution")
+            logger.warning("neither dig nor drill found — using getent for DNS resolution")
             resolve = self._resolve_via_getent
         with ThreadPoolExecutor(max_workers=min(len(domains), MAX_RESOLVE_WORKERS)) as pool:
             per_domain = pool.map(resolve, domains)
@@ -143,20 +144,21 @@ class DnsResolver:
 
     # ── Resolution detail ───────────────────────────────────
 
-    def _resolve_via_dig(self, domain: str) -> list[str]:
-        """Resolve via ``dig``, retrying one domain through NSS when dig answers empty.
+    def _resolve_via_lookup(self, domain: str) -> list[str]:
+        """Resolve via the lookup tool, retrying through NSS on an empty answer.
 
-        An empty ``dig`` answer is usually not a dead domain: some environments
-        break ``dig`` specifically (an EDNS-hostile forwarder, a hardened path)
-        while glibc resolution still works, so we retry that one domain through
-        ``getent`` before giving up (terok#1119).
+        An empty answer is usually not a dead domain: some environments
+        break the tool specifically (an EDNS-hostile forwarder, a hardened
+        path) while glibc resolution still works, so we retry that one
+        domain through ``getent`` before giving up (terok#1119).
         """
-        ips = self._runner.dig_all(domain, timeout=RESOLVE_TIMEOUT)
+        ips = self._runner.lookup_all(domain, timeout=RESOLVE_TIMEOUT)
         if not ips:
             ips = self._runner.getent_hosts(domain, timeout=RESOLVE_TIMEOUT)
             if ips:
                 logger.warning(
-                    "dig returned nothing for %r but NSS resolved it — dig is broken here", domain
+                    "lookup returned nothing for %r but NSS resolved it — the tool is broken here",
+                    domain,
                 )
         return self._warn_if_empty(domain, ips)
 

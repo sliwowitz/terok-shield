@@ -109,7 +109,7 @@ class EnvironmentCheck:
         hooks: Hook installation type (``per-container``, ``global``,
             ``not-installed``).
         health: Environment health (``ok``, ``setup-needed``, ``stale-hooks``).
-        dns_tier: Active DNS resolution tier (``dnsmasq``, ``dig``, ``getent``).
+        dns_tier: Active DNS resolution tier (``dnsmasq``, ``lookup``, ``getent``).
         issues: List of human-readable issue descriptions.
         needs_setup: True if one-time setup is required.
         setup_hint: Setup instructions (empty if not needed).
@@ -285,7 +285,7 @@ class Shield:
                 "resolution (no IP rotation handling). Install the terok AppArmor "
                 "profile to enable the dnsmasq tier (see docs/apparmor.md)"
             )
-        elif tier == DnsTier.DIG:
+        elif tier == DnsTier.LOOKUP:
             issues.append(
                 "dnsmasq unavailable (not installed, or without nftset support) — "
                 "domain allowlisting uses static pre-start resolution "
@@ -294,8 +294,9 @@ class Shield:
             )
         elif tier == DnsTier.GETENT:
             issues.append(
-                "Neither dnsmasq nor dig found — DNS resolution uses getent "
-                "(single IP, no AAAA). Install dnsmasq or at minimum dnsutils/bind-utils"
+                "Neither dnsmasq nor a lookup tool (dig/drill) found — DNS "
+                "resolution uses getent (single IP, no AAAA). Install dnsmasq "
+                "or at minimum dnsutils/bind-utils/ldns"
             )
 
         hooks_dirs = find_hooks_dirs()

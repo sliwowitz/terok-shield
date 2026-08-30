@@ -27,7 +27,7 @@ Bundle layout::
     ├── deny_resolved.ips              # derived: resolved t20 security-deny IPs (deny seed)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
-    ├── dns.tier                       # active DNS tier (dig/getent/dnsmasq)
+    ├── dns.tier                       # active DNS tier (dnsmasq/lookup/getent)
     ├── network.mode                   # rootless network mode (pasta/slirp4netns)
     ├── loopback.ports                 # per-container host-loopback TCP ports (newline-separated)
     ├── dnsmasq.conf                   # generated dnsmasq configuration
@@ -277,12 +277,12 @@ class StateBundle:
         return self.state_dir / "dns.tier"
 
     def read_dns_tier(self) -> str | None:
-        """The DNS tier this container launched with (``dnsmasq``/``dig``/``getent``).
+        """The DNS tier this container launched with (``dnsmasq``/``lookup``/``getent``).
 
         Returns the value the OCI hook recorded at ``pre_start`` — the tier
         actually enforcing this task's egress — or ``None`` when the file is
         absent (the container was never shielded, or predates tier
-        recording).  A degraded tier (``dig``/``getent``) means domain
+        recording).  A degraded tier (``lookup``/``getent``) means domain
         allowlisting fell back to static resolution with no IP-rotation
         handling; the operator surfaces that alongside the shield posture.
         """
@@ -291,8 +291,9 @@ class StateBundle:
         except (OSError, ValueError):  # absent, or non-UTF-8 content
             return None
         # Only the tiers the OCI hook records (mirrors config.DnsTier's values);
-        # a stray or corrupt file reads as None, never an unsupported tier.
-        return tier if tier in {"dnsmasq", "dig", "getent"} else None
+        # a stray or corrupt file — including a legacy "dig" record from a
+        # pre-rename container — reads as None, never an unsupported tier.
+        return tier if tier in {"dnsmasq", "lookup", "getent"} else None
 
     @property
     def network_mode(self) -> Path:
@@ -550,7 +551,7 @@ def recorded_dns_tier(state_dir: Path) -> str | None:
     Thin public wrapper over
     [`StateBundle.read_dns_tier`][terok_shield.state.StateBundle.read_dns_tier]
     so callers that only want the tier need not know the bundle layout.
-    Returns ``dnsmasq``/``dig``/``getent``, or ``None`` when no tier was
+    Returns ``dnsmasq``/``lookup``/``getent``, or ``None`` when no tier was
     recorded.
     """
     return StateBundle(state_dir).read_dns_tier()

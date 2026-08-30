@@ -109,16 +109,16 @@ def test_check_firewall_binaries_shape() -> None:
     """All three expected binaries appear with the documented purposes."""
     results = check_firewall_binaries()
     names = [r.name for r in results]
-    assert names == ["nft", "dnsmasq", "dig"]
+    assert names == ["nft", "dnsmasq", "dig/drill"]
     purposes = {r.name: r.purpose for r in results}
     assert "nftables" in purposes["nft"]
     assert "DNS" in purposes["dnsmasq"]
-    assert "DNS" in purposes["dig"]
+    assert "DNS" in purposes["dig/drill"]
 
 
 def test_check_firewall_binaries_reports_all_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every binary locatable via PATH or sbin → every check ``ok``."""
-    expected = {"nft": NFT_SBIN, "dnsmasq": DNSMASQ_SBIN, "dig": DIG_BINARY}
+    expected = {"nft": NFT_SBIN, "dnsmasq": DNSMASQ_SBIN, "dig/drill": DIG_BINARY}
 
     def _which(name: str, path: str | None = None) -> str | None:
         # ``dig`` lives on PATH; ``nft`` / ``dnsmasq`` only in sbin —

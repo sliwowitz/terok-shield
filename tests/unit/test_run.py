@@ -12,17 +12,18 @@ import pytest
 
 from terok_shield.run import (
     CommandRunner,
-    DigNotFoundError,
     ExecError,
+    LookupToolNotFoundError,
     NftNotFoundError,
     SubprocessRunner,
     find_nft,
 )
 
-from ..testfs import NFT_BINARY, NFT_SBIN
+from ..testfs import DRILL_BINARY, NFT_BINARY, NFT_SBIN
 from ..testnet import (
     ALIAS_DOMAIN,
     IPV6_CLOUDFLARE,
+    IPV6_VERBOSE_CANONICAL,
     NONEXISTENT_DOMAIN,
     TEST_DOMAIN,
     TEST_IP1,
@@ -297,47 +298,70 @@ def test_podman_inspect_returns_stripped_output(
         ),
     ],
 )
-def test_dig_all_filters_output(
+def test_lookup_all_filters_output(
     runner: SubprocessRunner,
     subprocess_run: mock.Mock,
     stdout: str,
     expected: list[str],
 ) -> None:
-    """dig_all() keeps only parsed IP addresses from subprocess output."""
+    """lookup_all() keeps only parsed IP addresses from subprocess output."""
     subprocess_run.return_value = _completed(stdout=stdout)
-    assert runner.dig_all(TEST_DOMAIN) == expected
+    assert runner.lookup_all(TEST_DOMAIN) == expected
 
 
-def test_dig_all_returns_empty_on_failure(
+def test_lookup_all_returns_empty_on_failure(
     runner: SubprocessRunner,
     subprocess_run: mock.Mock,
 ) -> None:
-    """dig_all() returns an empty list when dig fails under check=False."""
+    """lookup_all() returns an empty list when dig fails under check=False."""
     subprocess_run.return_value = _completed(rc=1)
-    assert runner.dig_all(NONEXISTENT_DOMAIN) == []
+    assert runner.lookup_all(NONEXISTENT_DOMAIN) == []
 
 
-def test_dig_all_raises_when_binary_missing(
+def test_lookup_all_raises_when_binary_missing(
     runner: SubprocessRunner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """dig_all() raises DigNotFoundError when dig is not on PATH."""
+    """lookup_all() raises LookupToolNotFoundError when neither tool is on PATH."""
     runner._has_cache.clear()
     monkeypatch.setattr(shutil, "which", lambda name, path=None: None)
-    with pytest.raises(DigNotFoundError, match="dig binary not found"):
-        runner.dig_all(TEST_DOMAIN)
+    with pytest.raises(LookupToolNotFoundError, match="no DNS lookup tool found"):
+        runner.lookup_all(TEST_DOMAIN)
 
 
-def test_dig_all_uses_single_query(
+def test_lookup_all_uses_single_query(
     runner: SubprocessRunner,
     subprocess_run: mock.Mock,
 ) -> None:
-    """dig_all() uses a single subprocess for both A and AAAA lookups."""
+    """lookup_all() uses a single subprocess for both A and AAAA lookups."""
     subprocess_run.return_value = _completed(stdout=f"{TEST_IP1}\n")
-    runner.dig_all(TEST_DOMAIN)
+    runner.lookup_all(TEST_DOMAIN)
     cmd = subprocess_run.call_args[0][0]
     assert "A" in cmd
     assert "AAAA" in cmd
+
+
+def test_lookup_all_falls_back_to_drill(
+    runner: SubprocessRunner,
+    subprocess_run: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without dig, lookup_all() runs drill once per record type and merges."""
+    runner._has_cache.clear()
+    monkeypatch.setattr(
+        shutil, "which", lambda name, path=None: DRILL_BINARY if name == "drill" else None
+    )
+    subprocess_run.side_effect = [
+        _completed(stdout=f"{TEST_IP1}\n"),
+        _completed(stdout=f"{IPV6_VERBOSE_CANONICAL}\n"),
+    ]
+
+    assert runner.lookup_all(TEST_DOMAIN) == [TEST_IP1, IPV6_VERBOSE_CANONICAL]
+
+    commands = [call.args[0] for call in subprocess_run.call_args_list]
+    assert [cmd[0] for cmd in commands] == ["drill", "drill"]
+    assert [cmd[-1] for cmd in commands] == ["A", "AAAA"]
+    assert all("-Q" in cmd and TEST_DOMAIN in cmd for cmd in commands)
 
 
 # ── find_nft tests ───────────────────────────────────────

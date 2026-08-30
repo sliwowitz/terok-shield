@@ -7,7 +7,7 @@ enforcing AppArmor profile for ``/usr/sbin/dnsmasq`` that forbids the
 shield state directory under the operator's home, so the per-container
 dnsmasq cannot read its config and the container would fail to launch.
 This module probes for that confinement behaviourally (via ``dnsmasq
---test`` — no root needed) and drives a fallback to the ``dig`` tier.
+--test`` — no root needed) and drives a fallback to the ``lookup`` tier.
 The profile addendum that lets operators keep the dnsmasq tier is
 documented in ``docs/apparmor.md``.
 """

@@ -50,15 +50,19 @@ def check_firewall_binaries() -> tuple[BinaryCheck, ...]:
     """Probe the host for binaries the shield runtime uses.
 
     Returns a stable-ordered tuple covering ``nft`` (ruleset
-    enforcement), ``dnsmasq`` (optional local DNS tier), and ``dig``
-    (profile-domain resolution).  Callers render the results however
+    enforcement), ``dnsmasq`` (optional local DNS tier), and a lookup
+    tool — ``dig`` or ``drill`` (profile-domain resolution).  Callers render the results however
     they want and decide whether a missing entry should warn, block,
     or be ignored for their workflow.
     """
     return (
         BinaryCheck("nft", which_sbin_aware("nft"), "nftables ruleset enforcement"),
         BinaryCheck("dnsmasq", which_sbin_aware("dnsmasq"), "local DNS caching resolver"),
-        BinaryCheck("dig", shutil.which("dig") or "", "DNS resolution for allowlist domains"),
+        BinaryCheck(
+            "dig/drill",
+            shutil.which("dig") or shutil.which("drill") or "",
+            "DNS resolution for allowlist domains",
+        ),
     )
 
 

@@ -1961,8 +1961,8 @@ def test_detect_dns_tier_audits_advisory_when_apparmor_blocks(
 
     tier = harness.mode._detect_dns_tier("some-task", tmp_path)
 
-    assert tier is DnsTier.DIG
+    assert tier is DnsTier.LOOKUP
     harness.audit.log_event.assert_called_once()
     detail = harness.audit.log_event.call_args.kwargs["detail"]
     assert "AppArmor" in detail
-    assert "dig" in detail
+    assert "lookup" in detail
