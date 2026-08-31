@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Jiri Vyskocil
+# SPDX-License-Identifier: Apache-2.0
+
+# Make this slot resolve the way Manjaro actually does.
+#
+# The shared pacman template installs bind for every Arch-family slot, so the
+# slot ran on dig — but Manjaro ships drill (ldns), and the resolver prefers
+# dig whenever it is present.  With bind installed, no slot in the matrix ever
+# took the drill branch of SubprocessRunner.lookup_all, on any distro.
+#
+# Swapping the two costs this slot its dig coverage, which nine other slots
+# already carry, and buys the only drill coverage there is.  The final check
+# fails the build if bind returns as somebody's dependency, rather than letting
+# the slot quietly go back to testing dig.
+RUN pacman -S --noconfirm --needed ldns \
+    && pacman -Rns --noconfirm bind \
+    && command -v drill \
+    && ! command -v dig

@@ -7,7 +7,7 @@ Tests are organized by workflow/feature area. Environment requirements
 are expressed via pytest markers, not directory placement:
 
 - ``needs_host_features``: Linux kernel features only (no containers).
-- ``needs_internet``: Outbound connectivity + dig (no containers).
+- ``needs_internet``: Outbound connectivity + a lookup tool (no containers).
 - ``needs_podman``: Podman + nft on the host.
 
 Makefile targets filter by marker:
