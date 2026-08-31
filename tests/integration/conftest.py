@@ -7,7 +7,7 @@ Tests are organized by workflow/feature area. Environment requirements
 are expressed via pytest markers, not directory placement:
 
 - ``needs_host_features``: Linux kernel features only (no containers).
-- ``needs_internet``: Outbound connectivity + dig (no containers).
+- ``needs_internet``: Outbound connectivity + a lookup tool (no containers).
 - ``needs_podman``: Podman + nft on the host.
 
 Makefile targets filter by marker:
@@ -110,35 +110,50 @@ def _image_available() -> bool:
 # These `skipif` markers complement the `@pytest.mark.needs_podman` /
 # `needs_internet` custom markers defined in pyproject.toml.  The custom
 # markers are for **test selection** (`pytest -m needs_podman`), while
-# `podman_missing` / `nft_missing` / `dig_missing` are **skip guards**
+# `podman_missing` / `nft_missing` / `lookup_tool_missing` are **skip guards**
 # that gracefully degrade when binaries are absent.
 
 podman_missing = pytest.mark.skipif(not _has("podman"), reason="podman not installed")
 nft_missing = pytest.mark.skipif(not find_nft(), reason="nft not installed")
-dig_missing = pytest.mark.skipif(not _has("dig"), reason="dig not installed")
 
 
-def _dig_functional() -> bool:
-    """Whether dig can execute at all — present-but-crashing builds exist.
+def _lookup_tool() -> str | None:
+    """The lookup tool the resolver would pick here, or ``None`` if it has neither.
 
-    Mageia's aarch64 bind (jemalloc built for 4K pages) SIGABRTs on
-    64K-page kernels before sending a single query; dig-tier tests must
-    skip there with the real reason, not fail on empty output.
+    Mirrors the preference order in
+    [`SubprocessRunner.lookup_all`][terok_shield.run.SubprocessRunner.lookup_all]
+    — ``dig`` first, ``drill`` (ldns, the Arch/Manjaro default) second — so a
+    skip means the host cannot resolve, not that one particular tool is absent.
     """
-    if not _has("dig"):
+    return next((tool for tool in ("dig", "drill") if _has(tool)), None)
+
+
+def _lookup_functional() -> bool:
+    """Whether that tool can execute at all — present-but-crashing builds exist.
+
+    Mageia's aarch64 bind (jemalloc built for 4K pages) SIGABRTs on 64K-page
+    kernels before sending a single query.  Probes the tool the resolver would
+    pick, not merely any installed one: the resolver takes ``dig`` whenever it
+    is present, so a working ``drill`` alongside a broken ``dig`` rescues
+    nothing.
+    """
+    tool = _lookup_tool()
+    if tool is None:
         return False
+    probe = ["dig", "+short", ".", "NS"] if tool == "dig" else ["drill", "-Q", ".", "NS"]
     try:
-        return (
-            subprocess.run(["dig", "+short", ".", "NS"], capture_output=True, timeout=10).returncode
-            == 0
-        )
+        return subprocess.run(probe, capture_output=True, timeout=10).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
 
-dig_broken = pytest.mark.skipif(
-    _has("dig") and not _dig_functional(),
-    reason="dig present but non-functional on this host",
+lookup_tool_missing = pytest.mark.skipif(
+    _lookup_tool() is None, reason="neither dig nor drill installed"
+)
+
+lookup_tool_broken = pytest.mark.skipif(
+    _lookup_tool() is not None and not _lookup_functional(),
+    reason="the lookup tool this host would use is present but non-functional",
 )
 
 
@@ -182,7 +197,7 @@ def _hooks_available() -> bool:
 # exported by the matrix engine) is a contract: absence means the slot is
 # broken and must fail at session start — not dissolve into skips that
 # read as green (a collapsed slot once reported PASS on 95 skips).
-# Presence-level probes only: host-dependent dysfunction (dig_broken on
+# Presence-level probes only: host-dependent dysfunction (lookup_tool_broken on
 # 64K-page kernels) stays a visible skip, because the image cannot
 # control it.
 
@@ -190,7 +205,9 @@ _CAPABILITY_PROBES = {
     "podman": lambda: _has("podman"),
     "nft": lambda: bool(find_nft()),
     "dnsmasq": lambda: bool(which_sbin_aware("dnsmasq")),
-    "dig": lambda: _has("dig"),
+    # A lookup tool, not one particular binary: the resolver takes dig or
+    # drill, and the Arch/Manjaro images ship the latter.
+    "lookup": lambda: _has("dig") or _has("drill"),
     "getent": lambda: _has("getent"),
     "hooks": _hooks_available,
     "internet": lambda: tcp_reachable(ALLOWED_TARGET_IPS[0], 53),

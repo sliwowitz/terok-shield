@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration tests: DNS resolution with real dig."""
+"""Integration tests: DNS resolution with the host's real lookup tool."""
 
 import tempfile
 from pathlib import Path
@@ -12,12 +12,12 @@ from terok_shield.dns.resolver import DnsResolver
 from terok_shield.run import SubprocessRunner
 from tests.testnet import CLOUDFLARE_DOMAIN, GOOGLE_DNS_DOMAIN, NONEXISTENT_DOMAIN, TEST_IP1
 
-from ..conftest import dig_broken, dig_missing
+from ..conftest import lookup_tool_broken, lookup_tool_missing
 
 
 @pytest.mark.needs_internet
-@dig_missing
-@dig_broken
+@lookup_tool_missing
+@lookup_tool_broken
 class TestResolveLive:
     """DNS resolution against real nameservers."""
 
@@ -43,8 +43,8 @@ class TestResolveLive:
 
 
 @pytest.mark.needs_internet
-@dig_missing
-@dig_broken
+@lookup_tool_missing
+@lookup_tool_broken
 class TestResolveAndCacheLive:
     """Full resolve-and-cache pipeline with real DNS."""
 

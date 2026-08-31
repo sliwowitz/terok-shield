@@ -14,11 +14,11 @@ from terok_shield.profiles import ProfileLoader
 from terok_shield.run import SubprocessRunner
 from tests.testnet import CLOUDFLARE_DOMAIN, TEST_IP99
 
-from ..conftest import dig_missing
+from ..conftest import lookup_tool_missing
 
 
 @pytest.mark.needs_internet
-@dig_missing
+@lookup_tool_missing
 class TestProfileResolvePipeline:
     """Full pipeline: load profile → resolve domains → cache."""
 
