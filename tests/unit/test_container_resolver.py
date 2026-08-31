@@ -12,6 +12,8 @@ from unittest import mock
 
 from terok_shield import container as resolver
 
+from ..testfs import FAKE_STATE_DIR_STR
+
 _ANN_KEY = "terok.shield.state_dir"
 _VERSION_KEY = "terok.shield.version"
 
@@ -88,6 +90,18 @@ class TestResolveStateDir:
             result = mock.MagicMock(returncode=0, stdout=json.dumps({"not": "a list"}))
             with mock.patch.object(resolver.subprocess, "run", return_value=result):
                 assert resolver.resolve_state_dir("ctr") is None
+
+    def test_returns_none_when_resolve_raises_oserror(self) -> None:
+        """An ``OSError`` out of ``Path.resolve`` (ELOOP, EACCES) collapses to ``None``.
+
+        Exercises ``_state_dir_from`` directly, like the ``_annotations``
+        shape-guard tests: the annotation value parses and is absolute, but
+        the filesystem refuses to canonicalise it.
+        """
+        with mock.patch.object(resolver, "Path") as path_cls:
+            path_cls.return_value.is_absolute.return_value = True
+            path_cls.return_value.resolve.side_effect = OSError("ELOOP")
+            assert resolver._state_dir_from({_ANN_KEY: FAKE_STATE_DIR_STR}) is None
 
 
 class TestAnnotations:
