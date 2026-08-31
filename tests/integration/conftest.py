@@ -205,7 +205,9 @@ _CAPABILITY_PROBES = {
     "podman": lambda: _has("podman"),
     "nft": lambda: bool(find_nft()),
     "dnsmasq": lambda: bool(which_sbin_aware("dnsmasq")),
-    "dig": lambda: _has("dig"),
+    # A lookup tool, not one particular binary: the resolver takes dig or
+    # drill, and the Arch/Manjaro images ship the latter.
+    "lookup": lambda: _has("dig") or _has("drill"),
     "getent": lambda: _has("getent"),
     "hooks": _hooks_available,
     "internet": lambda: tcp_reachable(ALLOWED_TARGET_IPS[0], 53),
