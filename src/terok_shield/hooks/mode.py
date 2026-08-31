@@ -283,7 +283,11 @@ class HookMode:
         """
         sd = self._config.state_dir.resolve()
         bundle = StateBundle(sd)
-        tier_str = bundle.dns_tier.read_text().strip() if bundle.dns_tier.is_file() else ""
+        # Through ``read_dns_tier``, not the raw file: it is the one place that
+        # knows which recorded names are still tiers, so a container written
+        # under a retired name restarts here instead of raising out of
+        # ``DnsTier``.
+        tier_str = bundle.read_dns_tier()
         mode = bundle.network_mode.read_text().strip() if bundle.network_mode.is_file() else ""
         upstream_dns = self._read_upstream_dns()
         if not tier_str or not upstream_dns or not mode:
