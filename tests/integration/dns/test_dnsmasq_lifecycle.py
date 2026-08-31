@@ -97,7 +97,7 @@ class TestDnsTierDetection:
         """detect_dns_tier() returns a valid tier for the current host."""
         # Use a lightweight has() instead of SubprocessRunner (which needs nft)
         tier = detect_dns_tier(lambda name: _shutil.which(name) is not None)
-        assert tier in (DnsTier.DNSMASQ, DnsTier.DIG, DnsTier.GETENT)
+        assert tier in set(DnsTier)
 
     def test_check_environment_reports_tier(self) -> None:
         """Shield.check_environment() includes dns_tier in its result."""
@@ -107,7 +107,7 @@ class TestDnsTierDetection:
             runner.run.return_value = "{}"  # minimal podman info
             shield = Shield(ShieldConfig(state_dir=Path(tmp)), runner=runner)
             env = shield.check_environment()
-        assert env.dns_tier in ("dnsmasq", "dig", "getent")
+        assert env.dns_tier in {t.value for t in DnsTier}
 
 
 # ── Story 2: dnsmasq config generation ───────────────────
@@ -208,7 +208,7 @@ class TestPreStartDnsmasqTier:
 
         tier = _tier_from_args(args)
         assert tier is not None, "dns_tier annotation not found in pre_start args"
-        assert tier in ("dnsmasq", "dig", "getent")
+        assert tier in {t.value for t in DnsTier}
 
 
 # ── Story 4: full dnsmasq lifecycle in a real container ──
