@@ -13,7 +13,7 @@
 
 image-prefix: terok-shield-test
 flavor: podman
-expect: [podman, nft, dnsmasq, dig, getent, internet]
+expect: [podman, nft, dnsmasq, lookup, getent, internet]
 groups: [test]
 
 slots:
