@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from terok_shield.commands import COMMANDS, needs_container, standalone_only
+from terok_shield.commands import COMMANDS, is_container_arg, needs_container, standalone_only
 from terok_shield.verbs.control import (
     _handle_allow,
     _handle_deny,
@@ -71,6 +71,36 @@ class TestCommandDefs:
                     arg.dest or arg.name.lstrip("-").replace("-", "_") for arg in resolved.args
                 }
                 assert "container" in dests, f"{cmd.name} needs_container but has no container arg"
+
+    def test_is_container_arg_matches_every_spelling(self) -> None:
+        """``is_container_arg`` matches the container-reference arg in each of its spellings."""
+        matched = {
+            resolved.name: {arg.name for arg in resolved.args if is_container_arg(arg)}
+            for cmd in COMMANDS
+            if (resolved := cmd.resolve()).args
+        }
+        assert matched["allow"] == {"container"}
+        assert matched["status"] == {"container"}  # the optional (nargs="?") positional
+        assert matched["logs"] == {"--container"}  # the standalone CLI's optional filter
+        assert matched["down"] == {"container", "--container-id"}
+        assert matched["up"] == {"container", "--container-id"}
+
+    def test_is_container_arg_rejects_ordinary_args(self) -> None:
+        """Ordinary args — a dest-overridden flag included — do not match."""
+        by_name = {resolved.name: resolved for cmd in COMMANDS if (resolved := cmd.resolve())}
+        ordinary = [
+            arg
+            for cmd_name, arg_name in [
+                ("allow", "target"),
+                ("logs", "-n"),
+                ("down", "--disengage"),
+                ("prepare", "--profiles"),
+            ]
+            for arg in by_name[cmd_name].args
+            if arg.name == arg_name
+        ]
+        assert len(ordinary) == 4, "registry moved an anchor arg — update the sample"
+        assert not any(map(is_container_arg, ordinary))
 
 
 class TestHandlers:
