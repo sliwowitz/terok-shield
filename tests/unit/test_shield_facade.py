@@ -512,18 +512,18 @@ class TestCheckEnvironment:
 
     @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
     @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
-    def test_dig_missing_reports_issue(
+    def test_no_lookup_tool_reports_issue(
         self,
         _has_hooks: mock.Mock,
         _find_dirs: mock.Mock,
         make_shield: ShieldHarnessFactory,
     ) -> None:
-        """Missing dig (and dnsmasq) reports getent degradation in environment check."""
+        """No lookup tool and no dnsmasq reports getent degradation in the environment check."""
         harness = make_shield()
         harness.runner.run.return_value = _podman_info_json("5.8.0")
         harness.runner.has.side_effect = lambda cmd: cmd not in ("dig", "drill", "dnsmasq")
         env = harness.shield.check_environment()
-        assert any("dig" in i for i in env.issues)
+        assert any("dig/drill" in i for i in env.issues)
         assert env.dns_tier == "getent"
 
     @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
