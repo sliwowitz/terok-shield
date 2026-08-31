@@ -226,6 +226,13 @@ pattern the validator demands.
 """
 
 
+#: Tier names retired by a rename, mapped to what they are called now.  The
+#: rename was nominal — same enforcement, a name that stopped privileging one
+#: of two interchangeable tools — so a record written under the old name still
+#: describes the tier accurately.
+_LEGACY_TIER_NAMES = {"dig": "lookup"}
+
+
 @dataclass(frozen=True)
 class StateBundle:
     """File-layout contract for a single shielded container's ``state_dir``.
@@ -285,14 +292,21 @@ class StateBundle:
         recording).  A degraded tier (``lookup``/``getent``) means domain
         allowlisting fell back to static resolution with no IP-rotation
         handling; the operator surfaces that alongside the shield posture.
+
+        A container that recorded ``dig`` reads as ``lookup``.  That rename was
+        nominal: the tier enforced static pre-start resolution before it and
+        after it, and only stopped being named after one of the two
+        interchangeable tools that serve it.  Reading it as the tier it names
+        is what lets such a container restart instead of being recreated.
         """
         try:
             tier = self.dns_tier.read_text().strip()
         except (OSError, ValueError):  # absent, or non-UTF-8 content
             return None
-        # Only the tiers the OCI hook records (mirrors config.DnsTier's values);
-        # a stray or corrupt file — including a legacy "dig" record from a
-        # pre-rename container — reads as None, never an unsupported tier.
+        tier = _LEGACY_TIER_NAMES.get(tier, tier)
+        # Only the tiers the OCI hook records (mirrors config.DnsTier's
+        # values); a stray or corrupt file reads as None, never an
+        # unsupported tier.
         return tier if tier in {"dnsmasq", "lookup", "getent"} else None
 
     @property

@@ -1929,6 +1929,30 @@ def test_refresh_reuses_persisted_network_mode(
     assert not [c for c in harness.runner.run.call_args_list if "info" in c.args[0]]
 
 
+@mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
+def test_refresh_accepts_a_bundle_written_under_the_retired_tier_name(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """A container launched before the tier rename still restarts.
+
+    Its bundle records ``dig``.  Read as a raw value that has to be a
+    ``DnsTier``, that aborts the restart with a ValueError naming an enum;
+    read through the bundle, it is the ``lookup`` tier it always was.
+    """
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+    harness.mode.pre_start("test", ["dev-standard"])
+    StateBundle(config.state_dir).dns_tier.write_text("dig\n")
+
+    harness.mode.refresh("test", ["dev-standard"])
+
+
 def test_refresh_without_prepared_bundle_raises(
     make_hook_mode: HookModeHarnessFactory,
     make_config: ConfigFactory,

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from terok_shield.config import DnsTier
 from terok_shield.state import (
     BUNDLE_VERSION,
     STATE_DIR_MODE,
@@ -165,6 +166,21 @@ def test_read_dns_tier_none_for_unsupported_or_corrupt(tmp_path: Path) -> None:
     assert bundle.read_dns_tier() is None
     bundle.dns_tier.write_bytes(b"\xff\xfe not utf-8")
     assert bundle.read_dns_tier() is None
+
+
+def test_read_dns_tier_carries_the_retired_name_forward(tmp_path: Path) -> None:
+    """A container that recorded ``dig`` reads as ``lookup``, the tier it names.
+
+    The rename was nominal — same static pre-start resolution, a name that
+    stopped privileging one of two interchangeable tools — so the record still
+    describes the tier accurately.  Reading it is what lets such a container
+    restart rather than be recreated.
+    """
+    bundle = StateBundle(tmp_path)
+    bundle.dns_tier.write_text("dig\n")
+    assert bundle.read_dns_tier() == "lookup"
+    assert recorded_dns_tier(tmp_path) == "lookup"
+    assert DnsTier(bundle.read_dns_tier()) is DnsTier.LOOKUP
 
 
 def test_read_denied_ips_composes_security_deny_and_live(tmp_path: Path) -> None:
