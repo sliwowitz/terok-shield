@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Jiri Vyskocil
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration tests: DNS resolution with real dig."""
+"""Integration tests: DNS resolution with the host's real lookup tool."""
 
 import tempfile
 from pathlib import Path
