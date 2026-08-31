@@ -12,7 +12,10 @@ from unittest import mock
 
 from terok_shield import container as resolver
 
+from ..testfs import FAKE_STATE_DIR_STR
+
 _ANN_KEY = "terok.shield.state_dir"
+_VERSION_KEY = "terok.shield.version"
 
 
 def _fake_inspect_output(annotations: dict[str, str]) -> str:
@@ -88,6 +91,18 @@ class TestResolveStateDir:
             with mock.patch.object(resolver.subprocess, "run", return_value=result):
                 assert resolver.resolve_state_dir("ctr") is None
 
+    def test_returns_none_when_resolve_raises_oserror(self) -> None:
+        """An ``OSError`` out of ``Path.resolve`` (ELOOP, EACCES) collapses to ``None``.
+
+        Exercises ``_state_dir_from`` directly, like the ``_annotations``
+        shape-guard tests: the annotation value parses and is absolute, but
+        the filesystem refuses to canonicalise it.
+        """
+        with mock.patch.object(resolver, "Path") as path_cls:
+            path_cls.return_value.is_absolute.return_value = True
+            path_cls.return_value.resolve.side_effect = OSError("ELOOP")
+            assert resolver._state_dir_from({_ANN_KEY: FAKE_STATE_DIR_STR}) is None
+
 
 class TestAnnotations:
     """Hardening: each type-check branch of ``_annotations`` hits ``None``.
@@ -138,3 +153,60 @@ class TestResolveShieldVersion:
                 resolver.subprocess, "run", return_value=mock.MagicMock(returncode=0, stdout=out)
             ):
                 assert resolver.resolve_shield_version("ctr") is None
+
+
+class TestResolveAnnotations:
+    """``resolve_annotations`` reads every shield annotation in one inspect."""
+
+    def test_returns_both_fields_from_one_inspect(self, tmp_path: Path) -> None:
+        """Both annotations present → both fields set, exactly one podman call."""
+        sd = tmp_path / "shield"
+        sd.mkdir()
+        with mock.patch.object(resolver.shutil, "which", return_value="/usr/bin/podman"):
+            out = _fake_inspect_output({_VERSION_KEY: "15", _ANN_KEY: str(sd)})
+            with mock.patch.object(
+                resolver.subprocess, "run", return_value=mock.MagicMock(returncode=0, stdout=out)
+            ) as run:
+                ann = resolver.resolve_annotations("ctr")
+        assert ann == resolver.ShieldAnnotations(version=15, state_dir=sd)
+        run.assert_called_once()
+
+    def test_fields_fail_independently(self, tmp_path: Path) -> None:
+        """A defective value nulls its own field without dragging the other down."""
+        sd = tmp_path / "shield"
+        sd.mkdir()
+        with mock.patch.object(resolver.shutil, "which", return_value="/usr/bin/podman"):
+            out = _fake_inspect_output({_VERSION_KEY: "v15", _ANN_KEY: str(sd)})
+            with mock.patch.object(
+                resolver.subprocess, "run", return_value=mock.MagicMock(returncode=0, stdout=out)
+            ):
+                ann = resolver.resolve_annotations("ctr")
+        assert ann == resolver.ShieldAnnotations(version=None, state_dir=sd)
+
+    def test_missing_annotations_are_none(self) -> None:
+        with mock.patch.object(resolver.shutil, "which", return_value="/usr/bin/podman"):
+            out = _fake_inspect_output({})
+            with mock.patch.object(
+                resolver.subprocess, "run", return_value=mock.MagicMock(returncode=0, stdout=out)
+            ):
+                ann = resolver.resolve_annotations("ctr")
+        assert ann == resolver.ShieldAnnotations(version=None, state_dir=None)
+
+    def test_failed_inspect_yields_all_none(self) -> None:
+        """Podman missing → the all-``None`` record, never a crash."""
+        with mock.patch.object(resolver.shutil, "which", return_value=None):
+            assert resolver.resolve_annotations("ctr") == resolver.ShieldAnnotations(
+                version=None, state_dir=None
+            )
+
+    def test_agrees_with_single_resolvers(self, tmp_path: Path) -> None:
+        """The combined record matches what the two single resolvers report."""
+        sd = tmp_path / "shield"
+        sd.mkdir()
+        with mock.patch.object(resolver.shutil, "which", return_value="/usr/bin/podman"):
+            out = _fake_inspect_output({_VERSION_KEY: "15", _ANN_KEY: str(sd)})
+            run_result = mock.MagicMock(returncode=0, stdout=out)
+            with mock.patch.object(resolver.subprocess, "run", return_value=run_result):
+                ann = resolver.resolve_annotations("ctr")
+                assert ann.version == resolver.resolve_shield_version("ctr")
+                assert ann.state_dir == resolver.resolve_state_dir("ctr")

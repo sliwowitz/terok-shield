@@ -27,7 +27,28 @@ CLI dispatcher reads them via the
 
 from __future__ import annotations
 
-from terok_util import CommandDef, CommandTree
+from terok_util import ArgDef, CommandDef, CommandTree
+
+_CONTAINER_ARG_DESTS = frozenset({"container", "container_id"})
+
+
+def is_container_arg(arg: ArgDef) -> bool:
+    """Whether *arg* is a command's container-reference argument.
+
+    The registry spells it three ways: the positional ``container`` on
+    most per-container verbs, ``logs``' optional ``--container`` filter,
+    and ``up``/``down``'s ``--container-id`` routing key.  An orchestrator
+    that resolves the container itself (terok's ``terok shield`` bridge)
+    must recognise every spelling — matching by the argparse ``dest``
+    catches them all, because the dest is the keyword a forwarded value
+    would collide under.  The dest is derived exactly as the wire layer
+    derives it, slash-separated names
+    ([`ArgDef`][terok_util.cli_types.ArgDef], e.g. ``-c/--container``)
+    included: longest form wins, then dashes normalise to underscores,
+    with an explicit ``arg.dest`` overriding everything.
+    """
+    dest = arg.dest or max(arg.name.split("/"), key=len).lstrip("-").replace("-", "_")
+    return dest in _CONTAINER_ARG_DESTS
 
 
 def needs_container(cmd: CommandDef) -> bool:

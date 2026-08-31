@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from terok_shield.commands import COMMANDS, needs_container, standalone_only
+from terok_shield.commands import COMMANDS, is_container_arg, needs_container, standalone_only
 from terok_shield.verbs.control import (
     _handle_allow,
     _handle_deny,
@@ -71,6 +71,48 @@ class TestCommandDefs:
                     arg.dest or arg.name.lstrip("-").replace("-", "_") for arg in resolved.args
                 }
                 assert "container" in dests, f"{cmd.name} needs_container but has no container arg"
+
+    def test_is_container_arg_matches_exactly_the_container_spellings(self) -> None:
+        """The predicate's verdict over the whole live registry, arg by arg.
+
+        Asserting the complete mapping (not a sample) makes a false
+        positive on any verb — today's or a future one — fail loudly.
+        """
+        matched = {
+            resolved.name: {arg.name for arg in resolved.args if is_container_arg(arg)}
+            for cmd in COMMANDS
+            if (resolved := cmd.resolve()).args
+        }
+        assert matched == {
+            "status": {"container"},  # the optional (nargs="?") positional
+            "prepare": {"container"},
+            "run": {"container"},
+            "resolve": {"container"},
+            "allow": {"container"},
+            "deny": {"container"},
+            "down": {"container", "--container-id"},
+            "up": {"container", "--container-id"},
+            "reset": {"container"},
+            "quarantine": {"container"},
+            "rules": {"container"},
+            "watch": {"container"},
+            "simple-clearance": {"container"},
+            "logs": {"--container"},  # the standalone CLI's optional filter
+            "preview": set(),
+        }
+
+    def test_is_container_arg_handles_wire_layer_spellings(self) -> None:
+        """Slash-form names and explicit dests resolve like the wire layer's dest.
+
+        The registry doesn't use these forms today, but the wire layer
+        supports them — and the predicate's whole job is to keep a future
+        spelling from slipping past the bridge.
+        """
+        from terok_util import ArgDef
+
+        assert is_container_arg(ArgDef(name="-c/--container"))
+        assert is_container_arg(ArgDef(name="--target", dest="container"))
+        assert not is_container_arg(ArgDef(name="--container", dest="container_filter"))
 
 
 class TestHandlers:

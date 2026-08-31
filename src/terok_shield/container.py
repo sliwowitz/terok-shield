@@ -31,6 +31,7 @@ import json
 import logging
 import shutil
 import subprocess  # nosec B404 — podman is a trusted host binary
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ANNOTATION_STATE_DIR_KEY, ANNOTATION_VERSION_KEY
@@ -92,6 +93,33 @@ def _annotations(records: object) -> dict | None:
     return annotations if isinstance(annotations, dict) else None
 
 
+def _state_dir_from(annotations: dict) -> Path | None:
+    """Parse the ``terok.shield.state_dir`` value out of *annotations*, ``None`` on any defect."""
+    raw = annotations.get(ANNOTATION_STATE_DIR_KEY)
+    if not isinstance(raw, str) or not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        _log.warning("container carries a non-absolute state_dir annotation: %r", raw)
+        return None
+    try:
+        return path.resolve()
+    except OSError as exc:
+        _log.warning("failed to resolve state_dir annotation %r: %s", raw, exc)
+        return None
+
+
+def _version_from(annotations: dict) -> int | None:
+    """Parse the ``terok.shield.version`` value out of *annotations*, ``None`` when non-integer."""
+    raw = annotations.get(ANNOTATION_VERSION_KEY)
+    if not isinstance(raw, str):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def resolve_state_dir(container: str) -> Path | None:
     """Return the per-container ``state_dir`` from podman annotations, or ``None``.
 
@@ -108,20 +136,7 @@ def resolve_state_dir(container: str) -> Path | None:
         otherwise ``None``.
     """
     annotations = _annotations(_inspect_records(container))
-    if annotations is None:
-        return None
-    raw = annotations.get(ANNOTATION_STATE_DIR_KEY)
-    if not isinstance(raw, str) or not raw:
-        return None
-    path = Path(raw)
-    if not path.is_absolute():
-        _log.warning("container carries a non-absolute state_dir annotation: %r", raw)
-        return None
-    try:
-        return path.resolve()
-    except OSError as exc:
-        _log.warning("failed to resolve state_dir annotation %r: %s", raw, exc)
-        return None
+    return None if annotations is None else _state_dir_from(annotations)
 
 
 def resolve_shield_version(container: str) -> int | None:
@@ -136,12 +151,46 @@ def resolve_shield_version(container: str) -> int | None:
     container whose bundle predates the installed shield (fail-fast, re-create).
     """
     annotations = _annotations(_inspect_records(container))
+    return None if annotations is None else _version_from(annotations)
+
+
+@dataclass(frozen=True)
+class ShieldAnnotations:
+    """Every shield-owned OCI annotation read off one container in one inspect.
+
+    Each field carries the same "cannot determine" ``None`` its
+    single-annotation resolver uses; a failed inspect (podman missing,
+    container absent) yields a record with every field ``None``.
+    """
+
+    version: int | None
+    """Bundle version — see [`resolve_shield_version`][terok_shield.container.resolve_shield_version]."""
+
+    state_dir: Path | None
+    """State directory — see [`resolve_state_dir`][terok_shield.container.resolve_state_dir]."""
+
+
+def resolve_annotations(container: str) -> ShieldAnnotations:
+    """Read the shield annotations off *container* in a single ``podman inspect``.
+
+    A sweep that needs both the bundle version and the state dir pays one
+    inspect here instead of one per
+    [`resolve_shield_version`][terok_shield.container.resolve_shield_version] /
+    [`resolve_state_dir`][terok_shield.container.resolve_state_dir] call.
+    Per-field failures collapse to ``None`` exactly as in the single
+    resolvers.
+
+    Args:
+        container: Container name or ID (short or full) as podman knows it.
+
+    Returns:
+        A [`ShieldAnnotations`][terok_shield.container.ShieldAnnotations]
+        record; all fields are ``None`` when the inspect itself fails.
+    """
+    annotations = _annotations(_inspect_records(container))
     if annotations is None:
-        return None
-    raw = annotations.get(ANNOTATION_VERSION_KEY)
-    if not isinstance(raw, str):
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
+        return ShieldAnnotations(version=None, state_dir=None)
+    return ShieldAnnotations(
+        version=_version_from(annotations),
+        state_dir=_state_dir_from(annotations),
+    )
