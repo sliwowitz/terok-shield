@@ -181,6 +181,27 @@ class TestAnswers:
 
         assert harness.resolved == [TEST_DOMAIN]
 
+    def test_the_cache_cannot_be_grown_without_bound(self) -> None:
+        """The container picks the names, so a flood of made-up ones must stay bounded.
+
+        Every name it invents is a cache miss and an entry.  Unbounded,
+        that is a host-side process growing until someone notices.
+        """
+        responder = proxy.Responder(
+            resolve=lambda _name: [],
+            permits=lambda _name: False,
+            allow=lambda _ip: None,
+            upstream=_LOOPBACK,
+        )
+
+        async def _flood() -> None:
+            for index in range(proxy._CACHE_MAX * 2):
+                await responder._addresses(f"n{index}.{TEST_DOMAIN2}", _QTYPE_A)
+
+        asyncio.run(_flood())
+
+        assert len(responder._cache) <= proxy._CACHE_MAX
+
     def test_an_address_is_allowed_before_the_answer_leaves(self) -> None:
         """A client must never be able to reach for an address the filter lacks.
 

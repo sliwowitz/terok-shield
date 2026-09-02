@@ -61,6 +61,13 @@ _TTL = 30
 _MAX_NAME = 253
 _UPSTREAM_TIMEOUT = 2.0
 
+#: The cache holds one entry per name asked for, and the container
+#: chooses the names.  Without a bound it would answer a flood of
+#: made-up names by growing until the host notices.  Emptying it whole
+#: at the cap costs a re-resolve for names still in use, which is the
+#: right price for a bound that cannot be gamed.
+_CACHE_MAX = 512
+
 #: One label, ASCII only: anything else — a raw UTF-8 name, a leading
 #: dash — is refused rather than guessed at.  Punycode needs no special
 #: case, being ASCII already.  The leading underscore is the service-label
@@ -185,6 +192,8 @@ class Responder(asyncio.DatagramProtocol):
         if ips and self._permits(name):
             for ip in ips:
                 self._allow(ip)
+        if len(self._cache) >= _CACHE_MAX:
+            self._cache.clear()
         self._cache[key] = (loop.time() + _TTL, ips)
         return ips
 
