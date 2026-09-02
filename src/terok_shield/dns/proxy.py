@@ -34,9 +34,12 @@ a socket and in no other way.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import socket
 import struct
+import subprocess  # nosec B404 — argv-only nft calls inside the container netns
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -233,3 +236,85 @@ async def serve(
         local_addr=(listen, port),
     )
     return transport
+
+
+# ── Entry point ─────────────────────────────────────────
+
+
+def _matches(name: str, allowed: frozenset[str]) -> bool:
+    """Does *name* fall under one of *allowed*?
+
+    Suffix matching, the same rule dnsmasq applies to an ``nftset``
+    entry: a listed domain covers itself and every name under it.  The
+    two tiers have to agree here — an allowlist that means one thing on
+    a host with dnsmasq and another on a host without it is worse than
+    either rule alone.
+    """
+    return any(name == entry or name.endswith(f".{entry}") for entry in allowed)
+
+
+def _allow_element(runner_nft: str, table: str, set_v4: str, set_v6: str) -> Callable[[str], None]:
+    """Return a callback adding one address to the matching nft set.
+
+    Runs ``nft`` directly: this process is already in the container's
+    network namespace, which is the only place that table exists.
+    """
+
+    def _allow(ip: str) -> None:
+        target = set_v6 if ":" in ip else set_v4
+        subprocess.run(  # noqa: S603 — argv, no shell; ip is inet_pton-validated before this
+            [runner_nft, "add", "element", "inet", table, target, f"{{ {ip} }}"],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+
+    return _allow
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the responder until killed.  Started the way dnsmasq is started."""
+    import argparse
+
+    from ..nft.constants import NFT_TABLE_NAME, TIER_PROJECT_ALLOW
+    from ..run import SubprocessRunner
+    from ..state import StateBundle
+    from .resolver import DnsResolver
+
+    parser = argparse.ArgumentParser(prog="terok-shield-dns-proxy")
+    parser.add_argument("--state-dir", required=True, type=Path)
+    parser.add_argument("--upstream", required=True)
+    parser.add_argument("--listen", default="127.0.0.1")
+    parser.add_argument("--port", default=53, type=int)
+    parser.add_argument("--nft", default="nft")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="terok-shield-dns-proxy: %(message)s")
+    bundle = StateBundle(args.state_dir)
+    resolver = DnsResolver(runner=SubprocessRunner())
+
+    def _permits(name: str) -> bool:
+        """Read the allowlist per query: ``shield allow`` writes the file, and that is the signal."""
+        return _matches(name, frozenset(bundle.read_effective().allow_targets()))
+
+    allow = _allow_element(
+        args.nft, NFT_TABLE_NAME, f"{TIER_PROJECT_ALLOW}_v4", f"{TIER_PROJECT_ALLOW}_v6"
+    )
+
+    async def _run() -> None:
+        await serve(
+            resolve=lambda name: resolver.resolve_domains([name]),
+            permits=_permits,
+            allow=allow,
+            upstream=args.upstream,
+            listen=args.listen,
+            port=args.port,
+        )
+        await asyncio.Event().wait()
+
+    asyncio.run(_run())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
