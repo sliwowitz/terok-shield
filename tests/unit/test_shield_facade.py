@@ -12,6 +12,7 @@ from unittest import mock
 import pytest
 
 from terok_shield import DnsTier, ExecError, Shield, ShieldConfig, ShieldState, state
+from terok_shield.run import ShieldNeedsSetup
 
 from ..testfs import FAKE_HOOKS_DIR, NFT_BINARY
 from ..testnet import TEST_DOMAIN, TEST_DOMAIN2, TEST_IP1, TEST_IP2
@@ -259,6 +260,20 @@ def test_allow_and_deny_swallow_backend_exceptions(
     harness = make_shield()
     getattr(harness.mode, backend_method).side_effect = ExecError(["nft"], 1, "nft failed")
     assert getattr(harness.shield, method)("test-ctr", target) == []
+
+
+@pytest.mark.parametrize("method", ["allow", "deny"])
+def test_allow_and_deny_refuse_a_wildcard_on_a_static_tier(
+    make_shield: ShieldHarnessFactory, method: str, tmp_path: Path
+) -> None:
+    """A ``*.`` target names no address where names resolve once, so it is refused up front."""
+    harness = make_shield(ShieldConfig(state_dir=tmp_path))
+    state.StateBundle(tmp_path).dns_tier.write_text(f"{DnsTier.LOOKUP.value}\n")
+
+    with pytest.raises(ShieldNeedsSetup, match=r"lookup tier: \*\."):
+        getattr(harness.shield, method)("test-ctr", f"*.{TEST_DOMAIN}")
+
+    harness.dns.resolve_domains.assert_not_called()
 
 
 def test_rules_delegates_to_mode(make_shield: ShieldHarnessFactory) -> None:

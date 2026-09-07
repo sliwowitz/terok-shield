@@ -1300,18 +1300,19 @@ class TestPreStartDnsTierBranches:
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
         harness = make_hook_mode(config=make_config(dnsmasq_path=binary))
+        recorded = str(binary.resolve())
         harness.runner.run.side_effect = lambda cmd, **_kw: (
-            _DNSMASQ_VERSION_NFTSET if cmd[0] == str(binary) else _MODERN_PODMAN_INFO
+            _DNSMASQ_VERSION_NFTSET if cmd[0] == recorded else _MODERN_PODMAN_INFO
         )
         harness.profiles.compose_profiles.return_value = [TEST_DOMAIN]
 
         harness.mode.pre_start("test", ["dev-standard"])
 
         sd = harness.config.state_dir.resolve()
-        assert StateBundle(sd).dnsmasq_bin.read_text().strip() == str(binary)
+        assert StateBundle(sd).dnsmasq_bin.read_text().strip() == recorded
         assert StateBundle(sd).read_dns_tier() is DnsTier.DNSMASQ_LIVE
         probes = [c.args[0] for c in harness.runner.run.call_args_list if c.args[0][0] != "podman"]
-        assert probes and all(cmd[0] == str(binary) for cmd in probes)
+        assert probes and all(cmd[0] == recorded for cmd in probes)
         harness.runner.has.assert_not_called()
 
     @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)
@@ -2043,7 +2044,7 @@ def test_refresh_accepts_a_bundle_written_under_the_retired_tier_name(
     harness.runner.run.return_value = _MODERN_PODMAN_INFO
     harness.profiles.compose_profiles.return_value = []
     harness.mode.pre_start("test", ["dev-standard"])
-    StateBundle(config.state_dir).dns_tier.write_text(f"{DnsTier.LOOKUP.value}\n")
+    StateBundle(config.state_dir).dns_tier.write_text("dig\n")
 
     harness.mode.refresh("test", ["dev-standard"])
 

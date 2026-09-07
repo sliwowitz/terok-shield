@@ -56,7 +56,7 @@ def locate(explicit: Path | None, runner: CommandRunner) -> str:
         return (which_sbin_aware("dnsmasq") or "dnsmasq") if runner.has("dnsmasq") else ""
     if not (explicit.is_file() and os.access(explicit, os.X_OK)):
         raise ShieldNeedsSetup(f"dnsmasq_path {explicit} is not an executable file.")
-    return str(explicit)
+    return str(explicit.resolve())
 
 
 # ── Lifecycle ──────────────────────────────────────────

@@ -379,6 +379,21 @@ def test_await_restart_raises_when_dnsmasq_absent(tmp_path: Path) -> None:
             _await_restart(tmp_path, timeout_s=0.0)
 
 
+def test_terminate_stops_at_sigterm_when_the_process_exits(tmp_path: Path) -> None:
+    """A dnsmasq that exits on SIGTERM never sees SIGKILL."""
+    import signal
+
+    from terok_shield.dns.dnsmasq import _terminate
+
+    with (
+        mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=False),  # gone
+        mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
+    ):
+        _terminate(12345, tmp_path)
+
+    assert mock_kill.call_args_list == [mock.call(12345, signal.SIGTERM)]
+
+
 def test_await_restart_returns_when_fresh_dnsmasq_present(tmp_path: Path) -> None:
     """_await_restart returns cleanly once a fresh dnsmasq owns the conf."""
     from terok_shield.dns.dnsmasq import _await_restart
@@ -442,7 +457,7 @@ def test_locate_uses_the_configured_binary(tmp_path: Path) -> None:
     binary.write_text("#!/bin/sh\n")
     binary.chmod(0o755)
     runner = mock.MagicMock()
-    assert locate(binary, runner) == str(binary)
+    assert locate(binary, runner) == str(binary.resolve())
     runner.has.assert_not_called()
 
 

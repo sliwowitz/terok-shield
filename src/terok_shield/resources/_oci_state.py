@@ -486,15 +486,21 @@ def is_our_dnsmasq(pid_int: int, state_dir: Path) -> bool:
     """True when *pid_int* runs the recorded dnsmasq binary on this container's config.
 
     Matches argv[0] and the ``--conf-file=`` argument exactly, so a monitoring
-    tool that quotes these strings in its own arguments never passes.
+    tool that quotes these strings in its own arguments never passes.  A
+    bundle from before the binary was recorded accepts any ``dnsmasq`` on
+    this config, so a container started before the upgrade is still reaped
+    on stop.
     """
     try:
-        binary = find_dnsmasq(state_dir).encode()
         argv = Path(f"/proc/{pid_int}/cmdline").read_bytes().rstrip(b"\x00").split(b"\x00")
     except OSError:
         return False
-    conf_arg = f"--conf-file={state_dir / DNSMASQ_CONF_FILE_NAME}".encode()
-    return argv[0] == binary and conf_arg in argv
+    if f"--conf-file={state_dir / DNSMASQ_CONF_FILE_NAME}".encode() not in argv:
+        return False
+    try:
+        return argv[0] == find_dnsmasq(state_dir).encode()
+    except OSError:
+        return argv[0].rsplit(b"/", 1)[-1] == b"dnsmasq"
 
 
 def find_ip_bin() -> str:

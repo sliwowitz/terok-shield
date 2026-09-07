@@ -909,11 +909,12 @@ class TestRunWatchTiers:
 
         with (
             patch("terok_shield.watch.select.select", side_effect=_stop_immediately),
-            patch("terok_shield.watch.NflogWatcher.create", return_value=None),
+            patch("terok_shield.watch.NflogWatcher.create", return_value=None) as nflog,
             patch("terok_shield.watch.DnsLogWatcher") as dns_log,
         ):
             run_watch(bundle.state_dir, _CONTAINER)
 
+        nflog.assert_called_once_with(_CONTAINER)
         dns_log.assert_not_called()
         assert not bundle.dnsmasq_log.exists()
         assert "IP addresses only" in capsys.readouterr().err

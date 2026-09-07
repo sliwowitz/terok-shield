@@ -80,6 +80,10 @@ def _extract_annotation(args: list[str], key: str) -> str | None:
     return None
 
 
+_DNSMASQ_TIERS = {tier.value for tier in DnsTier if tier.runs_dnsmasq}
+"""Tiers on which pre_start writes dnsmasq artifacts and the hook launches dnsmasq."""
+
+
 def _tier_from_args(args: list[str]) -> str | None:
     """Extract the dns_tier annotation value from podman args."""
     return _extract_annotation(args, "terok.shield.dns_tier")
@@ -175,7 +179,7 @@ class TestPreStartDnsmasqTier:
             args = shield.pre_start("test-ctr")
 
             tier = _tier_from_args(args)
-            if tier != DnsTier.DNSMASQ_LIVE.value:
+            if tier not in _DNSMASQ_TIERS:
                 pytest.skip(f"pre_start selected tier '{tier}', not dnsmasq")
             # --dns must NOT be used (causes pasta to bind host port 53)
             assert "--dns" not in args
@@ -194,7 +198,7 @@ class TestPreStartDnsmasqTier:
             args = shield.pre_start("test-ctr")
 
             tier = _tier_from_args(args)
-            if tier != DnsTier.DNSMASQ_LIVE.value:
+            if tier not in _DNSMASQ_TIERS:
                 pytest.skip(f"pre_start selected tier '{tier}', not dnsmasq")
             tier_path = StateBundle(sd).tier_path("project_allow")
             assert tier_path.is_file()
@@ -492,7 +496,7 @@ class TestRestartWithReusedStateDir:
             # First run
             extra_args = shield.pre_start(name)
             tier = _tier_from_args(extra_args)
-            if tier != DnsTier.DNSMASQ_LIVE.value:
+            if tier not in _DNSMASQ_TIERS:
                 pytest.skip(f"dnsmasq tier not selected (got '{tier}')")
 
             start_shielded_container(name, extra_args, IMAGE)

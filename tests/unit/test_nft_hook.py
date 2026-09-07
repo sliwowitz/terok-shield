@@ -503,12 +503,24 @@ def test_is_our_dnsmasq_rejects_a_conf_path_substring(tmp_path: Path) -> None:
         assert _oci_state.is_our_dnsmasq(1234, tmp_path) is False
 
 
-def test_is_our_dnsmasq_false_when_cmdline_or_record_is_missing(tmp_path: Path) -> None:
-    """An unreadable /proc entry, or a bundle with no recorded binary, matches nothing."""
+def test_is_our_dnsmasq_false_when_cmdline_is_unreadable(tmp_path: Path) -> None:
+    """A /proc entry that cannot be read matches nothing."""
     _recorded(tmp_path)
     with mock.patch.object(_oci_state.Path, "read_bytes", side_effect=OSError("no such file")):
         assert _oci_state.is_our_dnsmasq(9999, tmp_path) is False
-    assert _oci_state.is_our_dnsmasq(1234, tmp_path / "unrecorded") is False
+
+
+def test_is_our_dnsmasq_reaps_a_container_from_before_the_binary_was_recorded(
+    tmp_path: Path,
+) -> None:
+    """A bundle without a recorded binary accepts any dnsmasq on its config, and nothing else."""
+    conf = tmp_path / _oci_state.DNSMASQ_CONF_FILE_NAME
+    ours = f"{DNSMASQ_SBIN}\x00--conf-file={conf}\x00".encode()
+    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=ours):
+        assert _oci_state.is_our_dnsmasq(1234, tmp_path) is True
+    other = ours.replace(DNSMASQ_SBIN.encode(), b"/usr/sbin/nginx")
+    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=other):
+        assert _oci_state.is_our_dnsmasq(1234, tmp_path) is False
 
 
 # ── _poststop ─────────────────────────────────────────────────────────────────
