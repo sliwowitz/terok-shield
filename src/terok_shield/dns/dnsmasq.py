@@ -6,14 +6,15 @@
 dnsmasq runs inside the container's network namespace (via ``nsenter``)
 on a runtime-dependent listen address — ``127.0.0.1:53`` for ordinary
 runtimes that share the netns loopback, a link-local address under
-krun whose guest can't reach netns 127.0.0.1.  ``--nftset``
-auto-populates nft allow sets on every DNS resolution to handle IP
-rotation that static pre-start resolution cannot.
+krun whose guest can't reach netns 127.0.0.1.  A build with nftset
+support populates the nft allow sets on every DNS resolution, which
+follows IP rotation that static pre-start resolution cannot; a build
+without it still serves the query log and the deny sinkholes.
 
 This module is the single package-side owner of dnsmasq config format
 and CLI args; the per-container start/stop dance is owned by the OCI
-hook resource (``resources/nft_hook.py``), which has its own stdlib-
-only copy because hook scripts run outside the package venv.
+hook resource (``resources/nft_hook.py``).  Both sides locate and
+match the dnsmasq process through ``resources/_oci_state``.
 """
 # WAYPOINT: HookMode (hooks.mode)
 
@@ -28,13 +29,34 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..nft.constants import DNSMASQ_BIND_DEFAULT, NFT_TABLE_NAME, TIER_PROJECT_ALLOW
-from ..run import CommandRunner, which_sbin_aware
+from ..resources._oci_state import find_dnsmasq, is_our_dnsmasq
+from ..run import CommandRunner, ShieldNeedsSetup, which_sbin_aware
 from ..state import StateBundle
 
 logger = logging.getLogger(__name__)
 
 # Strict domain label validation (RFC 1035 + wildcards).
 _DOMAIN_RE = re.compile(r"^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$")
+
+
+# ── Locating the binary ────────────────────────────────
+
+
+def locate(explicit: Path | None, runner: CommandRunner) -> str:
+    """The dnsmasq binary shield runs: *explicit* when set, else the host's own.
+
+    Returns an empty string when the host has none.  An explicit path is the
+    operator's word, so a path that is not an executable file is refused,
+    never silently replaced by a PATH lookup.
+
+    Raises:
+        ShieldNeedsSetup: When *explicit* is not an executable file.
+    """
+    if explicit is None:
+        return (which_sbin_aware("dnsmasq") or "dnsmasq") if runner.has("dnsmasq") else ""
+    if not (explicit.is_file() and os.access(explicit, os.X_OK)):
+        raise ShieldNeedsSetup(f"dnsmasq_path {explicit} is not an executable file.")
+    return str(explicit)
 
 
 # ── Lifecycle ──────────────────────────────────────────
@@ -58,7 +80,7 @@ def reload(
     NXDOMAIN sinkhole for a denied one — only lands on a fresh start.  So we
     restart in-netns: regenerate the conf, stop the old process, and relaunch
     it reading the new conf.  No-op if dnsmasq was never started (PID file
-    absent — not the dnsmasq tier).
+    absent — a tier without dnsmasq).
 
     There is a sub-second window with no in-container DNS between stop and
     relaunch.  Runtime domain allow/deny is operator-initiated and rare, so
@@ -83,7 +105,7 @@ def reload(
     if pid_int is None:
         return
 
-    if not _is_our_dnsmasq(pid_int, state_dir):
+    if not is_our_dnsmasq(pid_int, state_dir):
         _clear_pid_file(state_dir)
         raise RuntimeError(
             f"PID {pid_int} is not dnsmasq (stale PID file) — container DNS is broken. "
@@ -92,20 +114,22 @@ def reload(
 
     # Regenerate the config, preserving log-queries / log-facility and the
     # listen address so the relaunch never rebinds onto a different interface.
-    pid_path = StateBundle(state_dir).dnsmasq_pid
-    conf_path = StateBundle(state_dir).dnsmasq_conf
+    bundle = StateBundle(state_dir)
+    conf_path = bundle.dnsmasq_conf
     old_conf = conf_path.read_text() if conf_path.is_file() else ""
-    log_path = StateBundle(state_dir).dnsmasq_log if "log-queries" in old_conf else None
+    log_path = bundle.dnsmasq_log if "log-queries" in old_conf else None
     listen_address = _extract_listen_address(old_conf) or DNSMASQ_BIND_DEFAULT
+    tier = bundle.read_dns_tier()
     conf_path.write_text(
         generate_config(
             upstream_dns,
             domains,
-            pid_path,
+            bundle.dnsmasq_pid,
             listen_address=listen_address,
             log_path=log_path,
             deny_domains=deny_domains,
             override_domains=override_domains,
+            populate=tier is not None and tier.live,
         )
     )
 
@@ -115,7 +139,7 @@ def reload(
     # ``ip addr add`` is needed here.
     _terminate(pid_int, state_dir)
     _clear_pid_file(state_dir)
-    runner.dnsmasq_via_nsenter(container, str(conf_path))
+    runner.dnsmasq_via_nsenter(container, str(conf_path), binary=find_dnsmasq(state_dir))
     _await_restart(state_dir)
 
 
@@ -125,7 +149,7 @@ def _terminate(pid_int: int, state_dir: Path, timeout_s: float = 2.0) -> None:
         os.kill(pid_int, signal.SIGTERM)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if not _is_our_dnsmasq(pid_int, state_dir):
+        if not is_our_dnsmasq(pid_int, state_dir):
             return
         time.sleep(0.05)
     with contextlib.suppress(ProcessLookupError):
@@ -137,7 +161,7 @@ def _await_restart(state_dir: Path, timeout_s: float = 2.0) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         pid = _read_pid(state_dir)
-        if pid is not None and _is_our_dnsmasq(pid, state_dir):
+        if pid is not None and is_our_dnsmasq(pid, state_dir):
             return
         time.sleep(0.05)
     raise RuntimeError(
@@ -195,6 +219,7 @@ def generate_config(
     log_path: Path | None = None,
     deny_domains: Sequence[str] = (),
     override_domains: Sequence[str] = (),
+    populate: bool = True,
 ) -> str:
     """Generate a complete dnsmasq configuration.
 
@@ -223,6 +248,9 @@ def generate_config(
             without joining the ``--nftset`` population: the override's
             addresses are statically seeded into the t10 set, the DNS plane
             only has to keep the name resolvable.
+        populate: Emit the ``nftset=`` lines.  False for a dnsmasq built
+            without nftset support, which then serves the query log and the
+            sinkholes while the allow sets are seeded statically.
 
     Raises:
         ValueError: If *upstream_dns* or *listen_address* is not a valid IP address.
@@ -242,7 +270,7 @@ def generate_config(
     ]
     if log_path is not None:
         lines += ["log-queries", f"log-facility={log_path}"]
-    for domain in domains:
+    for domain in domains if populate else ():
         try:
             lines.append(nftset_entry(domain))
         except ValueError:
@@ -334,15 +362,13 @@ def nftset_entry(domain: str) -> str:
 # ── Capability probing ─────────────────────────────────
 
 
-def has_nftset_support(runner: CommandRunner) -> bool:
-    """Return True if the installed dnsmasq supports ``--nftset``.
+def has_nftset_support(runner: CommandRunner, binary: str) -> bool:
+    """Return True if the dnsmasq at *binary* supports ``--nftset``.
 
     Parses ``dnsmasq --version`` compile-time options for the ``nftset``
-    feature flag.  Returns False if dnsmasq is not installed or its
-    output contains ``no-nftset`` (explicitly disabled).
+    feature flag.  A build without it prints ``no-nftset``.
     """
-    dnsmasq_bin = which_sbin_aware("dnsmasq") or "dnsmasq"
-    out = runner.run([dnsmasq_bin, "--version"], check=False)
+    out = runner.run([binary, "--version"], check=False)
     return bool(re.search(r"\bnftset\b", out)) and not bool(re.search(r"\bno-nftset\b", out))
 
 
@@ -374,27 +400,6 @@ def _read_pid(state_dir: Path) -> int | None:
         return int(pid_path.read_text().strip())
     except (OSError, ValueError):
         return None
-
-
-def _is_our_dnsmasq(pid_int: int, state_dir: Path) -> bool:
-    """Return True if the PID belongs to *this container's* dnsmasq.
-
-    Parses ``/proc/{pid}/cmdline`` as a NUL-separated argv vector and
-    checks that argv[0] is the ``dnsmasq`` binary (exact name or absolute
-    path) and that ``--conf-file=<our-conf>`` is present as a separate
-    argument.  Substring matching is not used, preventing false positives
-    from monitoring tools that embed these strings in their own arguments.
-    """
-    conf_arg = b"--conf-file=" + str(StateBundle(state_dir).dnsmasq_conf).encode()
-    try:
-        raw = Path(f"/proc/{pid_int}/cmdline").read_bytes()
-    except OSError:
-        return False
-    args = raw.rstrip(b"\x00").split(b"\x00")
-    if not args:
-        return False
-    exe = args[0]
-    return (exe == b"dnsmasq" or exe.endswith(b"/dnsmasq")) and conf_arg in args
 
 
 def _clear_pid_file(state_dir: Path) -> None:

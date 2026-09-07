@@ -39,8 +39,12 @@ ResolverHarnessFactory = Callable[..., ResolverHarness]
 
 
 @pytest.fixture
-def make_resolver() -> ResolverHarnessFactory:
-    """Build a resolver plus its injected runner mock (``dig`` present by default)."""
+def make_resolver(tmp_path: Path) -> ResolverHarnessFactory:
+    """Build a resolver plus its injected runner mock (``dig`` present by default).
+
+    The shared cache lands under the test's own directory unless a test
+    names one, so no test touches the operator's state root.
+    """
 
     def _make_resolver(
         *, host_cache_dir: Path | None = None, **runner_kwargs: object
@@ -48,7 +52,9 @@ def make_resolver() -> ResolverHarnessFactory:
         runner = mock.MagicMock(**runner_kwargs)
         runner.has.return_value = True  # dig present unless a test says otherwise
         return ResolverHarness(
-            resolver=DnsResolver(runner=runner, host_cache_dir=host_cache_dir),
+            resolver=DnsResolver(
+                runner=runner, host_cache_dir=host_cache_dir or tmp_path / "dns-cache"
+            ),
             runner=runner,
         )
 
@@ -373,18 +379,43 @@ def _host_files(host_dir: Path) -> list[Path]:
     return [p for p in host_dir.iterdir() if not p.name.startswith(".")]
 
 
-def test_host_cache_off_by_default(
+def test_host_cache_lives_under_the_shield_state_root_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a named directory, the shared cache is the one every container on the host uses."""
+    shared = tmp_path / "shared"
+    monkeypatch.setattr("terok_shield.dns.resolver.dns_cache_dir", lambda: shared)
+    runner = mock.MagicMock()
+    runner.has.return_value = True
+    _dig_returns(runner, {TEST_DOMAIN: [TEST_IP1]})
+
+    DnsResolver(runner=runner).resolve_and_cache(
+        [TEST_DOMAIN], StateBundle(tmp_path / "ctr").resolved_cache
+    )
+
+    assert len(_host_files(shared)) == 1
+
+
+def test_a_batch_says_what_the_wait_is_for(
     tmp_path: Path,
     make_resolver: ResolverHarnessFactory,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """With no host_cache_dir, nothing is written outside the per-container file."""
-    harness = make_resolver()  # host_cache_dir=None
+    """A resolution that runs is announced before and reported after; a cache hit is silent."""
+    harness = make_resolver()
     _dig_returns(harness.runner, {TEST_DOMAIN: [TEST_IP1]})
+    _getent_returns(harness.runner, {})
     cache_path = StateBundle(tmp_path / "ctr").resolved_cache
 
-    harness.resolver.resolve_and_cache([TEST_DOMAIN], cache_path)
-    # Only the per-container file exists; no shared artifacts anywhere.
-    assert cache_path.is_file()
+    harness.resolver.resolve_and_cache([TEST_DOMAIN, NONEXISTENT_DOMAIN], cache_path)
+    err = capsys.readouterr().err
+    assert "Resolving 2 allowlist names" in err
+    assert "Resolved to 1 addresses" in err
+    assert f"No address for {NONEXISTENT_DOMAIN}." in err
+
+    harness.resolver.resolve_and_cache([TEST_DOMAIN, NONEXISTENT_DOMAIN], cache_path)
+    assert capsys.readouterr().err == ""
 
 
 def test_host_cache_miss_writes_both_layers(

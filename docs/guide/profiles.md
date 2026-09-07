@@ -85,10 +85,11 @@ terok-shield run my-container --profiles dev-standard dev-python my-project \
   -- alpine:latest sh
 ```
 
-DNS resolution happens automatically at launch. On the dig/getent tiers,
-domains are resolved and cached in the container's `resolved.ips` file
-(default freshness: 1 hour); on the dnsmasq tier there is no launch-time
-resolution — domains are resolved per query at runtime instead.
+DNS resolution happens automatically. On `dnsmasq-live` domains are resolved
+per query at runtime; on every other tier they are resolved at launch and
+cached in the container's `resolved.ips` file (default freshness: 1 hour), and
+a wildcard entry such as `*.example.com` stops the launch, because nothing
+resolves it there. See [DNS tiers](modes.md#dns-tiers).
 
 ### Pre-resolving DNS
 

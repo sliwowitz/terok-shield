@@ -116,7 +116,7 @@ are maintained:
 - `t40_project_allow_v4` (`type ipv4_addr; flags interval;`) — IPv4 allowlist
 - `t40_project_allow_v6` (`type ipv6_addr; flags interval;`) — IPv6 allowlist
 
-On the dnsmasq tier the project-allow sets also carry a `timeout` flag so
+On the live tier the project-allow sets also carry a `timeout` flag so
 dnsmasq-learned entries auto-expire. Parallel `t20_security_deny_v4` /
 `t20_security_deny_v6` sets hold explicitly denied destinations.
 
@@ -140,7 +140,7 @@ unrestricted."**
 | Bundle version mismatch | Hook exits non-zero → torn down |
 | `ruleset.nft` missing | Hook exits non-zero → torn down |
 | Ruleset fails to load | Hook exits non-zero → torn down |
-| dnsmasq fails to start (dnsmasq tier) | Hook exits non-zero → torn down |
+| dnsmasq fails to start (dnsmasq tiers) | Hook exits non-zero → torn down |
 
 `shield up` / `down` / `quarantine` additionally verify the applied ruleset
 (`verify_up` / `verify_down` / `verify_quarantine`) and raise if any

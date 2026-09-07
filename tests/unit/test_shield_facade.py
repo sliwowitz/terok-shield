@@ -11,7 +11,7 @@ from unittest import mock
 
 import pytest
 
-from terok_shield import ExecError, Shield, ShieldConfig, ShieldState, state
+from terok_shield import DnsTier, ExecError, Shield, ShieldConfig, ShieldState, state
 
 from ..testfs import FAKE_HOOKS_DIR, NFT_BINARY
 from ..testnet import TEST_DOMAIN, TEST_DOMAIN2, TEST_IP1, TEST_IP2
@@ -523,8 +523,26 @@ class TestCheckEnvironment:
         harness.runner.run.return_value = _podman_info_json("5.8.0")
         harness.runner.has.side_effect = lambda cmd: cmd not in ("dig", "drill", "dnsmasq")
         env = harness.shield.check_environment()
-        assert any("dig/drill" in i for i in env.issues)
-        assert env.dns_tier == "getent"
+        assert any(DnsTier.GETENT.hint in i for i in env.issues)
+        assert env.dns_tier == DnsTier.GETENT.value
+
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
+    def test_missing_configured_dnsmasq_reports_issue(
+        self,
+        _has_hooks: mock.Mock,
+        _find_dirs: mock.Mock,
+        make_shield: ShieldHarnessFactory,
+        tmp_path: Path,
+    ) -> None:
+        """A configured dnsmasq path that is not executable is an issue, and the host's tiers still resolve."""
+        missing = tmp_path / "dnsmasq-missing"
+        harness = make_shield(ShieldConfig(state_dir=tmp_path, dnsmasq_path=missing))
+        harness.runner.run.return_value = _podman_info_json("5.8.0")
+        harness.runner.has.side_effect = lambda cmd: cmd == "dig"
+        env = harness.shield.check_environment()
+        assert any(str(missing) in i for i in env.issues)
+        assert env.dns_tier == DnsTier.LOOKUP.value
 
     @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
     @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
@@ -550,7 +568,7 @@ class TestCheckEnvironment:
 
         harness.runner.run.side_effect = _run
         env = harness.shield.check_environment()
-        assert env.dns_tier == "lookup"
+        assert env.dns_tier == DnsTier.LOOKUP.value
         assert any("AppArmor" in i for i in env.issues)
 
     @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[])

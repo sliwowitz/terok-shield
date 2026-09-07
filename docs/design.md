@@ -9,7 +9,7 @@ network namespace. Each container gets an isolated firewall. Works with pasta
 (rootless default) and slirp4netns.
 
 Lifecycle: `Shield.pre_start()` installs the OCI hook (idempotent), resolves DNS
-(on the dig/getent tiers, into `resolved.ips`), pre-generates the complete nft
+(on every tier but `dnsmasq-live`, into `resolved.ips`), pre-generates the complete nft
 ruleset to `ruleset.nft`, and returns podman args with annotations. On each container start, the OCI hook
 reads `state_dir` from annotations, applies the pre-generated `ruleset.nft` inside
 the container's network namespace, and optionally starts a per-container *dnsmasq*
@@ -24,21 +24,24 @@ IP/CIDRs. Lines starting with `#` are comments.
 Bundled defaults use domain names because they're stable across IP rotations and
 easy to audit. DNS resolution uses the best available tier:
 
-1. **dnsmasq** (preferred) — a per-container dnsmasq instance is started by the OCI
-   hook with `nftset=` config entries (one per domain, targeting
+1. **dnsmasq-live** (preferred) — a per-container dnsmasq instance is started by
+   the OCI hook with `nftset=` config entries (one per domain, targeting
    `t40_project_allow_v4` and `t40_project_allow_v6`), automatically populating the
    nft project-allow sets on every resolution at runtime, before the reply reaches
    the workload. No pre-resolution at launch (`cache-size=0`). Handles IP rotation
    without manual intervention. Container DNS is redirected to the per-container
    dnsmasq (`127.0.0.1`, or a link-local address under krun) via a `resolv.conf`
    volume mount.
-2. **dig** — pre-start `dig +short A/AAAA` resolution; IPs cached in `resolved.ips`
-   with `st_mtime`-based freshness (default 1 hour).
-3. **getent** — fallback when `dig` is also absent.
+2. **dnsmasq-static** — the same dnsmasq without nftset support: it serves the
+   query log and the deny sinkholes, while the sets are seeded as on the next tier.
+3. **lookup** — pre-start `dig +short A/AAAA` (or `drill`) resolution; IPs cached
+   in `resolved.ips` with `st_mtime`-based freshness (default 1 hour).
+4. **getent** — fallback when `dig` is also absent.
 
 `detect_dns_tier()` selects the tier automatically based on available binaries,
 dnsmasq compile-time nftset support, and whether an enforcing AppArmor profile
 confines dnsmasq away from the state directory (see [AppArmor](apparmor.md)).
+The [DNS tiers](guide/modes.md#dns-tiers) table lists what each provides.
 
 ### Bundled profiles
 
@@ -100,15 +103,16 @@ across state files are reliable regardless of input notation (e.g.
 │   ├── 30-provider-allow          #   → nft set t30_provider_allow (executor roster / provider egress)
 │   ├── 40-project-allow           #   → nft set t40_project_allow (project allowlist: common sets + git remote + custom)
 │   └── live                       #   runtime allow/deny overlay (folded into its owning tiers)
-├── resolved.ips                   # derived: resolved allow IPs (the t40 set seed; dig/getent tiers)
+├── resolved.ips                   # derived: resolved allow IPs (the t40 set seed; every tier but dnsmasq-live)
 ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
 ├── upstream.dns                   # persisted upstream DNS address
 ├── dns.tier                       # persisted active DNS tier
 ├── loopback.ports                 # per-container host-loopback TCP ports
-├── dnsmasq.conf                   # generated dnsmasq configuration (dnsmasq tier)
-├── dnsmasq.pid                    # dnsmasq PID (dnsmasq tier)
+├── dnsmasq.conf                   # generated dnsmasq configuration (dnsmasq tiers)
+├── dnsmasq.pid                    # dnsmasq PID (dnsmasq tiers)
+├── dnsmasq.bin                    # the dnsmasq binary the hook launches
 ├── dnsmasq.log                    # dnsmasq query log (for `shield watch`)
-├── resolv.conf                    # bind-mounted over /etc/resolv.conf (dnsmasq tier)
+├── resolv.conf                    # bind-mounted over /etc/resolv.conf (every tier)
 ├── container.id                   # podman container ID (short, 12-char hex)
 └── audit.jsonl                    # per-container audit log
 ```
@@ -156,7 +160,7 @@ allow_ip(container, ip)
 │   └── yes → nft delete from t20_security_deny set     (un-deny)
 │
 ├── nft add element             add to t40_project_allow set
-│                               (timeout 0s on the dnsmasq tier,
+│                               (timeout 0s on the live tier,
 │                                so it never auto-expires)
 │
 └── upsert +ip into policy/live (flips any prior deny of this IP)
@@ -168,7 +172,7 @@ allow_ip(container, ip)
 StateBundle.read_effective_ips()
 │
 ├── resolved.ips             literal allow IPs + resolved
-│                            allow-domains (dig/getent tiers)
+│                            allow-domains (every tier but dnsmasq-live)
 │
 ├── composed policy/ tiers   current literal allow IPs from the
 │   + policy/live overlay    tier files folded with the +/- overlay

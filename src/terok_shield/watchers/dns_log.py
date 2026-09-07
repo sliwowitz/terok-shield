@@ -5,7 +5,7 @@
 
 Watches for new ``query[A]`` / ``query[AAAA]`` lines and classifies
 each domain by suffix-matching against the merged allowed domain set
-(profile + live - denied).  Requires the dnsmasq DNS tier.
+(profile + live - denied).  Runs on the tiers that run dnsmasq.
 """
 
 import os

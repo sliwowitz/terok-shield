@@ -46,8 +46,6 @@ import _oci_state  # noqa: E402 — sys.path bootstrap precedes import
 # dirs, or state_dir moves to an nft-accessible location.
 
 _RULESET_NAME = "ruleset.nft"
-_DNSMASQ_CONF_NAME = "dnsmasq.conf"
-_DNSMASQ_PID_NAME = "dnsmasq.pid"
 _CONTAINER_ID_NAME = "container.id"
 
 
@@ -164,21 +162,20 @@ def _start_container_dnsmasq(pid: str, sd: Path) -> None:
     (``127.0.0.0/8``) is already on ``lo`` by kernel default, so the
     add step is skipped.
 
-    Mirrors ``terok_shield.dns.dnsmasq.launch()`` defensive measures:
-    clears stale PID file, then verifies the new PID file and process
+    Clears a stale PID file, then verifies the new PID file and process
     identity after start.
     """
-    dnsmasq_conf = sd / _DNSMASQ_CONF_NAME
+    dnsmasq_conf = sd / _oci_state.DNSMASQ_CONF_FILE_NAME
     if not dnsmasq_conf.exists():
         return
 
-    pid_file = sd / _DNSMASQ_PID_NAME
+    pid_file = sd / _oci_state.DNSMASQ_PID_FILE_NAME
     # Idempotent: if a dnsmasq is already running against our conf
     # (because the hook fired twice — restart, re-dispatch, sibling
     # hook re-entry, etc.), don't try to bind port 53 again.  Verifying
     # pid + conf-arg avoids hitting an unrelated process that happens
     # to hold the recycled PID.
-    if _our_dnsmasq_alive(pid_file, dnsmasq_conf):
+    if _our_dnsmasq_alive(pid_file, sd):
         return
 
     # Add the dnsmasq listen address to ``lo`` for non-loopback binds.
@@ -195,7 +192,7 @@ def _start_container_dnsmasq(pid: str, sd: Path) -> None:
     except OSError:
         pass
 
-    _oci_state.nsenter(pid, _oci_state.find_dnsmasq(), f"--conf-file={dnsmasq_conf}")
+    _oci_state.nsenter(pid, _oci_state.find_dnsmasq(sd), f"--conf-file={dnsmasq_conf}")
 
     try:
         dnsmasq_pid = int(pid_file.read_text().strip())
@@ -204,7 +201,7 @@ def _start_container_dnsmasq(pid: str, sd: Path) -> None:
             f"dnsmasq started but PID file not written at {pid_file}. "
             "The container's DNS may not be functional."
         )
-    if not _is_our_dnsmasq(dnsmasq_pid, dnsmasq_conf):
+    if not _oci_state.is_our_dnsmasq(dnsmasq_pid, sd):
         raise RuntimeError(
             f"dnsmasq PID {dnsmasq_pid} is not the expected process. "
             "The container's DNS may not be functional."
@@ -218,15 +215,14 @@ def _poststop(sd: Path) -> None:
     signalling to avoid hitting an unrelated process when the original
     dnsmasq PID is recycled after container stop.
     """
-    pid_file = sd / _DNSMASQ_PID_NAME
-    conf_path = sd / _DNSMASQ_CONF_NAME
+    pid_file = sd / _oci_state.DNSMASQ_PID_FILE_NAME
     if not pid_file.exists():
         return
     try:
         pid_int = int(pid_file.read_text().strip())
     except (ValueError, OSError):
         return
-    if not _is_our_dnsmasq(pid_int, conf_path):
+    if not _oci_state.is_our_dnsmasq(pid_int, sd):
         _oci_state.log(
             f"poststop: stale dnsmasq pid file (pid {pid_int} recycled or gone) — removed",
             sd / "hook-error.log",
@@ -243,7 +239,7 @@ def _poststop(sd: Path) -> None:
         _oci_state.log(f"poststop: SIGTERM dnsmasq[{pid_int}] failed: {exc}", sd / "hook-error.log")
         return
     for _ in range(20):  # up to 2s for dnsmasq to exit on its own
-        if not _is_our_dnsmasq(pid_int, conf_path):
+        if not _oci_state.is_our_dnsmasq(pid_int, sd):
             return
         time.sleep(0.1)
     try:
@@ -256,34 +252,13 @@ def _poststop(sd: Path) -> None:
         _oci_state.log(f"poststop: SIGKILL dnsmasq[{pid_int}] failed: {exc}", sd / "hook-error.log")
 
 
-def _our_dnsmasq_alive(pid_file: Path, conf_path: Path) -> bool:
-    """``True`` when ``pid_file`` names a live dnsmasq using ``conf_path``."""
+def _our_dnsmasq_alive(pid_file: Path, sd: Path) -> bool:
+    """``True`` when ``pid_file`` names a live dnsmasq of this container."""
     try:
         pid_int = int(pid_file.read_text().strip())
     except (OSError, ValueError):
         return False
-    return _is_our_dnsmasq(pid_int, conf_path)
-
-
-def _is_our_dnsmasq(pid_int: int, conf_path: Path) -> bool:
-    """``True`` if pid_int is a dnsmasq process using our conf file.
-
-    Parses ``/proc/{pid}/cmdline`` as a NUL-separated argv vector.
-    Requires argv[0] to be the dnsmasq binary (exact name or absolute
-    path) and ``--conf-file=<our-conf>`` to be present as a separate
-    argument.  Mirrors ``terok_shield.dnsmasq._is_our_dnsmasq()`` without
-    any imports.
-    """
-    conf_arg = b"--conf-file=" + str(conf_path).encode()
-    try:
-        raw = Path(f"/proc/{pid_int}/cmdline").read_bytes()
-    except OSError:
-        return False
-    args = raw.rstrip(b"\x00").split(b"\x00")
-    if not args:  # pragma: no cover — bytes.split() never returns empty
-        return False
-    exe = args[0]
-    return (exe == b"dnsmasq" or exe.endswith(b"/dnsmasq")) and conf_arg in args
+    return _oci_state.is_our_dnsmasq(pid_int, sd)
 
 
 if __name__ == "__main__":  # pragma: no cover

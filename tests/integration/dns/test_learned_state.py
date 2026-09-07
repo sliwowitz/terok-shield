@@ -23,7 +23,7 @@ import subprocess
 
 import pytest
 
-from terok_shield import Shield, ShieldConfig
+from terok_shield import DnsTier, Shield, ShieldConfig
 from terok_shield.nft.constants import NFT_TABLE_NAME, TIER_PROJECT_ALLOW
 from terok_shield.run import which_sbin_aware
 from terok_shield.state import StateBundle
@@ -118,7 +118,7 @@ class TestLearnedStateLifecycle:
         _podman_rm(name)
         try:
             extra_args = shield.pre_start(name, [_ALLOW_PROFILE])
-            if "terok.shield.dns_tier=dnsmasq" not in " ".join(extra_args):
+            if f"terok.shield.dns_tier={DnsTier.DNSMASQ_LIVE.value}" not in " ".join(extra_args):
                 pytest.skip("dnsmasq tier not selected on this host")
             cid = start_shielded_container(name, extra_args, IMAGE)
             yield name, sd, shield, cid

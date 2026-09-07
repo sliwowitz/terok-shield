@@ -6,8 +6,7 @@
 Every shielded container gets an isolated state directory.  This module
 is the single source of truth for where files live within it — all
 paths are derived from a single ``state_dir`` root through
-[`StateBundle`][terok_shield.state.StateBundle].  Zero dependencies
-beyond ``pathlib``.
+[`StateBundle`][terok_shield.state.StateBundle].
 
 Bundle layout::
 
@@ -27,13 +26,14 @@ Bundle layout::
     ├── deny_resolved.ips              # derived: resolved t20 security-deny IPs (deny seed)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
-    ├── dns.tier                       # active DNS tier (dnsmasq/lookup/getent)
+    ├── dns.tier                       # active DNS tier
+    ├── dnsmasq.bin                    # the dnsmasq binary the OCI hook launches
     ├── network.mode                   # rootless network mode (pasta/slirp4netns)
     ├── loopback.ports                 # per-container host-loopback TCP ports (newline-separated)
     ├── dnsmasq.conf                   # generated dnsmasq configuration
     ├── dnsmasq.pid                    # dnsmasq PID (in container netns)
     ├── dnsmasq.log                    # dnsmasq query log (for shield watch)
-    ├── resolv.conf                    # bind-mounted over /etc/resolv.conf (dnsmasq tier)
+    ├── resolv.conf                    # bind-mounted over /etc/resolv.conf on every tier
     ├── container.id                   # podman container ID (short, 12-char hex)
     └── audit.jsonl                    # per-container audit log
 """
@@ -44,6 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .config import DnsTier
 from .paths import HOOK_ENTRYPOINT_NAME
 from .policy import (
     LOCALHOST,
@@ -54,6 +55,11 @@ from .policy import (
     localhost_ports,
     parse_policy,
     render_policy,
+)
+from .resources._oci_state import (
+    DNSMASQ_BIN_FILE_NAME,
+    DNSMASQ_CONF_FILE_NAME,
+    DNSMASQ_PID_FILE_NAME,
 )
 
 
@@ -69,7 +75,7 @@ def _read_cached_ips(cache: Path) -> list[str]:
     return [line.strip() for line in cache.read_text().splitlines() if line.strip()]
 
 
-BUNDLE_VERSION = 16
+BUNDLE_VERSION = 17
 """Integer version of the state bundle layout.
 
 Bumped whenever the file layout changes in a backwards-incompatible way.
@@ -203,6 +209,10 @@ class EffectivePolicy:
             [e.target for e in self.override if e.action == "+" and e.target != LOCALHOST]
         )
 
+    def wildcard_domains(self) -> list[str]:
+        """Admitted ``*.`` entries; only a tier that resolves live can enforce them."""
+        return [d for d in self.allow_domains() if d.startswith("*.")]
+
     def override_domains(self) -> list[str]:
         """Break-glass override domains — the DNS-plane punch-through set.
 
@@ -224,13 +234,6 @@ with ``CAP_NET_ADMIN``.  ``mkdir(mode=…)`` is masked by ``umask``, so
 the writer side has to ``chmod`` after creation to guarantee the bit
 pattern the validator demands.
 """
-
-
-#: Tier names retired by a rename, mapped to what they are called now.  The
-#: rename was nominal — same enforcement, a name that stopped privileging one
-#: of two interchangeable tools — so a record written under the old name still
-#: describes the tier accurately.
-_LEGACY_TIER_NAMES = {"dig": "lookup"}
 
 
 @dataclass(frozen=True)
@@ -283,31 +286,16 @@ class StateBundle:
         """Path to the persisted DNS tier value."""
         return self.state_dir / "dns.tier"
 
-    def read_dns_tier(self) -> str | None:
-        """The DNS tier this container launched with (``dnsmasq``/``lookup``/``getent``).
+    def read_dns_tier(self) -> DnsTier | None:
+        """The tier ``pre_start`` recorded for this container, or ``None`` when there is none.
 
-        Returns the value the OCI hook recorded at ``pre_start`` — the tier
-        actually enforcing this task's egress — or ``None`` when the file is
-        absent (the container was never shielded, or predates tier
-        recording).  A degraded tier (``lookup``/``getent``) means domain
-        allowlisting fell back to static resolution with no IP-rotation
-        handling; the operator surfaces that alongside the shield posture.
-
-        A container that recorded ``dig`` reads as ``lookup``.  That rename was
-        nominal: the tier enforced static pre-start resolution before it and
-        after it, and only stopped being named after one of the two
-        interchangeable tools that serve it.  Reading it as the tier it names
-        is what lets such a container restart instead of being recreated.
+        ``None`` means the container was never shielded, or the file is not a
+        tier name; a retired name reads as the tier it named.
         """
         try:
-            tier = self.dns_tier.read_text().strip()
+            return DnsTier.parse(self.dns_tier.read_text().strip())
         except (OSError, ValueError):  # absent, or non-UTF-8 content
             return None
-        tier = _LEGACY_TIER_NAMES.get(tier, tier)
-        # Only the tiers the OCI hook records (mirrors config.DnsTier's
-        # values); a stray or corrupt file reads as None, never an
-        # unsupported tier.
-        return tier if tier in {"dnsmasq", "lookup", "getent"} else None
 
     @property
     def network_mode(self) -> Path:
@@ -453,12 +441,17 @@ class StateBundle:
     @property
     def dnsmasq_conf(self) -> Path:
         """Path to the generated dnsmasq configuration file."""
-        return self.state_dir / "dnsmasq.conf"
+        return self.state_dir / DNSMASQ_CONF_FILE_NAME
 
     @property
     def dnsmasq_pid(self) -> Path:
         """Path to the dnsmasq PID file (PID is in the container netns)."""
-        return self.state_dir / "dnsmasq.pid"
+        return self.state_dir / DNSMASQ_PID_FILE_NAME
+
+    @property
+    def dnsmasq_bin(self) -> Path:
+        """Path to the recorded dnsmasq binary, the one the OCI hook launches and matches."""
+        return self.state_dir / DNSMASQ_BIN_FILE_NAME
 
     @property
     def dnsmasq_log(self) -> Path:
@@ -467,7 +460,7 @@ class StateBundle:
 
     @property
     def resolv_conf(self) -> Path:
-        """Path to the resolv.conf bind-mounted over ``/etc/resolv.conf`` on every DNS tier."""
+        """Path to the resolv.conf bind-mounted over ``/etc/resolv.conf`` on every tier."""
         return self.state_dir / "resolv.conf"
 
     # ── Container identity and observability ────────────────
@@ -559,13 +552,11 @@ class StateBundle:
         self.policy_dir.chmod(STATE_DIR_MODE)
 
 
-def recorded_dns_tier(state_dir: Path) -> str | None:
+def recorded_dns_tier(state_dir: Path) -> DnsTier | None:
     """The DNS tier a shielded container launched with, read from *state_dir*.
 
     Thin public wrapper over
     [`StateBundle.read_dns_tier`][terok_shield.state.StateBundle.read_dns_tier]
     so callers that only want the tier need not know the bundle layout.
-    Returns ``dnsmasq``/``lookup``/``getent``, or ``None`` when no tier was
-    recorded.
     """
     return StateBundle(state_dir).read_dns_tier()

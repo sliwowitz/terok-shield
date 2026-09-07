@@ -46,6 +46,7 @@ class _ShieldConfigKwargs(TypedDict, total=False):
     audit_enabled: bool
     profiles_dir: Path | None
     runtime: ShieldRuntime
+    dnsmasq_path: Path | None
 
 
 @pytest.fixture

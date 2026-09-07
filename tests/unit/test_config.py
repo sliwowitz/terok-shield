@@ -14,9 +14,11 @@ from terok_shield.config import (
     ANNOTATION_NAME_KEY,
     ANNOTATION_STATE_DIR_KEY,
     ANNOTATION_VERSION_KEY,
+    DnsTier,
     ShieldConfig,
     ShieldMode,
     ShieldState,
+    detect_dns_tier,
 )
 from terok_shield.config_file import AuditFileConfig, ShieldFileConfig
 
@@ -187,15 +189,34 @@ class TestShieldFileConfigAuditValidation:
             ShieldFileConfig(audit={"enabled": "yes-please"})  # type: ignore[arg-type]
 
 
-class TestLookupTierDetection:
-    """The lookup tier accepts either one-shot resolver."""
+class TestDnsTierDetection:
+    """The tier ladder: dnsmasq with nftset, dnsmasq without it, a lookup tool, getent."""
+
+    def test_dnsmasq_with_nftset_is_the_live_tier(self) -> None:
+        tier = detect_dns_tier(lambda _name: True, dnsmasq_usable=True, nftset=True)
+        assert tier is DnsTier.DNSMASQ_LIVE
+
+    def test_dnsmasq_without_nftset_still_runs_but_resolves_once(self) -> None:
+        tier = detect_dns_tier(lambda _name: True, dnsmasq_usable=True, nftset=False)
+        assert tier is DnsTier.DNSMASQ_STATIC
+        assert tier.runs_dnsmasq and not tier.live
 
     def test_drill_alone_selects_the_lookup_tier(self) -> None:
-        from terok_shield.config import DnsTier, detect_dns_tier
-
         assert detect_dns_tier(lambda name: name == "drill") is DnsTier.LOOKUP
 
     def test_no_tool_falls_through_to_getent(self) -> None:
-        from terok_shield.config import DnsTier, detect_dns_tier
-
         assert detect_dns_tier(lambda name: False) is DnsTier.GETENT
+
+
+class TestDnsTierNames:
+    """A recorded name reads back as a tier, retired names included."""
+
+    @pytest.mark.parametrize(
+        ("recorded", "tier"),
+        [("dig", DnsTier.LOOKUP), ("dnsmasq", DnsTier.DNSMASQ_LIVE)],
+    )
+    def test_a_retired_name_reads_as_the_tier_it_named(self, recorded: str, tier: DnsTier) -> None:
+        assert DnsTier.parse(recorded) is tier
+
+    def test_a_name_that_is_not_a_tier_reads_as_none(self) -> None:
+        assert DnsTier.parse("bogus") is None

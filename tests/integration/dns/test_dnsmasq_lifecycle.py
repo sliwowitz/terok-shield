@@ -175,7 +175,7 @@ class TestPreStartDnsmasqTier:
             args = shield.pre_start("test-ctr")
 
             tier = _tier_from_args(args)
-            if tier != "dnsmasq":
+            if tier != DnsTier.DNSMASQ_LIVE.value:
                 pytest.skip(f"pre_start selected tier '{tier}', not dnsmasq")
             # --dns must NOT be used (causes pasta to bind host port 53)
             assert "--dns" not in args
@@ -194,7 +194,7 @@ class TestPreStartDnsmasqTier:
             args = shield.pre_start("test-ctr")
 
             tier = _tier_from_args(args)
-            if tier != "dnsmasq":
+            if tier != DnsTier.DNSMASQ_LIVE.value:
                 pytest.skip(f"pre_start selected tier '{tier}', not dnsmasq")
             tier_path = StateBundle(sd).tier_path("project_allow")
             assert tier_path.is_file()
@@ -246,7 +246,7 @@ class TestDnsmasqInContainer:
         try:
             extra_args = shield.pre_start(name)
             tier = _tier_from_args(extra_args)
-            if tier != "dnsmasq":
+            if tier != DnsTier.DNSMASQ_LIVE.value:
                 pytest.skip(f"dnsmasq tier not selected (got '{tier}')")
 
             start_shielded_container(name, extra_args, IMAGE)
@@ -366,7 +366,7 @@ class TestLiveDomainAllowDeny:
         try:
             extra_args = shield.pre_start(name)
             tier = _tier_from_args(extra_args)
-            if tier != "dnsmasq":
+            if tier != DnsTier.DNSMASQ_LIVE.value:
                 pytest.skip(
                     f"dnsmasq tier not selected (got '{tier}') — live domain reload not testable"
                 )
@@ -492,7 +492,7 @@ class TestRestartWithReusedStateDir:
             # First run
             extra_args = shield.pre_start(name)
             tier = _tier_from_args(extra_args)
-            if tier != "dnsmasq":
+            if tier != DnsTier.DNSMASQ_LIVE.value:
                 pytest.skip(f"dnsmasq tier not selected (got '{tier}')")
 
             start_shielded_container(name, extra_args, IMAGE)

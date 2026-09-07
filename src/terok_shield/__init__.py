@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 # ── Eager: foundation layer (zero-cost, pure data) ─────
 from .config import (
+    WILDCARDS_NEED_LIVE_TIER,
     DnsTier,
     ShieldConfig,
     ShieldMode,
@@ -35,7 +36,7 @@ from .config import (
     ShieldState,
 )
 from .paths import HOOK_ENTRYPOINT_NAME
-from .state import StateBundle
+from .state import StateBundle, recorded_dns_tier
 from .util import is_ip as _is_ip
 
 if TYPE_CHECKING:
@@ -66,7 +67,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ShieldNeedsSetup": ("terok_shield.run", "ShieldNeedsSetup"),
     "check_firewall_binaries": ("terok_shield.prereqs", "check_firewall_binaries"),
     "check_krun_binaries": ("terok_shield.prereqs", "check_krun_binaries"),
-    "recorded_dns_tier": ("terok_shield.state", "recorded_dns_tier"),
     # Command registry — re-exported for the terok integration layer.
     # ArgDef/CommandDef now live in terok-util; we route through it so
     # existing consumers (terok.lib.integrations.shield) keep working.
@@ -109,7 +109,7 @@ class EnvironmentCheck:
         hooks: Hook installation type (``per-container``, ``global``,
             ``not-installed``).
         health: Environment health (``ok``, ``setup-needed``, ``stale-hooks``).
-        dns_tier: Active DNS resolution tier (``dnsmasq``, ``lookup``, ``getent``).
+        dns_tier: Active DNS resolution tier, a [`DnsTier`][terok_shield.config.DnsTier] value.
         issues: List of human-readable issue descriptions.
         needs_setup: True if one-time setup is required.
         setup_hint: Setup instructions (empty if not needed).
@@ -258,13 +258,14 @@ class Shield:
         Does not raise — the caller decides how to handle issues.
         """
         from . import state
-        from .dns import apparmor
+        from .dns import apparmor, dnsmasq
         from .podman_info import (
             find_hooks_dirs,
             global_hooks_hint,
             has_global_hooks,
             parse_podman_info,
         )
+        from .run import ShieldNeedsSetup
 
         output = self.runner.run(["podman", "info", "-f", "json"], check=False)
         info = parse_podman_info(output)
@@ -274,30 +275,22 @@ class Shield:
         hooks = "per-container"
         health = "ok"
 
+        try:
+            dnsmasq_bin = dnsmasq.locate(self.config.dnsmasq_path, self.runner)
+        except ShieldNeedsSetup as exc:
+            issues.append(str(exc))
+            dnsmasq_bin = ""
         tier, apparmor_blocked = apparmor.detect_dns_tier_under_apparmor(
-            self.runner, self.config.state_dir
+            self.runner, self.config.state_dir, dnsmasq_bin
         )
         dns_tier = tier.value
         if apparmor_blocked:
             issues.append(
-                "dnsmasq is present but AppArmor confines it from the shield "
-                f"state directory — domain allowlisting falls back to static {tier.value} "
-                "resolution (no IP rotation handling). Install the terok AppArmor "
-                "profile to enable the dnsmasq tier (see docs/apparmor.md)"
+                f"AppArmor confines {dnsmasq_bin} from the shield state directory. "
+                "Install the terok AppArmor profile addendum (docs/apparmor.md)."
             )
-        elif tier == DnsTier.LOOKUP:
-            issues.append(
-                "dnsmasq unavailable (not installed, or without nftset support) — "
-                "domain allowlisting uses static pre-start resolution "
-                "(no IP rotation handling). "
-                "Install an nftset-capable dnsmasq for dynamic domain-based egress control"
-            )
-        elif tier == DnsTier.GETENT:
-            issues.append(
-                "Neither dnsmasq nor a lookup tool (dig/drill) found — DNS "
-                "resolution uses getent (single IP, no AAAA). Install dnsmasq "
-                "or at minimum dnsutils/bind-utils/ldns"
-            )
+        if not tier.live:
+            issues.append(f"DNS tier {tier.value}: {tier.hint}")
 
         hooks_dirs = find_hooks_dirs()
         global_hooks = has_global_hooks(hooks_dirs)
@@ -415,6 +408,7 @@ class Shield:
         """Live-allow a domain or IP for a running container."""
         from .run import ExecError
 
+        self._refuse_static_wildcard(target)
         is_domain = not _is_ip(target)
         ips = [target] if not is_domain else self.dns.resolve_domains([target])
         allowed: list[str] = []
@@ -435,6 +429,7 @@ class Shield:
         """Live-deny a domain or IP for a running container."""
         from .run import ExecError
 
+        self._refuse_static_wildcard(target)
         is_domain = not _is_ip(target)
         ips = [target] if not is_domain else self.dns.resolve_domains([target])
         denied: list[str] = []
@@ -450,6 +445,18 @@ class Shield:
         if is_domain and denied:
             self._mode.deny_domain(container, target)
         return denied
+
+    def _refuse_static_wildcard(self, target: str) -> None:
+        """Refuse a ``*.`` target on a tier that resolves once: it names no address.
+
+        Raises:
+            ShieldNeedsSetup: With the tier and the remedies named.
+        """
+        from .run import ShieldNeedsSetup
+
+        tier = recorded_dns_tier(self.config.state_dir)
+        if target.startswith("*.") and tier is not None and not tier.live:
+            raise ShieldNeedsSetup(WILDCARDS_NEED_LIVE_TIER.format(tier=tier.value, names=target))
 
     def rules(self, container: str) -> str:
         """Return current nft rules for a container."""
@@ -499,7 +506,7 @@ class Shield:
     def reset(self, container: str) -> None:
         """Forget DNS-learned allow state, keeping the authored policy seeds.
 
-        The dnsmasq tier accumulates every IP the workload legitimately
+        The live tier accumulates every IP the workload legitimately
         resolved; ``reset`` returns the allow sets to their just-launched
         contents (policy literals only) without touching the deny tier or
         the operator's runtime overlay.
@@ -584,6 +591,7 @@ __all__ = [
     "ArgDef",
     "COMMANDS",
     "CommandDef",
+    "DnsTier",
     "EnvironmentCheck",
     "ExecError",
     "HOOK_ENTRYPOINT_NAME",

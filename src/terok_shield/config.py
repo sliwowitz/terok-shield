@@ -37,46 +37,92 @@ ANNOTATION_DNS_TIER_KEY = "terok.shield.dns_tier"
 
 
 class DnsTier(enum.Enum):
-    """DNS resolution tier for egress control.
+    """How domain allowlists reach the nft allow sets.
 
-    Determines how domain-based allowlists are enforced:
-
-    DNSMASQ: Per-container dnsmasq with ``--nftset`` auto-populates nft
-        allow sets on every DNS query.  Handles IP rotation.
-    LOOKUP: Static resolution at pre-start via a one-shot lookup tool —
-        ``dig`` (bind) or ``drill`` (ldns, the Arch/Manjaro default).
-    GETENT: Single-IP resolution via ``getent hosts`` (minimal fallback).
+    DNSMASQ_LIVE: dnsmasq with ``--nftset`` adds every answered address to the
+        allow sets before the reply reaches the workload.  Follows IP rotation,
+        covers subdomains, accepts wildcard entries, names blocked domains.
+    DNSMASQ_STATIC: a dnsmasq built without nftset support.  The allow sets are
+        resolved once at launch; the query log still names blocked domains.
+    LOOKUP: no dnsmasq.  The allow sets are resolved once at launch with
+        ``dig`` or ``drill``.
+    GETENT: no dnsmasq and no lookup tool.  The allow sets are resolved once
+        at launch with ``getent hosts``.
     """
 
-    DNSMASQ = "dnsmasq"
+    DNSMASQ_LIVE = "dnsmasq-live"
+    DNSMASQ_STATIC = "dnsmasq-static"
     LOOKUP = "lookup"
     GETENT = "getent"
 
+    @property
+    def live(self) -> bool:
+        """True when the allow sets follow DNS answers as they arrive."""
+        return self is DnsTier.DNSMASQ_LIVE
+
+    @property
+    def runs_dnsmasq(self) -> bool:
+        """True when a per-container dnsmasq serves the container's DNS."""
+        return self in (DnsTier.DNSMASQ_LIVE, DnsTier.DNSMASQ_STATIC)
+
+    @property
+    def hint(self) -> str:
+        """What a degraded tier lacks and what restores the live one; empty for the live tier."""
+        return _TIER_HINTS.get(self, "")
+
+    @classmethod
+    def parse(cls, recorded: str) -> DnsTier | None:
+        """The tier a recorded name means; ``None`` for a name that is not a tier.
+
+        A retired name reads as the tier it named, so a container recorded under
+        it restarts instead of being recreated.
+        """
+        try:
+            return cls(_RETIRED_TIER_NAMES.get(recorded, recorded))
+        except ValueError:
+            return None
+
+
+_TIER_HINTS = {
+    DnsTier.DNSMASQ_STATIC: (
+        "This dnsmasq has no nftset support, so allow sets are fixed at launch. "
+        "A dnsmasq built with nftset support restores live resolution."
+    ),
+    DnsTier.LOOKUP: (
+        "No dnsmasq: allow sets are fixed at launch and blocked connections show "
+        "IP addresses only. Install dnsmasq with nftset support for live resolution."
+    ),
+    DnsTier.GETENT: (
+        "No dnsmasq and no dig: allow sets are fixed at launch through getent and "
+        "blocked connections show IP addresses only. "
+        "Install dnsmasq with nftset support for live resolution."
+    ),
+}
+"""The operator-facing line for each degraded tier."""
+
+_RETIRED_TIER_NAMES = {"dig": "lookup", "dnsmasq": "dnsmasq-live"}
+"""Recorded tier names that a rename retired, mapped to the current name."""
+
+WILDCARDS_NEED_LIVE_TIER = (
+    "Wildcard entries need live DNS resolution, and this host runs the {tier} tier: {names}. "
+    "Use an allowlist without wildcard entries, or install dnsmasq with nftset support."
+)
+"""Launch refusal for a ``*.`` entry on a tier that resolves names once."""
+
 
 def detect_dns_tier(
-    has: Callable[[str], bool],
-    dnsmasq_nftset_ok: Callable[[], bool] = lambda: True,
-    dnsmasq_state_readable: Callable[[], bool] = lambda: True,
+    has: Callable[[str], bool], *, dnsmasq_usable: bool = False, nftset: bool = False
 ) -> DnsTier:
-    """Detect the best available DNS resolution tier.
-
-    Probes for executables in priority order: dnsmasq (with nftset
-    support, and able to read its config) > dig/drill > getent.
+    """The best tier the host supports.
 
     Args:
-        has: Returns True if the named executable exists on PATH.
-        dnsmasq_nftset_ok: Returns True if installed dnsmasq supports
-            ``--nftset``.  Defaults to ``lambda: True`` (skip probe);
-            production callers should pass a real capability check.
-        dnsmasq_state_readable: Returns True if dnsmasq can read its
-            config from the shield state directory.  Returns False when
-            an enforcing AppArmor profile confines dnsmasq away from it,
-            so we fall back to the lookup tier rather than fail the launch.
-            Defaults to ``lambda: True``; production callers pass a real
-            probe.
+        has: Says whether a named tool exists on the host (``dig``, ``drill``).
+        dnsmasq_usable: A dnsmasq binary was found and can read its config
+            from the state directory.
+        nftset: That dnsmasq is built with nftset support.
     """
-    if has("dnsmasq") and dnsmasq_nftset_ok() and dnsmasq_state_readable():
-        return DnsTier.DNSMASQ
+    if dnsmasq_usable:
+        return DnsTier.DNSMASQ_LIVE if nftset else DnsTier.DNSMASQ_STATIC
     if has("dig") or has("drill"):
         return DnsTier.LOOKUP
     return DnsTier.GETENT
@@ -163,12 +209,18 @@ class ShieldConfig:
     profiles_dir: Path | None = None
     runtime: ShieldRuntime = ShieldRuntime.DEFAULT
     dns_cache_dir: Path | None = None
-    """Opt-in shared DNS-resolution cache, shared across containers.
+    """Resolved-allowlist cache shared across containers.
 
-    The one deliberate exception to the state_dir-only rule: ``None`` (the
-    default) keeps resolution per-container; a path enables a host-level cache
-    that lets many tasks with the same allowlist share one resolve. Only the
-    lookup/getent tiers use it — the dnsmasq tier resolves on-demand at runtime.
+    The one deliberate exception to the state_dir-only rule: many tasks with the
+    same allowlist share one resolve.  ``None`` selects
+    [`dns_cache_dir`][terok_shield.paths.dns_cache_dir] under the shield state
+    root.  Only the tiers that resolve at launch use it.
+    """
+    dnsmasq_path: Path | None = None
+    """The dnsmasq binary to run; ``None`` finds one on PATH or in the sbin directories.
+
+    Set it for a dnsmasq built outside the distro package, for example one
+    built with nftset support in the operator's home.
     """
 
 

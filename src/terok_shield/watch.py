@@ -3,9 +3,9 @@
 
 """``shield watch`` — stream blocked-access events as JSON lines.
 
-Tails the dnsmasq query log, per-container audit log, and (optionally)
-the NFLOG netlink socket.  Only works when the dnsmasq DNS tier is
-active.  Clean exit on SIGINT or SIGTERM.
+Tails the per-container audit log, (optionally) the NFLOG netlink socket,
+and the dnsmasq query log on the tiers that run dnsmasq.  Clean exit on
+SIGINT or SIGTERM.
 """
 
 import select
@@ -26,75 +26,57 @@ _running = True
 def run_watch(state_dir: Path, container: str) -> None:
     """Stream blocked-access events as JSON lines to stdout.
 
-    Only meaningful under the dnsmasq tier — the query log and nftset
-    integration that feed the watchers do not exist in the lookup/getent
-    tiers.  Uses ``select`` so a single thread can multiplex the DNS
-    log, audit log, and NFLOG socket without blocking on any one source.
+    The audit log and the NFLOG socket feed every tier; the dnsmasq query
+    log feeds only the tiers that run dnsmasq, so elsewhere the events carry
+    IP addresses and no domain.  Uses ``select`` so a single thread can
+    multiplex the sources without blocking on any one of them.
 
     Args:
         state_dir: Per-container state directory.
         container: Container name (for event metadata).
 
     Raises:
-        SystemExit: If the DNS tier is not dnsmasq.
+        SystemExit: If the container recorded no DNS tier.
     """
-    _validate_dnsmasq_tier(state_dir)
-
-    log_path = StateBundle(state_dir).dnsmasq_log
-    _ensure_log_file(log_path)
+    bundle = StateBundle(state_dir)
+    tier = bundle.read_dns_tier()
+    if tier is None:
+        print("Error: DNS tier not set — container may not be shielded.", file=sys.stderr)
+        raise SystemExit(1)
 
     _install_signal_handlers()
 
-    dns_watcher = DnsLogWatcher(log_path, state_dir, container)
-    audit_watcher = AuditLogWatcher(StateBundle(state_dir).audit, container)
+    dns_watcher = _dns_log_watcher(bundle, tier, container)
+    audit_watcher = AuditLogWatcher(bundle.audit, container)
     nflog_watcher = NflogWatcher.create(container)
     domain_cache = DomainCache(state_dir)
 
     try:
         while _running:
             _poll_nflog_or_sleep(nflog_watcher, domain_cache)
-            _emit_events(dns_watcher.poll())
+            if dns_watcher:
+                _emit_events(dns_watcher.poll())
             _emit_events(audit_watcher.poll())
     finally:
-        dns_watcher.close()
+        if dns_watcher:
+            dns_watcher.close()
         audit_watcher.close()
         if nflog_watcher:
             nflog_watcher.close()
 
 
-# ── Validation ──────────────────────────────────────────
+def _dns_log_watcher(bundle: StateBundle, tier: DnsTier, container: str) -> DnsLogWatcher | None:
+    """The query-log source on a tier that runs dnsmasq; ``None`` elsewhere, said on stderr.
 
-
-def _validate_dnsmasq_tier(state_dir: Path) -> None:
-    """Verify the dnsmasq DNS tier is active, or exit with an error.
-
-    Raises:
-        SystemExit: If the DNS tier file is missing or not dnsmasq.
+    ``pre_start()`` configures ``log-facility=<path>``, but dnsmasq may not
+    have written any queries yet when ``shield watch`` starts, so the file
+    is created here.
     """
-    tier_path = StateBundle(state_dir).dns_tier
-    if tier_path.is_file():
-        tier_value = tier_path.read_text().strip()
-        if tier_value != DnsTier.DNSMASQ.value:
-            print(
-                f"Error: shield watch requires dnsmasq tier, got {tier_value!r}.",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-    else:
-        print(
-            "Error: DNS tier not set — container may not be shielded.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-
-def _ensure_log_file(log_path: Path) -> None:
-    """Create the dnsmasq log file if it does not exist yet.
-
-    ``pre_start()`` configures ``log-facility=<path>``, but dnsmasq
-    may not have written any queries yet when ``shield watch`` starts.
-    """
-    log_path.touch(exist_ok=True)
+    if not tier.runs_dnsmasq:
+        print(f"DNS tier {tier.value}: events carry IP addresses only.", file=sys.stderr)
+        return None
+    bundle.dnsmasq_log.touch(exist_ok=True)
+    return DnsLogWatcher(bundle.dnsmasq_log, bundle.state_dir, container)
 
 
 # ── Event loop mechanics ────────────────────────────────

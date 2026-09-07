@@ -302,7 +302,7 @@ class RulesetBuilder:
     def add_elements_dual(self, ips: list[str]) -> str:
         """Add IPs to the tier-40 project-allow sets, honouring the dnsmasq permanent-element rule.
 
-        When a ``set_timeout`` is configured (dnsmasq tier), profile/live IPs are
+        When a ``set_timeout`` is configured (live tier), profile/live IPs are
         written with ``timeout 0s`` so they do not auto-expire with the
         dnsmasq-learned entries.
         """
@@ -344,7 +344,7 @@ class RulesetBuilder:
         """Generate one nft set declaration.
 
         Args:
-            set_timeout: a default element timeout (dnsmasq tier) — adds the
+            set_timeout: a default element timeout (live tier) — adds the
                 ``timeout`` flag *and* a default.
             timed: declare the ``timeout`` flag with no default, so elements
                 carry their own timeout (the bypass window).

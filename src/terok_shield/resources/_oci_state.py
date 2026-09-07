@@ -41,7 +41,7 @@ ANN_STATE_DIR = "terok.shield.state_dir"
 ANN_VERSION = "terok.shield.version"
 """OCI annotation carrying the bundle version this container was prepared with."""
 
-BUNDLE_VERSION = 16
+BUNDLE_VERSION = 17
 """Wire-protocol version for the hook ↔ pre_start state-bundle contract.
 
 Bumped whenever the on-disk file layout, the hook → reader argv
@@ -49,6 +49,11 @@ shape, or the wire payload changes incompatibly.  The nft hook hard-
 fails on a version mismatch — deliberately no compatibility window and
 no migration: the remedy is re-creating the task container (or
 ``terok setup`` when the installed hooks are older than the package).
+
+v17: ``pre_start`` records the dnsmasq binary it located as
+``state_dir/dnsmasq.bin``.  The hook launches that binary and matches
+the dnsmasq process by it, so an operator-built dnsmasq outside PATH
+runs the same way as the distro one.
 
 v14: per-container host-loopback TCP ports are persisted at pre_start
 time as ``state_dir/loopback.ports`` (newline-separated list) — the
@@ -70,6 +75,15 @@ meta JSON.  No snapshot file, no second copy of project/task IDs;
 all dossier consumers project the live JSON to ``{project, task,
 name}``.
 """
+
+DNSMASQ_CONF_FILE_NAME = "dnsmasq.conf"
+"""Generated dnsmasq configuration; its presence tells the hook to launch dnsmasq."""
+
+DNSMASQ_PID_FILE_NAME = "dnsmasq.pid"
+"""PID of the per-container dnsmasq, written by dnsmasq itself."""
+
+DNSMASQ_BIN_FILE_NAME = "dnsmasq.bin"
+"""Absolute path of the dnsmasq binary ``pre_start`` located for this container."""
 
 META_PATH_FILE_NAME = "meta_path"
 """Per-container pointer to the orchestrator's wire-dossier JSON.
@@ -459,9 +473,28 @@ def find_nft() -> str:
     return shutil.which("nft") or "/usr/sbin/nft"
 
 
-def find_dnsmasq() -> str:
-    """Path to the dnsmasq binary, falling back to ``/usr/sbin/dnsmasq``."""
-    return shutil.which("dnsmasq") or "/usr/sbin/dnsmasq"
+def find_dnsmasq(state_dir: Path) -> str:
+    """The dnsmasq binary ``pre_start`` recorded for this container.
+
+    Raises:
+        OSError: When the bundle carries no recorded binary.
+    """
+    return (state_dir / DNSMASQ_BIN_FILE_NAME).read_text().strip()
+
+
+def is_our_dnsmasq(pid_int: int, state_dir: Path) -> bool:
+    """True when *pid_int* runs the recorded dnsmasq binary on this container's config.
+
+    Matches argv[0] and the ``--conf-file=`` argument exactly, so a monitoring
+    tool that quotes these strings in its own arguments never passes.
+    """
+    try:
+        binary = find_dnsmasq(state_dir).encode()
+        argv = Path(f"/proc/{pid_int}/cmdline").read_bytes().rstrip(b"\x00").split(b"\x00")
+    except OSError:
+        return False
+    conf_arg = f"--conf-file={state_dir / DNSMASQ_CONF_FILE_NAME}".encode()
+    return argv[0] == binary and conf_arg in argv
 
 
 def find_ip_bin() -> str:

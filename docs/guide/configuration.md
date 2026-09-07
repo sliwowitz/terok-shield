@@ -48,11 +48,12 @@ Each container gets an isolated state bundle under `containers/`:
         │   ├── 30-provider-allow   #   → nft set t30_provider_allow (provider egress)
         │   ├── 40-project-allow    #   → nft set t40_project_allow (project allowlist)
         │   └── live                #   Runtime allow/deny overlay (+/- lines)
-        ├── resolved.ips            # Resolved allow IPs (t40 seed; dig/getent tiers)
+        ├── resolved.ips            # Resolved allow IPs (t40 seed; every tier but dnsmasq-live)
         ├── ruleset.nft             # Pre-generated nft ruleset (gateways baked in)
-        ├── dnsmasq.conf            # Generated dnsmasq config (dnsmasq tier)
-        ├── dnsmasq.pid             # dnsmasq PID (dnsmasq tier)
-        ├── resolv.conf             # Bind-mounted /etc/resolv.conf (dnsmasq tier)
+        ├── dnsmasq.conf            # Generated dnsmasq config (dnsmasq tiers)
+        ├── dnsmasq.pid             # dnsmasq PID (dnsmasq tiers)
+        ├── dnsmasq.bin             # The dnsmasq binary the hook launches
+        ├── resolv.conf             # Bind-mounted /etc/resolv.conf (every tier)
         ├── upstream.dns            # Persisted upstream DNS address
         ├── dns.tier                # Persisted active DNS tier
         └── audit.jsonl             # Per-container audit log
@@ -79,12 +80,13 @@ Each container gets an isolated state bundle under `containers/`:
 | `policy/30-provider-allow` | `pre_start()` | Provider-egress allow tier (`t30_provider_allow`) |
 | `policy/40-project-allow` | `pre_start()` | Project allowlist tier (`t40_project_allow`) — authored domains and IPs |
 | `policy/live` | `allow()` / `deny()` | Runtime allow/deny overlay (`+`/`-` lines; a later verdict flips an earlier one) |
-| `resolved.ips` | `pre_start()` / `resolve()` | Resolved allow IPs seeding `t40_project_allow` (dig/getent tiers) |
-| `dnsmasq.conf` | `pre_start()` | Generated dnsmasq configuration (dnsmasq tier only) |
+| `resolved.ips` | `pre_start()` / `resolve()` | Resolved allow IPs seeding `t40_project_allow` (every tier but `dnsmasq-live`) |
+| `dnsmasq.conf` | `pre_start()` | Generated dnsmasq configuration (dnsmasq tiers) |
 | `dnsmasq.pid` | OCI hook | dnsmasq PID for lifecycle management |
-| `resolv.conf` | `pre_start()` | Redirects container DNS to `127.0.0.1:53` (dnsmasq tier) |
+| `dnsmasq.bin` | `pre_start()` | The dnsmasq binary the hook launches and matches |
+| `resolv.conf` | `pre_start()` | Points container DNS at dnsmasq, or at the upstream forwarder on the tiers without it |
 | `upstream.dns` | `pre_start()` | Persisted upstream DNS forwarder address |
-| `dns.tier` | `pre_start()` | Persisted tier (`dnsmasq`, `dig`, or `getent`) |
+| `dns.tier` | `pre_start()` | Persisted tier (`dnsmasq-live`, `dnsmasq-static`, `lookup`, or `getent`) |
 | `audit.jsonl` | Hook + Shield methods | Per-container audit log |
 
 ### Config directory
@@ -99,27 +101,26 @@ Override: `TEROK_SHIELD_CONFIG_DIR`
 
 ## DNS resolution
 
-DNS resolution behaviour depends on the active tier, selected automatically by
-`detect_dns_tier()`:
+The active tier decides how the allowlist reaches the nft sets; see
+[DNS tiers](modes.md#dns-tiers) for what each tier provides.
 
-**dnsmasq tier** (preferred): a per-container dnsmasq instance is started by
-the OCI hook. It uses `--nftset` to auto-populate the nft
-`t40_project_allow_v4`/`t40_project_allow_v6` sets on every resolution at
-runtime, before the reply reaches the workload. There is no pre-resolution at
-launch (`cache-size=0`) — dynamic resolution handles IP rotation automatically,
-so no cache expiry is needed.
+On `dnsmasq-live` there is no resolution at launch: dnsmasq populates the sets
+per query, before the reply reaches the workload (`cache-size=0`).
 
-**dig / getent tiers** (fallback): the allowlist is resolved at pre-start into
-the per-container `resolved.ips` cache, one IP per line. Domains resolve
-concurrently with a 2s per-lookup budget, so a batch costs about one lookup.
-The cache uses file modification time (`st_mtime`) for freshness — entries
-older than 1 hour, or older than the authored policy, are re-resolved.
+On every other tier the allowlist is resolved at launch into the per-container
+`resolved.ips` cache, one IP per line, and the terminal reports the batch
+before and after. Domains resolve concurrently with a 2 s per-lookup budget.
+Entries older than 1 hour, or older than the authored policy, are re-resolved.
+A shared host cache under `<state root>/dns-cache/` (or
+`ShieldConfig.dns_cache_dir`) lets every container with the same allowlist
+reuse one resolution; a resolve where every domain failed is never shared.
 
-**Shared host cache** (opt-in, off by default): set `ShieldConfig.dns_cache_dir`
-(the CLI points it at `<state root>/dns-cache/`) to share one resolution across
-every container with the same allowlist. Keyed by the allowlist's content hash,
-so an edit re-resolves; a resolve where every domain failed is never shared.
-Only the dig/getent tiers use it — the dnsmasq tier resolves on-demand.
+### dnsmasq binary
+
+Shield finds dnsmasq on `PATH` and in the sbin directories. To run a dnsmasq
+installed elsewhere, for example one built with nftset support in your home,
+set `dnsmasq_path` in `config.yml` (or `ShieldConfig.dnsmasq_path`). A path
+that is not an executable file stops the launch.
 
 Force a cache refresh (all tiers):
 
@@ -150,4 +151,4 @@ These annotations are set automatically by `terok-shield run` (or
 | `terok.shield.version` | Integer | Bundle version (hard-fail on mismatch — re-create the task to fix) |
 | `terok.shield.audit_enabled` | `true` / `false` | Whether to write audit logs |
 | `terok.shield.upstream_dns` | IP address | Upstream DNS forwarder for dnsmasq |
-| `terok.shield.dns_tier` | `dnsmasq` / `dig` / `getent` | Active DNS resolution tier |
+| `terok.shield.dns_tier` | `dnsmasq-live` / `dnsmasq-static` / `lookup` / `getent` | Active DNS resolution tier |

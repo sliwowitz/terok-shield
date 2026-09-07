@@ -22,6 +22,7 @@ import pytest
 
 from terok_shield.resources import _oci_state, nft_hook
 
+from ..testfs import DNSMASQ_SBIN
 from ..testnet import KRUN_DNSMASQ_BIND
 
 
@@ -158,13 +159,6 @@ def test_bootstrap_env_falls_back_when_getpwuid_raises() -> None:
         pytest.param(_oci_state.find_nsenter, None, "/usr/bin/nsenter", id="nsenter-fallback"),
         pytest.param(_oci_state.find_nft, "/usr/bin/nft", "/usr/bin/nft", id="nft-which"),
         pytest.param(_oci_state.find_nft, None, "/usr/sbin/nft", id="nft-fallback"),
-        pytest.param(
-            _oci_state.find_dnsmasq,
-            "/usr/bin/dnsmasq",
-            "/usr/bin/dnsmasq",
-            id="dnsmasq-which",
-        ),
-        pytest.param(_oci_state.find_dnsmasq, None, "/usr/sbin/dnsmasq", id="dnsmasq-fallback"),
     ],
 )
 def test_find_binary_uses_which_or_falls_back(
@@ -173,6 +167,12 @@ def test_find_binary_uses_which_or_falls_back(
     """Each _find_*() helper returns the which result when found, or a hard-coded fallback."""
     with mock.patch("terok_shield.resources._oci_state.shutil.which", return_value=which_result):
         assert finder() == expected  # type: ignore[operator]
+
+
+def test_find_dnsmasq_reads_the_recorded_binary(tmp_path: Path) -> None:
+    """The hook launches the binary pre_start recorded, not whatever its own PATH holds."""
+    (tmp_path / _oci_state.DNSMASQ_BIN_FILE_NAME).write_text(f"{DNSMASQ_SBIN}\n")
+    assert _oci_state.find_dnsmasq(tmp_path) == DNSMASQ_SBIN
 
 
 # ── _nsenter ─────────────────────────────────────────────────────────────────
@@ -384,6 +384,7 @@ def test_createruntime_starts_dnsmasq_when_conf_present(tmp_path: Path) -> None:
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
     dnsmasq_conf = sd / "dnsmasq.conf"
     dnsmasq_conf.write_text("[dnsmasq config]")
+    (sd / "dnsmasq.bin").write_text(f"{DNSMASQ_SBIN}\n")
 
     def _fake_nsenter(*args: object, **kwargs: object) -> None:
         # Simulate dnsmasq writing its PID file on launch.
@@ -394,7 +395,7 @@ def test_createruntime_starts_dnsmasq_when_conf_present(tmp_path: Path) -> None:
         mock.patch(
             "terok_shield.resources._oci_state.nsenter", side_effect=_fake_nsenter
         ) as mock_ns,
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
     ):
         nft_hook._createruntime("1", sd)
 
@@ -410,6 +411,7 @@ def test_createruntime_raises_when_dnsmasq_pid_file_not_written(tmp_path: Path) 
     sd.mkdir()
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
     (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
+    (sd / "dnsmasq.bin").write_text(f"{DNSMASQ_SBIN}\n")
 
     with mock.patch("terok_shield.resources._oci_state.nsenter"):
         with pytest.raises(RuntimeError, match="PID file not written"):
@@ -422,6 +424,7 @@ def test_createruntime_raises_when_dnsmasq_identity_check_fails(tmp_path: Path) 
     sd.mkdir()
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
     (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
+    (sd / "dnsmasq.bin").write_text(f"{DNSMASQ_SBIN}\n")
 
     def _fake_nsenter(*args: object, **kwargs: object) -> None:
         if any("conf-file" in str(a) for a in args):
@@ -429,7 +432,7 @@ def test_createruntime_raises_when_dnsmasq_identity_check_fails(tmp_path: Path) 
 
     with (
         mock.patch("terok_shield.resources._oci_state.nsenter", side_effect=_fake_nsenter),
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=False),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=False),
     ):
         with pytest.raises(RuntimeError, match="not the expected process"):
             nft_hook._createruntime("1", sd)
@@ -446,6 +449,7 @@ def test_createruntime_is_idempotent_when_dnsmasq_already_alive(tmp_path: Path) 
     sd.mkdir()
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
     (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
+    (sd / "dnsmasq.bin").write_text(f"{DNSMASQ_SBIN}\n")
     pid_file = sd / "dnsmasq.pid"
     pid_file.write_text("4242\n")  # prior run left a live process
 
@@ -455,7 +459,7 @@ def test_createruntime_is_idempotent_when_dnsmasq_already_alive(tmp_path: Path) 
     _record_nsenter.calls = []
     with (
         mock.patch("terok_shield.resources._oci_state.nsenter", side_effect=_record_nsenter),
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
     ):
         nft_hook._createruntime("1", sd)
 
@@ -465,38 +469,46 @@ def test_createruntime_is_idempotent_when_dnsmasq_already_alive(tmp_path: Path) 
     assert pid_file.read_text().strip() == "4242"  # untouched
 
 
-# ── _is_our_dnsmasq ───────────────────────────────────────────────────────────
+# ── is_our_dnsmasq ────────────────────────────────────────────────────────────
 
 
-def test_is_our_dnsmasq_returns_true_when_cmdline_matches(tmp_path: Path) -> None:
-    """_is_our_dnsmasq() returns True when argv[0]=='dnsmasq' and --conf-file= matches."""
-    conf = tmp_path / "dnsmasq.conf"
-    cmdline = b"dnsmasq\x00--conf-file=" + str(conf).encode() + b"\x00"
+def _recorded(sd: Path, binary: str = DNSMASQ_SBIN) -> bytes:
+    """Record *binary* in *sd* and return the argv a matching process shows."""
+    sd.mkdir(exist_ok=True)
+    (sd / _oci_state.DNSMASQ_BIN_FILE_NAME).write_text(f"{binary}\n")
+    conf = sd / _oci_state.DNSMASQ_CONF_FILE_NAME
+    return f"{binary}\x00--conf-file={conf}\x00".encode()
+
+
+def test_is_our_dnsmasq_matches_the_recorded_binary_on_our_conf(tmp_path: Path) -> None:
+    """A process running the recorded binary on this container's config is ours."""
+    cmdline = _recorded(tmp_path, "/home/op/.local/bin/dnsmasq")
     with mock.patch.object(_oci_state.Path, "read_bytes", return_value=cmdline):
-        assert nft_hook._is_our_dnsmasq(1234, conf) is True
+        assert _oci_state.is_our_dnsmasq(1234, tmp_path) is True
 
 
-def test_is_our_dnsmasq_returns_false_when_cmdline_missing(tmp_path: Path) -> None:
-    """_is_our_dnsmasq() returns False when /proc/{pid}/cmdline is unreadable."""
-    conf = tmp_path / "dnsmasq.conf"
+def test_is_our_dnsmasq_rejects_another_binary(tmp_path: Path) -> None:
+    """The distro dnsmasq on our config is not the one pre_start recorded."""
+    cmdline = _recorded(tmp_path, "/home/op/.local/bin/dnsmasq").replace(
+        b"/home/op/.local/bin/dnsmasq", DNSMASQ_SBIN.encode()
+    )
+    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=cmdline):
+        assert _oci_state.is_our_dnsmasq(1234, tmp_path) is False
+
+
+def test_is_our_dnsmasq_rejects_a_conf_path_substring(tmp_path: Path) -> None:
+    """A longer path that merely contains our config path does not match."""
+    cmdline = _recorded(tmp_path).replace(b"--conf-file=", b"--conf-file=/other")
+    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=cmdline):
+        assert _oci_state.is_our_dnsmasq(1234, tmp_path) is False
+
+
+def test_is_our_dnsmasq_false_when_cmdline_or_record_is_missing(tmp_path: Path) -> None:
+    """An unreadable /proc entry, or a bundle with no recorded binary, matches nothing."""
+    _recorded(tmp_path)
     with mock.patch.object(_oci_state.Path, "read_bytes", side_effect=OSError("no such file")):
-        assert nft_hook._is_our_dnsmasq(9999, conf) is False
-
-
-def test_is_our_dnsmasq_returns_false_when_conf_path_substring(tmp_path: Path) -> None:
-    """_is_our_dnsmasq() rejects substring match — exact arg required."""
-    conf = tmp_path / "dnsmasq.conf"
-    longer = tmp_path / "prefixed" / conf.name
-    cmdline = b"dnsmasq\x00--conf-file=" + str(longer).encode() + b"\x00"
-    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=cmdline):
-        assert nft_hook._is_our_dnsmasq(1234, conf) is False
-
-
-def test_is_our_dnsmasq_returns_false_when_cmdline_is_empty(tmp_path: Path) -> None:
-    """_is_our_dnsmasq() returns False when /proc/{pid}/cmdline is empty."""
-    conf = tmp_path / "dnsmasq.conf"
-    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=b""):
-        assert nft_hook._is_our_dnsmasq(1234, conf) is False
+        assert _oci_state.is_our_dnsmasq(9999, tmp_path) is False
+    assert _oci_state.is_our_dnsmasq(1234, tmp_path / "unrecorded") is False
 
 
 # ── _poststop ─────────────────────────────────────────────────────────────────
@@ -510,7 +522,7 @@ def test_poststop_sends_sigterm_to_dnsmasq(tmp_path: Path) -> None:
 
     with (
         mock.patch(
-            "terok_shield.resources.nft_hook._is_our_dnsmasq",
+            "terok_shield.resources._oci_state.is_our_dnsmasq",
             side_effect=[True, False],  # identity check passes; first poll sees it gone
         ),
         mock.patch("terok_shield.resources._oci_state.os.kill") as mock_kill,
@@ -527,7 +539,7 @@ def test_poststop_escalates_to_sigkill(tmp_path: Path) -> None:
     (sd / "dnsmasq.pid").write_text("12345\n")
 
     with (
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
         mock.patch("terok_shield.resources.nft_hook.time.sleep"),
         mock.patch("terok_shield.resources._oci_state.os.kill") as mock_kill,
         mock.patch("terok_shield.resources._oci_state.log") as mock_log,
@@ -545,7 +557,7 @@ def test_poststop_reports_failed_sigkill(tmp_path: Path) -> None:
     (sd / "dnsmasq.pid").write_text("12345\n")
 
     with (
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
         mock.patch("terok_shield.resources.nft_hook.time.sleep"),
         mock.patch(
             "terok_shield.resources._oci_state.os.kill",
@@ -566,7 +578,7 @@ def test_poststop_skips_stale_pid(tmp_path: Path) -> None:
     pid_file.write_text("12345\n")
 
     with (
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=False),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=False),
         mock.patch("terok_shield.resources._oci_state.os.kill") as mock_kill,
     ):
         nft_hook._poststop(sd)
@@ -582,7 +594,7 @@ def test_poststop_ignores_oserror_on_stale_pid_unlink(tmp_path: Path) -> None:
     (sd / "dnsmasq.pid").write_text("12345\n")
 
     with (
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=False),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=False),
         mock.patch("terok_shield.resources._oci_state.Path.unlink", side_effect=OSError),
     ):
         nft_hook._poststop(sd)  # must not raise
@@ -603,7 +615,7 @@ def test_poststop_ignores_oserror_on_kill(tmp_path: Path) -> None:
     (sd / "dnsmasq.pid").write_text("99999\n")
 
     with (
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
         mock.patch(
             "terok_shield.resources._oci_state.os.kill",
             side_effect=OSError,
@@ -1007,6 +1019,7 @@ def test_createruntime_skips_ip_add_for_loopback_bind(tmp_path: Path) -> None:
     sd.mkdir()
     (sd / "ruleset.nft").write_text("table inet terok_shield {}")
     (sd / "dnsmasq.conf").write_text("listen-address=127.0.0.1\nport=53\nbind-interfaces\n")
+    (sd / "dnsmasq.bin").write_text(f"{DNSMASQ_SBIN}\n")
 
     def _fake_nsenter(*args: object, **kwargs: object) -> None:
         if any("conf-file" in str(a) for a in args):
@@ -1016,7 +1029,7 @@ def test_createruntime_skips_ip_add_for_loopback_bind(tmp_path: Path) -> None:
         mock.patch(
             "terok_shield.resources._oci_state.nsenter", side_effect=_fake_nsenter
         ) as mock_ns,
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
     ):
         nft_hook._createruntime("1", sd)
 
@@ -1039,6 +1052,7 @@ def test_createruntime_adds_link_local_for_krun_bind(tmp_path: Path) -> None:
     (sd / "dnsmasq.conf").write_text(
         f"listen-address={KRUN_DNSMASQ_BIND}\nport=53\nbind-interfaces\n"
     )
+    (sd / "dnsmasq.bin").write_text(f"{DNSMASQ_SBIN}\n")
 
     def _fake_nsenter(*args: object, **kwargs: object) -> None:
         # Only the dnsmasq launch writes the PID file.
@@ -1049,7 +1063,7 @@ def test_createruntime_adds_link_local_for_krun_bind(tmp_path: Path) -> None:
         mock.patch(
             "terok_shield.resources._oci_state.nsenter", side_effect=_fake_nsenter
         ) as mock_ns,
-        mock.patch("terok_shield.resources.nft_hook._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
     ):
         nft_hook._createruntime("1", sd)
 

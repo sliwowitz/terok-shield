@@ -10,14 +10,15 @@ Two cache layers:
 
 - **per-container file** (``cache_path``): the view the nft ruleset reads.
   Scoped to one container, so a fresh container never reuses another's.
-- **host cache** (``host_cache_dir``, opt-in, off by default): shared across
-  containers, keyed by the allowlist's content hash. The first task resolves;
-  the rest read.
+- **host cache** (``host_cache_dir``): shared across containers, keyed by
+  the allowlist's content hash. The first task resolves; the rest read.
 
 Domains resolve concurrently with a per-lookup timeout, so a batch costs
-about one lookup and one dead domain cannot stall startup.
+about one lookup and one dead domain cannot stall startup.  A batch that
+does run says so on stderr, before and after: the launcher is waiting on
+it, and a silent wait reads as a hang.
 
-Only the dig/getent tiers use this module at launch. On the dnsmasq tier
+Every tier but ``dnsmasq-live`` uses this module at launch.  On that tier
 domains resolve on-demand at runtime via ``--nftset``; this module then
 handles raw IPs only.
 """
@@ -27,11 +28,13 @@ import contextlib
 import hashlib
 import logging
 import os
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from ..paths import dns_cache_dir
 from ..run import CommandRunner
 from ..state import STATE_DIR_MODE
 from ..util import is_ip as _is_ip
@@ -57,20 +60,19 @@ class DnsResolver:
 
     Depends on a [`CommandRunner`][terok_shield.dns.resolver.CommandRunner]
     for lookup-tool (``dig``/``drill``) and ``getent`` subprocess calls
-    and, optionally, a host-level
-    cache directory shared across containers.
+    and a host-level cache directory shared across containers.
     """
 
     def __init__(self, *, runner: CommandRunner, host_cache_dir: Path | None = None) -> None:
-        """Inject the command runner and the optional shared cache location.
+        """Inject the command runner and the shared cache location.
 
         Args:
             runner: Command runner used for all DNS subprocess calls.
-            host_cache_dir: Cross-container cache directory. ``None`` (the
-                default) disables the shared layer.
+            host_cache_dir: Cross-container cache directory; ``None`` selects
+                [`dns_cache_dir`][terok_shield.paths.dns_cache_dir].
         """
         self._runner = runner
-        self._host_cache_dir = host_cache_dir
+        self._host_cache_dir = host_cache_dir or dns_cache_dir()
 
     # ── Public API ──────────────────────────────────────────
 
@@ -105,13 +107,13 @@ class DnsResolver:
             return self._read_cache(cache_path)
 
         host_path = self._host_cache_path(entries)
-        if host_path is not None and self._cache_fresh(host_path, max_age):
+        if self._cache_fresh(host_path, max_age):
             ips = self._read_cache(host_path)
             self._write_cache(cache_path, ips)
             return ips
 
         domains, raw_ips = self._split_entries(entries)
-        resolved = self.resolve_domains(domains)
+        resolved = self._resolve_announced(domains)
         all_ips = raw_ips + resolved
 
         self._write_cache(cache_path, all_ips)
@@ -119,9 +121,26 @@ class DnsResolver:
         # for one container but must not poison every task on the host for
         # max_age: share only when at least one domain resolved (or there were
         # none to resolve).
-        if host_path is not None and (resolved or not domains):
+        if resolved or not domains:
             self._write_cache(host_path, all_ips)
         return all_ips
+
+    def _resolve_announced(self, domains: list[str]) -> list[str]:
+        """Resolve *domains* and tell the operator what the wait is for.
+
+        The bound is the worst case of the thread pool: every lookup timing
+        out, each followed by its ``getent`` retry.
+        """
+        if not domains:
+            return []
+        rounds = -(-len(domains) // MAX_RESOLVE_WORKERS)
+        bound = rounds * RESOLVE_TIMEOUT * 2
+        print(f"Resolving {len(domains)} allowlist names, up to {bound} s.", file=sys.stderr)
+        started = time.monotonic()
+        ips = self.resolve_domains(domains)
+        elapsed = time.monotonic() - started
+        print(f"Resolved to {len(ips)} addresses in {elapsed:.1f} s.", file=sys.stderr)
+        return ips
 
     def resolve_domains(self, domains: list[str]) -> list[str]:
         """Resolve domain names to IPs (A + AAAA), best-effort and concurrent.
@@ -169,22 +188,22 @@ class DnsResolver:
 
     @staticmethod
     def _warn_if_empty(domain: str, ips: list[str]) -> list[str]:
-        """Warn on an empty resolution (typo or DNS failure); pass the IPs through."""
+        """Say so on an empty resolution (typo or DNS failure); pass the IPs through."""
         if not ips:
-            logger.warning("Domain %r resolved to no IPs (typo or DNS failure?)", domain)
+            message = f"No address for {domain}."
+            logger.warning(message)
+            print(message, file=sys.stderr)
         return ips
 
     # ── Cache mechanics ─────────────────────────────────────
 
-    def _host_cache_path(self, entries: list[str]) -> Path | None:
-        """Shared cache file for this exact entry list, or ``None`` when off.
+    def _host_cache_path(self, entries: list[str]) -> Path:
+        """Shared cache file for this exact entry list.
 
         Keyed by the content hash of the entry list: any allowlist edit lands
         on a fresh key and re-resolves. Creates the directory ``0700`` on first
         use.
         """
-        if self._host_cache_dir is None:
-            return None
         self._host_cache_dir.mkdir(parents=True, exist_ok=True)
         self._host_cache_dir.chmod(STATE_DIR_MODE)
         digest = hashlib.sha256("\n".join(entries).encode()).hexdigest()
