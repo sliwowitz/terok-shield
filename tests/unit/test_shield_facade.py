@@ -269,9 +269,10 @@ def test_allow_and_deny_refuse_a_wildcard_on_a_static_tier(
     """A ``*.`` target names no address where names resolve once, so it is refused up front."""
     harness = make_shield(ShieldConfig(state_dir=tmp_path))
     state.StateBundle(tmp_path).dns_tier.write_text(f"{DnsTier.LOOKUP.value}\n")
+    verdict = getattr(harness.shield, method)
 
     with pytest.raises(ShieldNeedsSetup, match=r"lookup tier: \*\."):
-        getattr(harness.shield, method)("test-ctr", f"*.{TEST_DOMAIN}")
+        verdict("test-ctr", f"*.{TEST_DOMAIN}")
 
     harness.dns.resolve_domains.assert_not_called()
 

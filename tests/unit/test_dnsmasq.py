@@ -463,8 +463,10 @@ def test_locate_uses_the_configured_binary(tmp_path: Path) -> None:
 
 def test_locate_refuses_a_configured_path_that_is_not_executable(tmp_path: Path) -> None:
     """A configured path that is not an executable file is refused, never replaced."""
-    with pytest.raises(ShieldNeedsSetup, match=str(tmp_path / "missing")):
-        locate(tmp_path / "missing", mock.MagicMock())
+    missing = tmp_path / "missing"
+    runner = mock.MagicMock()
+    with pytest.raises(ShieldNeedsSetup, match=str(missing)):
+        locate(missing, runner)
 
 
 def test_locate_is_empty_when_the_host_has_no_dnsmasq() -> None:

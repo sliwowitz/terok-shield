@@ -1312,7 +1312,8 @@ class TestPreStartDnsTierBranches:
         assert StateBundle(sd).dnsmasq_bin.read_text().strip() == recorded
         assert StateBundle(sd).read_dns_tier() is DnsTier.DNSMASQ_LIVE
         probes = [c.args[0] for c in harness.runner.run.call_args_list if c.args[0][0] != "podman"]
-        assert probes and all(cmd[0] == recorded for cmd in probes)
+        assert probes
+        assert all(cmd[0] == recorded for cmd in probes)
         harness.runner.has.assert_not_called()
 
     @mock.patch("terok_shield.hooks.mode.has_global_hooks", return_value=True)

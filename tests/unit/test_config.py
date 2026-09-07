@@ -199,7 +199,8 @@ class TestDnsTierDetection:
     def test_dnsmasq_without_nftset_still_runs_but_resolves_once(self) -> None:
         tier = detect_dns_tier(lambda _name: True, dnsmasq_usable=True, nftset=False)
         assert tier is DnsTier.DNSMASQ_STATIC
-        assert tier.runs_dnsmasq and not tier.live
+        assert tier.runs_dnsmasq
+        assert not tier.live
 
     def test_drill_alone_selects_the_lookup_tier(self) -> None:
         assert detect_dns_tier(lambda name: name == "drill") is DnsTier.LOOKUP
