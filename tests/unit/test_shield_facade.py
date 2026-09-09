@@ -11,7 +11,8 @@ from unittest import mock
 
 import pytest
 
-from terok_shield import ExecError, Shield, ShieldConfig, ShieldState, state
+from terok_shield import DnsTier, ExecError, Shield, ShieldConfig, ShieldState, state
+from terok_shield.run import ShieldNeedsSetup
 
 from ..testfs import FAKE_HOOKS_DIR, NFT_BINARY
 from ..testnet import TEST_DOMAIN, TEST_DOMAIN2, TEST_IP1, TEST_IP2
@@ -259,6 +260,21 @@ def test_allow_and_deny_swallow_backend_exceptions(
     harness = make_shield()
     getattr(harness.mode, backend_method).side_effect = ExecError(["nft"], 1, "nft failed")
     assert getattr(harness.shield, method)("test-ctr", target) == []
+
+
+@pytest.mark.parametrize("method", ["allow", "deny"])
+def test_allow_and_deny_refuse_a_wildcard_on_a_static_tier(
+    make_shield: ShieldHarnessFactory, method: str, tmp_path: Path
+) -> None:
+    """A ``*.`` target names no address where names resolve once, so it is refused up front."""
+    harness = make_shield(ShieldConfig(state_dir=tmp_path))
+    state.StateBundle(tmp_path).dns_tier.write_text(f"{DnsTier.LOOKUP.value}\n")
+    verdict = getattr(harness.shield, method)
+
+    with pytest.raises(ShieldNeedsSetup, match=r"lookup tier: \*\."):
+        verdict("test-ctr", f"*.{TEST_DOMAIN}")
+
+    harness.dns.resolve_domains.assert_not_called()
 
 
 def test_rules_delegates_to_mode(make_shield: ShieldHarnessFactory) -> None:
@@ -523,8 +539,26 @@ class TestCheckEnvironment:
         harness.runner.run.return_value = _podman_info_json("5.8.0")
         harness.runner.has.side_effect = lambda cmd: cmd not in ("dig", "drill", "dnsmasq")
         env = harness.shield.check_environment()
-        assert any("dig/drill" in i for i in env.issues)
-        assert env.dns_tier == "getent"
+        assert any(DnsTier.GETENT.hint in i for i in env.issues)
+        assert env.dns_tier == DnsTier.GETENT.value
+
+    @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
+    @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
+    def test_missing_configured_dnsmasq_reports_issue(
+        self,
+        _has_hooks: mock.Mock,
+        _find_dirs: mock.Mock,
+        make_shield: ShieldHarnessFactory,
+        tmp_path: Path,
+    ) -> None:
+        """A configured dnsmasq path that is not executable is an issue, and the host's tiers still resolve."""
+        missing = tmp_path / "dnsmasq-missing"
+        harness = make_shield(ShieldConfig(state_dir=tmp_path, dnsmasq_path=missing))
+        harness.runner.run.return_value = _podman_info_json("5.8.0")
+        harness.runner.has.side_effect = lambda cmd: cmd == "dig"
+        env = harness.shield.check_environment()
+        assert any(str(missing) in i for i in env.issues)
+        assert env.dns_tier == DnsTier.LOOKUP.value
 
     @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[FAKE_HOOKS_DIR])
     @mock.patch("terok_shield.podman_info.has_global_hooks", return_value=True)
@@ -550,7 +584,7 @@ class TestCheckEnvironment:
 
         harness.runner.run.side_effect = _run
         env = harness.shield.check_environment()
-        assert env.dns_tier == "lookup"
+        assert env.dns_tier == DnsTier.LOOKUP.value
         assert any("AppArmor" in i for i in env.issues)
 
     @mock.patch("terok_shield.podman_info.find_hooks_dirs", return_value=[])

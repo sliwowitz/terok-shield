@@ -40,8 +40,8 @@ Podman container, with or without the rest of terok.
 - **Default-deny egress** with curated allowlists (domains and IPs)
 - **Dynamic DNS allowlisting** — per-container dnsmasq with
   `--nftset` auto-populates allow sets on every DNS resolution,
-  handling IP rotation at runtime; falls back to static pre-start
-  resolution via `dig` or `getent` when dnsmasq is unavailable
+  handling IP rotation at runtime; degrades to resolution at launch
+  when dnsmasq lacks nftset support or is unavailable, and says so
 - **Live allow/deny** at runtime for individual containers
 - **Per-container isolation** — each container gets its own state
   bundle, hooks, and audit log

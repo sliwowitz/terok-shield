@@ -391,6 +391,7 @@ def _build_config(
         audit_enabled=file_cfg.audit.enabled,
         profiles_dir=profiles_dir,
         dns_cache_dir=dns_cache_dir,
+        dnsmasq_path=file_cfg.dnsmasq_path,
     )
 
 

@@ -104,7 +104,7 @@ COMMANDS: CommandTree = CommandTree(
         _lazy("rules", "Show current nft rules for a container", "control:RULES"),
         _lazy(
             "watch",
-            "Stream shield events — DNS blocks, audit log, NFLOG packets (requires dnsmasq tier)",
+            "Stream shield events — audit log, NFLOG packets, and DNS blocks on the dnsmasq tiers",
             "stream:WATCH",
         ),
         _lazy(

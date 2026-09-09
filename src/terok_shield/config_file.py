@@ -17,6 +17,7 @@ in the library, and only the CLI path touches it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -46,6 +47,10 @@ class ShieldFileConfig(BaseModel):
     )
     audit: AuditFileConfig = Field(
         default_factory=AuditFileConfig, description="Audit logging settings"
+    )
+    dnsmasq_path: Path | None = Field(
+        default=None,
+        description="dnsmasq binary to run; found on PATH and in the sbin directories when unset",
     )
     model_config = ConfigDict(extra="forbid")
 

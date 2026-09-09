@@ -15,6 +15,8 @@ from terok_shield.dns.apparmor import (
 )
 from terok_shield.run import ExecError
 
+from ..testfs import DNSMASQ_SBIN
+
 _NFTSET_VERSION = "Dnsmasq version 2.92\nCompile time options: nftset DNSSEC\n"
 _NO_NFTSET_VERSION = "Dnsmasq version 2.92\nCompile time options: no-nftset DNSSEC\n"
 
@@ -42,25 +44,18 @@ def _probed_apparmor(runner: mock.MagicMock) -> bool:
     return any("--test" in call.args[0] for call in runner.run.call_args_list)
 
 
-# ── detect_dns_tier: the new state-readable gate ─────────
-
-
-def test_tier_is_dnsmasq_when_present_capable_and_readable() -> None:
-    """dnsmasq wins when it exists, supports nftset, and can read its config."""
-    tier = detect_dns_tier(lambda _n: True, lambda: True, lambda: True)
-    assert tier is DnsTier.DNSMASQ
+# ── detect_dns_tier: the state-readable gate ─────────────
 
 
 def test_tier_falls_back_to_dig_when_confined() -> None:
-    """dnsmasq present + nftset-capable but AppArmor-confined → dig."""
-    has = lambda n: n in {"dnsmasq", "dig"}  # noqa: E731
-    tier = detect_dns_tier(has, lambda: True, lambda: False)
+    """A dnsmasq that cannot read its config is out; dig takes over."""
+    tier = detect_dns_tier(lambda n: n in {"dnsmasq", "dig"}, dnsmasq_usable=False, nftset=True)
     assert tier is DnsTier.LOOKUP
 
 
 def test_tier_falls_back_to_getent_when_confined_and_no_dig() -> None:
     """Confined dnsmasq with no dig present drops all the way to getent."""
-    tier = detect_dns_tier(lambda n: n == "dnsmasq", lambda: True, lambda: False)
+    tier = detect_dns_tier(lambda n: n == "dnsmasq", dnsmasq_usable=False, nftset=True)
     assert tier is DnsTier.GETENT
 
 
@@ -71,7 +66,8 @@ def test_can_read_true_when_test_succeeds(tmp_path: Path) -> None:
     """A clean ``dnsmasq --test`` means the state dir is readable; probe is cleaned up."""
     runner = mock.MagicMock()
     runner.run.return_value = "dnsmasq: syntax check OK.\n"
-    assert dnsmasq_can_read_state_dir(runner, tmp_path) is True
+    assert dnsmasq_can_read_state_dir(runner, DNSMASQ_SBIN, tmp_path) is True
+    assert runner.run.call_args.args[0][0] == DNSMASQ_SBIN
     assert list(tmp_path.iterdir()) == []
 
 
@@ -81,7 +77,7 @@ def test_can_read_false_on_permission_denied(tmp_path: Path) -> None:
     runner.run.side_effect = ExecError(
         ["dnsmasq", "--test"], 3, "dnsmasq: cannot read config: Permission denied\n"
     )
-    assert dnsmasq_can_read_state_dir(runner, tmp_path) is False
+    assert dnsmasq_can_read_state_dir(runner, DNSMASQ_SBIN, tmp_path) is False
     assert list(tmp_path.iterdir()) == []
 
 
@@ -91,14 +87,14 @@ def test_can_read_true_on_non_permission_error(tmp_path: Path) -> None:
     runner.run.side_effect = ExecError(
         ["dnsmasq", "--test"], 1, "dnsmasq: bad command line options\n"
     )
-    assert dnsmasq_can_read_state_dir(runner, tmp_path) is True
+    assert dnsmasq_can_read_state_dir(runner, DNSMASQ_SBIN, tmp_path) is True
 
 
 def test_can_read_true_when_probe_unwritable(tmp_path: Path) -> None:
     """An unwritable state dir is not an AppArmor read problem — do not downgrade."""
     runner = mock.MagicMock()
     missing = tmp_path / "absent-parent" / "shield"  # parent missing → write fails
-    assert dnsmasq_can_read_state_dir(runner, missing) is True
+    assert dnsmasq_can_read_state_dir(runner, DNSMASQ_SBIN, missing) is True
     runner.run.assert_not_called()
 
 
@@ -121,16 +117,16 @@ def test_probe_name_is_covered_by_the_dnsmasq_glob() -> None:
 
 
 def test_helper_keeps_dnsmasq_when_usable(tmp_path: Path) -> None:
-    """Present, nftset-capable, readable dnsmasq → dnsmasq tier, not blocked."""
-    tier, apparmor_blocked = detect_dns_tier_under_apparmor(_fake_runner(), tmp_path)
-    assert tier is DnsTier.DNSMASQ
+    """Present, nftset-capable, readable dnsmasq → live tier, not blocked."""
+    tier, apparmor_blocked = detect_dns_tier_under_apparmor(_fake_runner(), tmp_path, DNSMASQ_SBIN)
+    assert tier is DnsTier.DNSMASQ_LIVE
     assert apparmor_blocked is False
 
 
 def test_helper_downgrades_to_dig_when_confined(tmp_path: Path) -> None:
     """AppArmor-confined dnsmasq with dig present → dig tier, flagged, after probing."""
     runner = _fake_runner(readable=False)
-    tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path)
+    tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path, DNSMASQ_SBIN)
     assert tier is DnsTier.LOOKUP
     assert apparmor_blocked is True
     assert _probed_apparmor(runner)
@@ -139,24 +135,23 @@ def test_helper_downgrades_to_dig_when_confined(tmp_path: Path) -> None:
 def test_helper_flags_block_even_when_falling_to_getent(tmp_path: Path) -> None:
     """Confined dnsmasq with no dig → getent, still flagged (not a dig-only signal)."""
     runner = _fake_runner(present=("dnsmasq",), readable=False)
-    tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path)
+    tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path, DNSMASQ_SBIN)
     assert tier is DnsTier.GETENT
     assert apparmor_blocked is True
 
 
-def test_helper_skips_probe_when_nftset_unsupported(tmp_path: Path) -> None:
-    """dnsmasq without nftset is disqualified first — the AppArmor probe never runs."""
+def test_helper_keeps_a_dnsmasq_without_nftset_on_the_static_tier(tmp_path: Path) -> None:
+    """A readable dnsmasq built without nftset still runs, on the static dnsmasq tier."""
     runner = _fake_runner(nftset=False)
-    tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path)
-    assert tier is DnsTier.LOOKUP
+    tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path, DNSMASQ_SBIN)
+    assert tier is DnsTier.DNSMASQ_STATIC
     assert apparmor_blocked is False
-    assert not _probed_apparmor(runner)
 
 
 def test_helper_absent_dnsmasq_is_not_blocked(tmp_path: Path) -> None:
     """No dnsmasq → dig, not flagged, and no probe runs."""
     runner = _fake_runner(present=("dig",))
-    tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path)
+    tier, apparmor_blocked = detect_dns_tier_under_apparmor(runner, tmp_path, "")
     assert tier is DnsTier.LOOKUP
     assert apparmor_blocked is False
     assert not _probed_apparmor(runner)

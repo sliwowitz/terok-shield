@@ -8,11 +8,13 @@ from unittest import mock
 
 import pytest
 
+from terok_shield.config import DnsTier
 from terok_shield.dns.dnsmasq import (
     _validate_domain,
     deny_config_lines,
     generate_config,
     has_nftset_support,
+    locate,
     nftset_entry,
     read_denied_domains,
     read_merged_domains,
@@ -25,8 +27,10 @@ from terok_shield.nft.constants import (
     NFT_TABLE_NAME,
     PASTA_DNS,
 )
+from terok_shield.run import ShieldNeedsSetup
 from terok_shield.state import StateBundle
 
+from ..testfs import DNSMASQ_SBIN
 from ..testnet import TEST_DOMAIN, TEST_DOMAIN2
 
 # ── _validate_domain ────────────────────────────────────
@@ -112,6 +116,20 @@ def test_generate_config_basic(tmp_path: Path) -> None:
     assert f"nftset=/{TEST_DOMAIN2}/" in config
 
 
+def test_generate_config_without_population_keeps_the_sinkholes(tmp_path: Path) -> None:
+    """A dnsmasq without nftset support gets no ``nftset=`` lines but still every sinkhole."""
+    config = generate_config(
+        PASTA_DNS,
+        [TEST_DOMAIN],
+        StateBundle(tmp_path).dnsmasq_pid,
+        listen_address=DNSMASQ_BIND_DEFAULT,
+        deny_domains=[TEST_DOMAIN2],
+        populate=False,
+    )
+    assert "nftset=" not in config
+    assert f"local=/{TEST_DOMAIN2}/" in config
+
+
 def test_generate_config_krun_listen_address(tmp_path: Path) -> None:
     """generate_config(listen_address=DNSMASQ_BIND_KRUN) emits the krun bind."""
     pid_path = StateBundle(tmp_path).dnsmasq_pid
@@ -175,79 +193,7 @@ def test_generate_config_without_log_path(tmp_path: Path) -> None:
     assert "log-facility" not in config
 
 
-# ── _is_our_dnsmasq / _clear_pid_file ────────────────────
-
-
-def test_is_our_dnsmasq_true(tmp_path: Path) -> None:
-    """_is_our_dnsmasq returns True when argv[0]=='dnsmasq' and --conf-file= matches exactly."""
-    from terok_shield.dns.dnsmasq import _is_our_dnsmasq
-
-    conf_path = str(StateBundle(tmp_path).dnsmasq_conf)
-    fake_proc = tmp_path / "cmdline"
-    fake_proc.write_bytes(f"dnsmasq\x00--conf-file={conf_path}\x00".encode())
-    with mock.patch("terok_shield.dns.dnsmasq.Path", return_value=fake_proc):
-        assert _is_our_dnsmasq(12345, tmp_path) is True
-
-
-def test_is_our_dnsmasq_true_absolute_path_binary(tmp_path: Path) -> None:
-    """_is_our_dnsmasq returns True when argv[0] is an absolute path ending with /dnsmasq."""
-    from terok_shield.dns.dnsmasq import _is_our_dnsmasq
-
-    conf_path = str(StateBundle(tmp_path).dnsmasq_conf)
-    fake_proc = tmp_path / "cmdline"
-    fake_proc.write_bytes(f"/usr/sbin/dnsmasq\x00--conf-file={conf_path}\x00".encode())
-    with mock.patch("terok_shield.dns.dnsmasq.Path", return_value=fake_proc):
-        assert _is_our_dnsmasq(12345, tmp_path) is True
-
-
-def test_is_our_dnsmasq_false_different_container(tmp_path: Path) -> None:
-    """_is_our_dnsmasq returns False for another container's dnsmasq."""
-    from terok_shield.dns.dnsmasq import _is_our_dnsmasq
-
-    fake_proc = tmp_path / "cmdline"
-    fake_proc.write_bytes(b"dnsmasq\x00--conf-file=/other/state/dnsmasq.conf\x00")
-    with mock.patch("terok_shield.dns.dnsmasq.Path", return_value=fake_proc):
-        assert _is_our_dnsmasq(12345, tmp_path) is False
-
-
-def test_is_our_dnsmasq_false_conf_path_as_substring(tmp_path: Path) -> None:
-    """_is_our_dnsmasq returns False when our conf path is embedded inside a longer arg."""
-    from terok_shield.dns.dnsmasq import _is_our_dnsmasq
-
-    conf_path = str(StateBundle(tmp_path).dnsmasq_conf)
-    longer_path = f"/other{conf_path}"
-    fake_proc = tmp_path / "cmdline"
-    fake_proc.write_bytes(f"dnsmasq\x00--conf-file={longer_path}\x00".encode())
-    with mock.patch("terok_shield.dns.dnsmasq.Path", return_value=fake_proc):
-        assert _is_our_dnsmasq(12345, tmp_path) is False
-
-
-def test_is_our_dnsmasq_false_different_process(tmp_path: Path) -> None:
-    """_is_our_dnsmasq returns False when argv[0] is not dnsmasq."""
-    from terok_shield.dns.dnsmasq import _is_our_dnsmasq
-
-    fake_proc = tmp_path / "cmdline"
-    fake_proc.write_bytes(b"nginx\x00-g\x00daemon off;\x00")
-    with mock.patch("terok_shield.dns.dnsmasq.Path", return_value=fake_proc):
-        assert _is_our_dnsmasq(12345, tmp_path) is False
-
-
-def test_is_our_dnsmasq_false_missing_proc(tmp_path: Path) -> None:
-    """_is_our_dnsmasq returns False when /proc/{pid} doesn't exist."""
-    from terok_shield.dns.dnsmasq import _is_our_dnsmasq
-
-    assert _is_our_dnsmasq(999999999, tmp_path) is False
-
-
-def test_is_our_dnsmasq_false_empty_args(tmp_path: Path) -> None:
-    """_is_our_dnsmasq returns False when cmdline parsing yields an empty arg list."""
-    from terok_shield.dns.dnsmasq import _is_our_dnsmasq
-
-    mock_path_instance = mock.MagicMock()
-    mock_path_instance.read_bytes.return_value.rstrip.return_value.split.return_value = []
-
-    with mock.patch("terok_shield.dns.dnsmasq.Path", return_value=mock_path_instance):
-        assert _is_our_dnsmasq(12345, tmp_path) is False
+# ── _clear_pid_file ──────────────────────────────────────
 
 
 def test_clear_pid_file_removes_file(tmp_path: Path) -> None:
@@ -308,6 +254,16 @@ def test_read_merged_domains_subtracts_denied(tmp_path: Path) -> None:
 # ── reload ───────────────────────────────────────────────
 
 
+def _launched(tmp_path: Path, tier: DnsTier = DnsTier.DNSMASQ_LIVE) -> StateBundle:
+    """A bundle as ``pre_start`` and the hook leave it: tier, binary, and a live PID."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.dns_tier.write_text(f"{tier.value}\n")
+    bundle.dnsmasq_bin.write_text(f"{DNSMASQ_SBIN}\n")
+    bundle.dnsmasq_pid.write_text("12345\n")
+    return bundle
+
+
 def _run_reload(tmp_path: Path, *args: object, **kwargs: object) -> mock.MagicMock:
     """Invoke reload() with a mock runner and stubbed stop/verify, return the runner.
 
@@ -316,7 +272,7 @@ def _run_reload(tmp_path: Path, *args: object, **kwargs: object) -> mock.MagicMo
     """
     runner = mock.MagicMock()
     with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=True),
         mock.patch("terok_shield.dns.dnsmasq._terminate"),
         mock.patch("terok_shield.dns.dnsmasq._await_restart"),
     ):
@@ -325,21 +281,30 @@ def _run_reload(tmp_path: Path, *args: object, **kwargs: object) -> mock.MagicMo
 
 
 def test_reload_regenerates_config_and_restarts(tmp_path: Path) -> None:
-    """reload() regenerates the config and relaunches dnsmasq in the netns.
+    """reload() regenerates the config and relaunches the recorded dnsmasq in the netns.
 
     dnsmasq does not re-read its main config on SIGHUP, so the reload must
     restart it for the new nftset/sinkhole directives to take effect.
     """
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
+    bundle = _launched(tmp_path)
 
     runner = _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
 
-    assert TEST_DOMAIN in StateBundle(tmp_path).dnsmasq_conf.read_text()
-    runner.dnsmasq_via_nsenter.assert_called_once()
-    call = runner.dnsmasq_via_nsenter.call_args
-    assert call.args[0] == "test-ctr"
-    assert call.args[1] == str(StateBundle(tmp_path).dnsmasq_conf)
+    assert f"nftset=/{TEST_DOMAIN}/" in bundle.dnsmasq_conf.read_text()
+    runner.dnsmasq_via_nsenter.assert_called_once_with(
+        "test-ctr", str(bundle.dnsmasq_conf), binary=DNSMASQ_SBIN
+    )
+
+
+def test_reload_on_the_static_dnsmasq_tier_emits_no_nftset_lines(tmp_path: Path) -> None:
+    """A dnsmasq without nftset support is relaunched with sinkholes only."""
+    bundle = _launched(tmp_path, DnsTier.DNSMASQ_STATIC)
+
+    _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], deny_domains=[TEST_DOMAIN2])
+
+    conf = bundle.dnsmasq_conf.read_text()
+    assert "nftset=" not in conf
+    assert f"local=/{TEST_DOMAIN2}/" in conf
 
 
 def test_reload_preserves_krun_listen_address(tmp_path: Path) -> None:
@@ -348,9 +313,7 @@ def test_reload_preserves_krun_listen_address(tmp_path: Path) -> None:
     Without this, a krun-runtime container's reload would silently rebind
     dnsmasq onto netns ``127.0.0.1`` and break DNS for the guest.
     """
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
-    StateBundle(tmp_path).dnsmasq_conf.write_text(
+    _launched(tmp_path).dnsmasq_conf.write_text(
         f"listen-address={DNSMASQ_BIND_KRUN}\nport=53\nbind-interfaces\n"
     )
 
@@ -363,9 +326,7 @@ def test_reload_preserves_krun_listen_address(tmp_path: Path) -> None:
 
 def test_reload_falls_back_to_default_when_listen_address_missing(tmp_path: Path) -> None:
     """reload() emits the default bind when the prior conf had no ``listen-address=`` line."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
-    StateBundle(tmp_path).dnsmasq_conf.write_text("port=53\nbind-interfaces\n")
+    _launched(tmp_path).dnsmasq_conf.write_text("port=53\nbind-interfaces\n")
 
     _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
 
@@ -383,11 +344,10 @@ def test_reload_noop_when_not_running(tmp_path: Path) -> None:
 
 def test_reload_raises_on_stale_pid(tmp_path: Path) -> None:
     """reload() raises RuntimeError when the PID is not our dnsmasq (stale)."""
-    StateBundle(tmp_path).ensure_dirs()
-    StateBundle(tmp_path).dnsmasq_pid.write_text("12345\n")
+    _launched(tmp_path)
     runner = mock.MagicMock()
 
-    with mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=False):
+    with mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=False):
         with pytest.raises(RuntimeError, match="not dnsmasq"):
             reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], container="c", runner=runner)
 
@@ -399,7 +359,7 @@ def test_terminate_sigterms_then_sigkills(tmp_path: Path) -> None:
     from terok_shield.dns.dnsmasq import _terminate
 
     with (
-        mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True),  # never dies
+        mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=True),  # never dies
         mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
         mock.patch("terok_shield.dns.dnsmasq.time.sleep"),
     ):
@@ -419,13 +379,28 @@ def test_await_restart_raises_when_dnsmasq_absent(tmp_path: Path) -> None:
             _await_restart(tmp_path, timeout_s=0.0)
 
 
+def test_terminate_stops_at_sigterm_when_the_process_exits(tmp_path: Path) -> None:
+    """A dnsmasq that exits on SIGTERM never sees SIGKILL."""
+    import signal
+
+    from terok_shield.dns.dnsmasq import _terminate
+
+    with (
+        mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=False),  # gone
+        mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
+    ):
+        _terminate(12345, tmp_path)
+
+    assert mock_kill.call_args_list == [mock.call(12345, signal.SIGTERM)]
+
+
 def test_await_restart_returns_when_fresh_dnsmasq_present(tmp_path: Path) -> None:
     """_await_restart returns cleanly once a fresh dnsmasq owns the conf."""
     from terok_shield.dns.dnsmasq import _await_restart
 
     StateBundle(tmp_path).ensure_dirs()
     StateBundle(tmp_path).dnsmasq_pid.write_text("999\n")
-    with mock.patch("terok_shield.dns.dnsmasq._is_our_dnsmasq", return_value=True):
+    with mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=True):
         _await_restart(tmp_path)  # must not raise
 
 
@@ -444,14 +419,15 @@ def test_generate_config_rejects_invalid_upstream(tmp_path: Path) -> None:
 
 
 def test_has_nftset_support_detects_support() -> None:
-    """has_nftset_support() returns True when version output lists 'nftset'."""
+    """has_nftset_support() asks the given binary and reads 'nftset' in its options."""
     runner = mock.MagicMock()
     runner.run.return_value = (
         "Dnsmasq version 2.92  Copyright (c) 2000-2025 Simon Kelley\n"
         "Compile time options: IPv6 GNU-getopt DBus no-UBus i18n IDN2 DHCP DHCPv6 "
         "no-Lua TFTP conntrack ipset nftset auth DNSSEC loop-detect inotify dumpfile\n"
     )
-    assert has_nftset_support(runner) is True
+    assert has_nftset_support(runner, DNSMASQ_SBIN) is True
+    assert runner.run.call_args.args[0][0] == DNSMASQ_SBIN
 
 
 def test_has_nftset_support_detects_no_support() -> None:
@@ -462,16 +438,42 @@ def test_has_nftset_support_detects_no_support() -> None:
         "Compile time options: IPv6 GNU-getopt DBus no-UBus i18n IDN2 DHCP DHCPv6 "
         "no-Lua TFTP conntrack ipset no-nftset auth DNSSEC loop-detect inotify dumpfile\n"
     )
-    assert has_nftset_support(runner) is False
+    assert has_nftset_support(runner, DNSMASQ_SBIN) is False
 
 
-def test_has_nftset_support_missing_dnsmasq() -> None:
-    """has_nftset_support() returns False when dnsmasq is not installed."""
+def test_has_nftset_support_false_when_the_binary_prints_nothing() -> None:
+    """A binary that cannot run yields no options, hence no nftset support."""
     runner = mock.MagicMock()
-    runner.run.return_value = (
-        ""  # SubprocessRunner returns "" on FileNotFoundError with check=False
-    )
-    assert has_nftset_support(runner) is False
+    runner.run.return_value = ""
+    assert has_nftset_support(runner, DNSMASQ_SBIN) is False
+
+
+# ── locate ───────────────────────────────────────────────
+
+
+def test_locate_uses_the_configured_binary(tmp_path: Path) -> None:
+    """An explicit executable file is the binary, whatever PATH holds."""
+    binary = tmp_path / "dnsmasq-nftset"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    runner = mock.MagicMock()
+    assert locate(binary, runner) == str(binary.resolve())
+    runner.has.assert_not_called()
+
+
+def test_locate_refuses_a_configured_path_that_is_not_executable(tmp_path: Path) -> None:
+    """A configured path that is not an executable file is refused, never replaced."""
+    missing = tmp_path / "missing"
+    runner = mock.MagicMock()
+    with pytest.raises(ShieldNeedsSetup, match=str(missing)):
+        locate(missing, runner)
+
+
+def test_locate_is_empty_when_the_host_has_no_dnsmasq() -> None:
+    """Without a configured path, the host's own probe decides."""
+    runner = mock.MagicMock()
+    runner.has.return_value = False
+    assert locate(None, runner) == ""
 
 
 # ── cache-size + DNS-plane deny ─────────────────────────
@@ -597,9 +599,7 @@ def test_generate_config_override_subdomain_gets_punch_through(tmp_path: Path) -
 
 def test_reload_writes_deny_sinkholes(tmp_path: Path) -> None:
     """reload() regenerates the config with the deny sinkholes included."""
-    bundle = StateBundle(tmp_path)
-    bundle.ensure_dirs()
-    bundle.dnsmasq_pid.write_text("12345\n")
+    bundle = _launched(tmp_path)
     bundle.dnsmasq_conf.write_text(f"listen-address={DNSMASQ_BIND_DEFAULT}\n")
 
     _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], deny_domains=[TEST_DOMAIN2])

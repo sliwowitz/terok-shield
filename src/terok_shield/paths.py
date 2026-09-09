@@ -7,8 +7,9 @@ Per-container state paths live in [`terok_shield.state`][terok_shield.state].  T
 module is the single source of truth for artifacts shared across
 containers or installed into host-wide locations:
 
-- the NFLOG reader script's canonical install path (under
-  ``paths.root`` via [`namespace_state_dir`][terok_util.paths.namespace_state_dir]);
+- the NFLOG reader script's canonical install path and the shared DNS
+  cache (under ``paths.root`` via
+  [`namespace_state_dir`][terok_util.paths.namespace_state_dir]);
 - the hook entrypoint filename used both under the user's
   ``containers/oci/hooks.d/`` and inside each per-container
   ``state_dir``.
@@ -36,6 +37,11 @@ installation and (b) under each per-container ``state_dir`` after
 ``Shield.pre_start()`` materialises it.  Keeping both sites consuming
 the same constant means renaming the entrypoint is a single edit.
 """
+
+
+def dns_cache_dir() -> Path:
+    """Where resolved allowlists are shared across containers, under the shield state root."""
+    return namespace_state_dir("shield") / "dns-cache"
 
 
 def reader_script_path() -> Path:

@@ -150,13 +150,13 @@ def test_read_dns_tier_none_when_unset(tmp_path: Path) -> None:
     assert recorded_dns_tier(tmp_path) is None
 
 
-@pytest.mark.parametrize("tier", ["dnsmasq", "lookup", "getent"])
-def test_read_dns_tier_returns_recorded_value(tmp_path: Path, tier: str) -> None:
-    """The recorded tier is read back verbatim, trailing newline stripped."""
+@pytest.mark.parametrize("tier", list(DnsTier))
+def test_read_dns_tier_returns_the_recorded_tier(tmp_path: Path, tier: DnsTier) -> None:
+    """The recorded name reads back as its tier, trailing newline stripped."""
     bundle = StateBundle(tmp_path)
-    bundle.dns_tier.write_text(f"{tier}\n")
-    assert bundle.read_dns_tier() == tier
-    assert recorded_dns_tier(tmp_path) == tier
+    bundle.dns_tier.write_text(f"{tier.value}\n")
+    assert bundle.read_dns_tier() is tier
+    assert recorded_dns_tier(tmp_path) is tier
 
 
 def test_read_dns_tier_none_for_unsupported_or_corrupt(tmp_path: Path) -> None:
@@ -168,19 +168,26 @@ def test_read_dns_tier_none_for_unsupported_or_corrupt(tmp_path: Path) -> None:
     assert bundle.read_dns_tier() is None
 
 
-def test_read_dns_tier_carries_the_retired_name_forward(tmp_path: Path) -> None:
-    """A container that recorded ``dig`` reads as ``lookup``, the tier it names.
+def test_read_dns_tier_carries_the_retired_names_forward(tmp_path: Path) -> None:
+    """A container recorded under a retired name reads as the tier it named.
 
-    The rename was nominal — same static pre-start resolution, a name that
-    stopped privileging one of two interchangeable tools — so the record still
-    describes the tier accurately.  Reading it is what lets such a container
-    restart rather than be recreated.
+    That is what lets such a container restart rather than be recreated.
     """
     bundle = StateBundle(tmp_path)
     bundle.dns_tier.write_text("dig\n")
-    assert bundle.read_dns_tier() == "lookup"
-    assert recorded_dns_tier(tmp_path) == "lookup"
-    assert DnsTier(bundle.read_dns_tier()) is DnsTier.LOOKUP
+    assert bundle.read_dns_tier() is DnsTier.LOOKUP
+    bundle.dns_tier.write_text("dnsmasq\n")
+    assert recorded_dns_tier(tmp_path) is DnsTier.DNSMASQ_LIVE
+
+
+def test_wildcard_domains_are_the_admitted_star_entries(tmp_path: Path) -> None:
+    """``*.`` entries an allow tier admits count; one a deny refuses does not."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.write_tier("project_allow", f"+*.{TEST_DOMAIN}\n+{TEST_DOMAIN2}\n")
+    assert bundle.read_effective().wildcard_domains() == [f"*.{TEST_DOMAIN}"]
+    bundle.overlay_set("-", f"*.{TEST_DOMAIN}")
+    assert bundle.read_effective().wildcard_domains() == []
 
 
 def test_read_denied_ips_composes_security_deny_and_live(tmp_path: Path) -> None:
@@ -280,8 +287,9 @@ def test_oci_state_bundle_version_matches_state() -> None:
 def test_nft_hook_path_strings_match_state_attributes() -> None:
     """Path-name literals in ``nft_hook.py`` must match ``StateBundle`` properties.
 
-    The stdlib-only script uses inline string literals for filenames
-    that ``StateBundle`` derives via properties.  This test parses the
+    The stdlib-only script uses an inline string literal for the ruleset
+    filename that ``StateBundle`` derives via a property (the dnsmasq
+    filenames both sides import from the ballast).  This test parses the
     script with ``ast`` to collect only *code* string constants (not
     comment text), so a rename in ``state.py`` triggers a failure here
     rather than a silent mismatch at runtime.
@@ -311,7 +319,7 @@ def test_nft_hook_path_strings_match_state_attributes() -> None:
     }
     bundle = StateBundle(Path("x"))
 
-    for attr in ("ruleset", "dnsmasq_conf", "dnsmasq_pid"):
+    for attr in ("ruleset",):
         filename = getattr(bundle, attr).name
         assert filename in literals, (
             f"nft_hook.py has no code string literal {filename!r} but "

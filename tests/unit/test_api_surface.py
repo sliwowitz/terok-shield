@@ -26,6 +26,7 @@ EXPECTED_ALL = [
     "ArgDef",
     "COMMANDS",
     "CommandDef",
+    "DnsTier",
     "EnvironmentCheck",
     "ExecError",
     "HOOK_ENTRYPOINT_NAME",
@@ -106,6 +107,7 @@ class TestAPISurface:
             "profiles_dir",
             "runtime",
             "dns_cache_dir",
+            "dnsmasq_path",
         ]
 
         cfg = make_config()

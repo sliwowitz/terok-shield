@@ -222,7 +222,7 @@ just-launched contents.
 terok-shield reset <container>
 ```
 
-The dnsmasq tier accumulates every IP the workload legitimately resolved
+The live tier accumulates every IP the workload legitimately resolved
 (elements also age out on their own via the set timeout). `reset` drops
 that learned state in one transaction while re-seeding the authored policy
 literals, and touches neither the deny tier nor runtime `allow`/`deny`

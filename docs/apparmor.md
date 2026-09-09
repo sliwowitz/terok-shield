@@ -40,5 +40,9 @@ The automatic `dig` fallback keeps you working unprivileged; no action
 needed. shield does not bypass the profile (e.g. by running dnsmasq
 unconfined), as that would override a policy the host administrator set.
 
+A dnsmasq built in your home (`COPTS=-DHAVE_NFTSET`, see
+[DNS tiers](guide/modes.md#dns-tiers)) is outside the profile's path and
+needs no addendum; point shield at it with `dnsmasq_path`.
+
 
 [1]: https://github.com/roddhjav/apparmor.d

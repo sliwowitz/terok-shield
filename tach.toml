@@ -55,11 +55,23 @@ path = "terok_shield.policy"
 layer = "foundation"
 depends_on = []
 
+# OCI-hook ballast — stdlib-only, shipped next to the hook scripts; the
+# package side imports its bundle filenames and process matching from it
+[[modules]]
+path = "terok_shield.resources._oci_state"
+layer = "foundation"
+depends_on = []
+
 # Per-container state bundle layout — imports host-wide path constants
 [[modules]]
 path = "terok_shield.state"
 layer = "foundation"
-depends_on = ["terok_shield.paths", "terok_shield.policy"]
+depends_on = [
+    "terok_shield.config",
+    "terok_shield.paths",
+    "terok_shield.policy",
+    "terok_shield.resources._oci_state",
+]
 
 # Host-wide filesystem paths (reader script, hook entrypoint filename)
 [[modules]]

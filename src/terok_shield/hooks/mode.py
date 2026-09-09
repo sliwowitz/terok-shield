@@ -22,6 +22,7 @@ Orchestrates collaborators per lifecycle phase:
 import ipaddress
 import logging
 import os
+import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,6 +37,7 @@ from ..config import (
     ANNOTATION_STATE_DIR_KEY,
     ANNOTATION_UPSTREAM_DNS_KEY,
     ANNOTATION_VERSION_KEY,
+    WILDCARDS_NEED_LIVE_TIER,
     DnsTier,
     ShieldConfig,
     ShieldRuntime,
@@ -167,7 +169,8 @@ class HookMode:
         )
 
         # Detect DNS tier, upstream DNS, and gateway addresses
-        tier = self._detect_dns_tier(container, sd)
+        dnsmasq_bin = dnsmasq.locate(self._config.dnsmasq_path, self._runner)
+        tier = self._detect_dns_tier(container, sd, dnsmasq_bin)
         mode = info.network_mode or "pasta"
         upstream_dns = _upstream_dns_for_mode(mode)
         gw_v4, gw_v6 = self._gateways = _gateways_for_mode(mode)
@@ -179,6 +182,7 @@ class HookMode:
         bundle = StateBundle(sd)
         bundle.upstream_dns.write_text(f"{upstream_dns}\n")
         bundle.dns_tier.write_text(f"{tier.value}\n")
+        bundle.dnsmasq_bin.write_text(f"{dnsmasq_bin}\n")
         bundle.network_mode.write_text(f"{mode}\n")
         bundle.loopback_ports.write_text("".join(f"{p}\n" for p in self._config.loopback_ports))
         self._author_policy(
@@ -283,14 +287,10 @@ class HookMode:
         """
         sd = self._config.state_dir.resolve()
         bundle = StateBundle(sd)
-        # Through ``read_dns_tier``, not the raw file: it is the one place that
-        # knows which recorded names are still tiers, so a container written
-        # under a retired name restarts here instead of raising out of
-        # ``DnsTier``.
-        tier_str = bundle.read_dns_tier()
+        tier = bundle.read_dns_tier()
         mode = bundle.network_mode.read_text().strip() if bundle.network_mode.is_file() else ""
         upstream_dns = self._read_upstream_dns()
-        if not tier_str or not upstream_dns or not mode:
+        if tier is None or not upstream_dns or not mode:
             raise RuntimeError(
                 "shield bundle has no persisted DNS tier / upstream DNS / network mode — "
                 "pre_start never completed for this container; re-create the task"
@@ -300,7 +300,7 @@ class HookMode:
             container,
             sd,
             profiles,
-            DnsTier(tier_str),
+            tier,
             upstream_dns,
             self._gateways,
             security_deny=security_deny,
@@ -414,7 +414,7 @@ class HookMode:
         """Write the composed profiles as the project-allow tier; statically resolve only where needed.
 
         The authored ``policy/40-project-allow`` is the source of truth
-        (domains + literal IPs).  On the dnsmasq tier there is **no**
+        (domains + literal IPs).  On the live tier there is **no**
         pre-resolution: dnsmasq commits every answered A/AAAA record to the
         allow sets *before* forwarding the reply (``forward.c`` calls the
         nftset add synchronously while processing the upstream response), so
@@ -424,16 +424,24 @@ class HookMode:
         ``resolved.ips`` is removed so the ruleset seeds from literal IPs
         only.
 
-        The lookup/getent fallback tiers have no DNS interception point, so
-        statically resolving every admitted target into ``resolved.ips``
-        (refreshed when stale or older than the authored policy) remains
-        their only domain-enforcement mechanism.
+        Every other tier has no DNS interception point, so statically
+        resolving every admitted target into ``resolved.ips`` (refreshed
+        when stale or older than the authored policy) remains its only
+        domain-enforcement mechanism.  A wildcard entry names no address to
+        resolve, so such a tier refuses it before the launch goes further.
+
+        Raises:
+            ShieldNeedsSetup: A wildcard entry on a tier that resolves once.
         """
         bundle = StateBundle(sd)
         bundle.write_tier("project_allow", "".join(f"+{e}\n" for e in entries))
-        if tier == DnsTier.DNSMASQ:
+        if tier.live:
             bundle.resolved_cache.unlink(missing_ok=True)
             return
+        if wildcards := bundle.read_effective().wildcard_domains():
+            raise ShieldNeedsSetup(
+                WILDCARDS_NEED_LIVE_TIER.format(tier=tier.value, names=", ".join(wildcards))
+            )
         self._dns.resolve_and_cache(
             bundle.read_effective().allow_targets(),
             bundle.resolved_cache,
@@ -444,7 +452,7 @@ class HookMode:
         self, sd: Path, tier: DnsTier, upstream_dns: str, gw_v4: str = "", gw_v6: str = ""
     ) -> None:
         """Pre-generate the complete nft ruleset into the state bundle."""
-        set_timeout = NFT_SET_TIMEOUT_DNSMASQ if tier == DnsTier.DNSMASQ else ""
+        set_timeout = NFT_SET_TIMEOUT_DNSMASQ if tier.live else ""
         ruleset_builder = RulesetBuilder(
             dns=upstream_dns,
             loopback_ports=StateBundle(sd).read_loopback_ports(),
@@ -465,7 +473,7 @@ class HookMode:
 
     def _write_dns_artifacts(self, sd: Path, tier: DnsTier, upstream_dns: str) -> None:
         """Write the container's ``resolv.conf`` on every tier, and its
-        ``dnsmasq.conf`` on the dnsmasq tier.
+        ``dnsmasq.conf`` on the tiers that run dnsmasq.
 
         Shield owns the container's ``resolv.conf`` on every tier. The
         alternative is podman's default ``resolv.conf``. That default lists
@@ -475,9 +483,9 @@ class HookMode:
         bind-mounted read-only over the container's ``/etc/resolv.conf`` — see
         ``WORKAROUND(pasta-dns-bind)`` in ``pre_start``.
 
-        - **dnsmasq tier**: point ``resolv.conf`` at the per-container dnsmasq
-          bind address. dnsmasq forwards to *upstream_dns* and adds each
-          resolved address to the allow sets.
+        - **dnsmasq tiers**: point ``resolv.conf`` at the per-container dnsmasq
+          bind address. dnsmasq forwards to *upstream_dns*; the live tier
+          also adds each resolved address to the allow sets.
         - **lookup / getent tiers**: no per-container dnsmasq runs, so point
           ``resolv.conf`` straight at *upstream_dns*, the forwarder the
           firewall allows. Name resolution then uses the forwarder. The nft
@@ -485,7 +493,7 @@ class HookMode:
           reachability. This also removes the dnsmasq artifacts.
         """
         bundle = StateBundle(sd)
-        if tier == DnsTier.DNSMASQ:
+        if tier.runs_dnsmasq:
             bind = _dnsmasq_bind(self._config.runtime)
             domains = dnsmasq.read_merged_domains(sd)
             conf = dnsmasq.generate_config(
@@ -496,6 +504,7 @@ class HookMode:
                 log_path=bundle.dnsmasq_log,
                 deny_domains=dnsmasq.read_denied_domains(sd),
                 override_domains=dnsmasq.read_override_domains(sd),
+                populate=tier.live,
             )
             bundle.dnsmasq_conf.write_text(conf)
             bundle.resolv_conf.write_text(f"nameserver {bind}\noptions ndots:0\n")
@@ -527,27 +536,26 @@ class HookMode:
             f"host.containers.internal:{PASTA_HOST_LOOPBACK_MAP}",
         ]
 
-    def _detect_dns_tier(self, container: str, state_dir: Path) -> DnsTier:
-        """Pick the DNS tier. Warn on the console when AppArmor blocks dnsmasq.
+    def _detect_dns_tier(self, container: str, state_dir: Path, dnsmasq_bin: str) -> DnsTier:
+        """Pick the DNS tier and tell the operator when it is degraded.
 
-        AppArmor confinement is not a silent downgrade. This warns the operator
-        on the console (``logger.warning``) and in the audit log. The message
-        names the lost dnsmasq tier and the way to restore it. The operator
-        then sees the drop to static resolution at once, instead of tracing a
-        later egress failure back to it.
+        A degraded tier is not a silent downgrade: the launcher's stderr is
+        where the operator is, so the tier's hint goes there on every launch,
+        and an AppArmor cause also lands in the audit log so a later egress
+        failure traces back to it.
         """
-        tier, apparmor_blocked = apparmor.detect_dns_tier_under_apparmor(self._runner, state_dir)
+        tier, apparmor_blocked = apparmor.detect_dns_tier_under_apparmor(
+            self._runner, state_dir, dnsmasq_bin
+        )
         if apparmor_blocked:
             detail = (
-                f"DNS tier fell back to '{tier.value}'. AppArmor confines dnsmasq from "
-                f"{state_dir}, so the per-container dnsmasq tier is not available. "
-                "Domain allowlists now resolve once at launch, not on each reply, so a "
-                "domain whose address rotates can fail. To restore the dnsmasq tier, "
-                "install the terok-shield AppArmor profile addendum. See docs/apparmor.md. "
-                "The terok orchestrator installs it with 'terok setup'."
+                f"AppArmor confines {dnsmasq_bin} from {state_dir}. Install the terok-shield "
+                "AppArmor profile addendum (docs/apparmor.md); 'terok setup' installs it."
             )
-            logger.warning("%s", detail)
+            print(detail, file=sys.stderr)
             self._audit.log_event(container, "setup", detail=detail)
+        if not tier.live:
+            print(f"DNS tier {tier.value}: {tier.hint}", file=sys.stderr)
         return tier
 
     def _get_podman_info(self) -> PodmanInfo:
@@ -567,11 +575,11 @@ class HookMode:
         line so future IP rotations of *domain* are auto-populated.  The
         IP-level allow (nft set update) is handled separately by ``allow_ip()``.
 
-        No-op when the container is not using the dnsmasq DNS tier (the static
-        IP-level allow already happened via ``allow_ip()``).
+        No-op when the container runs no dnsmasq (the static IP-level allow
+        already happened via ``allow_ip()``).
         """
         sd = self._config.state_dir.resolve()
-        if not _is_dnsmasq_tier(sd):
+        if not _runs_dnsmasq(sd):
             return
         StateBundle(sd).overlay_set("+", domain)
         self._reload_dnsmasq(container, sd)
@@ -584,10 +592,10 @@ class HookMode:
         deny fails fast in the DNS plane instead of timing out against the
         filter.
 
-        No-op when the container is not using the dnsmasq DNS tier.
+        No-op when the container runs no dnsmasq.
         """
         sd = self._config.state_dir.resolve()
-        if not _is_dnsmasq_tier(sd):
+        if not _runs_dnsmasq(sd):
             return
         StateBundle(sd).overlay_set("-", domain)
         self._reload_dnsmasq(container, sd)
@@ -627,13 +635,10 @@ class HookMode:
             if nft_cmd:
                 self._nft_apply_best_effort(container, nft_cmd)
 
-        # When the dnsmasq set has a default timeout (30 m), permanent IPs must use
+        # When the live set has a default timeout (30 m), permanent IPs must use
         # 'timeout 0s' so they are never evicted by the set's per-element expiry clock.
-        tier_path = bundle.dns_tier
-        if tier_path.is_file() and tier_path.read_text().strip() == DnsTier.DNSMASQ.value:
-            element = f"{{ {ip} timeout 0s }}"
-        else:
-            element = f"{{ {ip} }}"
+        tier = bundle.read_dns_tier()
+        element = f"{{ {ip} timeout 0s }}" if tier is not None and tier.live else f"{{ {ip} }}"
 
         self._runner.nft_via_nsenter(
             container,
@@ -911,14 +916,9 @@ class HookMode:
         upstream = self._read_upstream_dns()
         dns = upstream if upstream else self._read_container_dns(container)
 
-        # Read persisted DNS tier to determine if set timeouts are needed
         sd = self._config.state_dir.resolve()
-        tier_path = StateBundle(sd).dns_tier
-        set_timeout = ""
-        if tier_path.is_file():
-            tier_str = tier_path.read_text().strip()
-            if tier_str == DnsTier.DNSMASQ.value:
-                set_timeout = NFT_SET_TIMEOUT_DNSMASQ
+        tier = StateBundle(sd).read_dns_tier()
+        set_timeout = NFT_SET_TIMEOUT_DNSMASQ if tier is not None and tier.live else ""
 
         if self._gateways is None:
             self._gateways = _gateways_for_mode(self._get_podman_info().network_mode or "pasta")
@@ -1068,18 +1068,12 @@ def _covered(ip: str, skip: Iterable[str]) -> bool:
     return False
 
 
-def _is_dnsmasq_tier(state_dir: Path) -> bool:
-    """Return True when the container's DNS tier is dnsmasq (or unknown).
+def _runs_dnsmasq(state_dir: Path) -> bool:
+    """True when the container runs a per-container dnsmasq, or recorded no tier yet.
 
-    ``allow_domain`` / ``deny_domain`` are dnsmasq-specific enhancements
-    (future IP rotation tracking via ``--nftset``).  On lookup/getent tiers
-    the static IP-level allow/deny in ``allow_ip``/``deny_ip`` already ran;
-    the domain-tracking step is simply not available and callers skip it.
-
-    Returns True when ``dns_tier_path`` is absent (pre_start not yet run —
-    pass-through so the caller can still attempt the dnsmasq operation).
+    ``allow_domain`` / ``deny_domain`` reload that dnsmasq.  On the lookup
+    and getent tiers the static IP-level allow/deny in ``allow_ip`` /
+    ``deny_ip`` already ran, and there is no dnsmasq to reload.
     """
-    tier_path = StateBundle(state_dir).dns_tier
-    if not tier_path.is_file():
-        return True
-    return tier_path.read_text().strip() == DnsTier.DNSMASQ.value
+    tier = StateBundle(state_dir).read_dns_tier()
+    return tier is None or tier.runs_dnsmasq

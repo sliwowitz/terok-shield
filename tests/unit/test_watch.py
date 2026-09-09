@@ -27,7 +27,6 @@ from terok_shield.nft.constants import (
 from terok_shield.state import StateBundle as _StateBundle
 from terok_shield.watch import (
     _enrich_nflog,
-    _ensure_log_file,
     _handle_signal,
     run_watch,
 )
@@ -892,24 +891,33 @@ class TestNflogWatcherCreate:
 # ── Tier validation ─────────────────────────────────────
 
 
-class TestRunWatchValidation:
-    """Test run_watch() tier validation."""
+class TestRunWatchTiers:
+    """run_watch() streams on every tier; only the query-log source needs dnsmasq."""
 
-    def test_rejects_dig_tier(self, tmp_path: Path) -> None:
-        """run_watch() exits with error on dig tier."""
-        sd = tmp_path / "state"
-        sd.mkdir()
-        (sd / "dns.tier").write_text(DnsTier.LOOKUP.value)
-        with pytest.raises(SystemExit, match="1"):
-            run_watch(sd, _CONTAINER)
+    @pytest.mark.usefixtures("_restore_running")
+    def test_static_tier_streams_without_the_query_log(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A tier without dnsmasq gets the audit and NFLOG sources, no log file, and a notice."""
+        bundle = _StateBundle(tmp_path / "state")
+        bundle.ensure_dirs()
+        bundle.dns_tier.write_text(f"{DnsTier.LOOKUP.value}\n")
 
-    def test_rejects_getent_tier(self, tmp_path: Path) -> None:
-        """run_watch() exits with error on getent tier."""
-        sd = tmp_path / "state"
-        sd.mkdir()
-        (sd / "dns.tier").write_text(DnsTier.GETENT.value)
-        with pytest.raises(SystemExit, match="1"):
-            run_watch(sd, _CONTAINER)
+        def _stop_immediately(*_args: object, **_kwargs: object) -> tuple[list, list, list]:
+            _cli_watch_mod._running = False
+            return ([], [], [])
+
+        with (
+            patch("terok_shield.watch.select.select", side_effect=_stop_immediately),
+            patch("terok_shield.watch.NflogWatcher.create", return_value=None) as nflog,
+            patch("terok_shield.watch.DnsLogWatcher") as dns_log,
+        ):
+            run_watch(bundle.state_dir, _CONTAINER)
+
+        nflog.assert_called_once_with(_CONTAINER)
+        dns_log.assert_not_called()
+        assert not bundle.dnsmasq_log.exists()
+        assert "IP addresses only" in capsys.readouterr().err
 
     def test_rejects_missing_tier(self, tmp_path: Path) -> None:
         """run_watch() exits with error when dns.tier is missing."""
@@ -984,7 +992,7 @@ class TestRunWatchHappyPath:
         sd = tmp_path / "state"
         bundle = _StateBundle(sd)
         bundle.ensure_dirs()
-        (sd / "dns.tier").write_text(DnsTier.DNSMASQ.value)
+        (sd / "dns.tier").write_text(DnsTier.DNSMASQ_LIVE.value)
         bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
         (sd / "dnsmasq.conf").write_text("# stub config\n")
         return sd
@@ -1194,26 +1202,6 @@ class TestRunWatchHappyPath:
         assert "dns" in sources
         assert "audit" in sources
         mock_nflog.close.assert_called_once()
-
-
-# ── _ensure_log_file ────────────────────────────────────
-
-
-class TestEnsureLogFile:
-    """Test log file creation for shield watch."""
-
-    def test_creates_missing_file(self, tmp_path: Path) -> None:
-        """Creates the log file when it does not exist."""
-        log = tmp_path / "dnsmasq.log"
-        _ensure_log_file(log)
-        assert log.is_file()
-
-    def test_idempotent_on_existing_file(self, tmp_path: Path) -> None:
-        """No-op when the log file already exists."""
-        log = tmp_path / "dnsmasq.log"
-        log.write_text("existing content\n")
-        _ensure_log_file(log)
-        assert log.read_text() == "existing content\n"
 
 
 # ── _enrich_nflog ─────────────────────────────────────────

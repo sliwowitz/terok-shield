@@ -42,7 +42,7 @@ def _handle_simple_clearance(shield: Shield, container: str) -> None:
 
 WATCH = CommandDef(
     name="watch",
-    help="Stream shield events — DNS blocks, audit log, NFLOG packets (requires dnsmasq tier)",
+    help="Stream shield events — audit log, NFLOG packets, and DNS blocks on the dnsmasq tiers",
     handler=_handle_watch,
     extras=NEEDS_CTR,
     args=(CONTAINER_ARG,),
