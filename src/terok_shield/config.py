@@ -203,7 +203,8 @@ class ShieldConfig:
 
     state_dir: Path
     mode: ShieldMode = ShieldMode.HOOK
-    default_profiles: tuple[str, ...] = ("dev-standard",)
+    default_profiles: tuple[str, ...] = ()
+    """Profiles to compose when a call's *profiles* argument is ``None``; empty composes no profile."""
     loopback_ports: tuple[int, ...] = ()
     audit_enabled: bool = True
     profiles_dir: Path | None = None

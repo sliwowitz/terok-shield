@@ -8,9 +8,10 @@ bundled directories.  User profiles override bundled ones with the
 same name, so site-specific customisation works without forking.
 
 Profiles are unified ``+``/``-`` policy files; a loaded profile yields
-its admitted (``+``) targets.  The bundled set ships under
-``resources/examples`` as low-value samples — the real default content
-is owned by terok-executor and terok.
+its admitted (``+``) targets.  The bundled profiles ship under
+``resources/examples`` as samples a caller names explicitly; the curated
+egress sets belong to terok, and the OS-package and provider hosts to
+terok-executor.
 """
 # WAYPOINT: Shield (__init__), HookMode (hooks.mode)
 

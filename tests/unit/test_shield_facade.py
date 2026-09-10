@@ -171,6 +171,17 @@ def test_pre_start_uses_default_profiles(
     )
 
 
+def test_pre_start_composes_no_profile_unless_named(make_shield: ShieldHarnessFactory) -> None:
+    """pre_start() passes no profile when neither the call nor the config names one."""
+    harness = make_shield()
+    harness.mode.pre_start.return_value = []
+
+    harness.shield.pre_start("test-ctr")
+    harness.mode.pre_start.assert_called_once_with(
+        "test-ctr", [], security_deny=(), provider_allow=(), project_allow=(), override=()
+    )
+
+
 def test_refresh_dispatches_and_logs(
     make_shield: ShieldHarnessFactory,
     make_config: ConfigFactory,

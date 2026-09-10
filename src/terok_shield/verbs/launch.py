@@ -21,7 +21,10 @@ from ._common import CONTAINER_ARG, NEEDS_CTR_STANDALONE, STANDALONE, csv_list
 _PROFILES_ARG = ArgDef(
     name="--profiles",
     type=csv_list,
-    help="Override default profiles (comma-separated, e.g. 'dev,pypi')",
+    help=(
+        "Profiles to apply instead of default_profiles from config.yml "
+        "(comma-separated, e.g. 'dev-standard,dev-python')"
+    ),
 )
 
 PREPARE = CommandDef(

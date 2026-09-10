@@ -213,7 +213,7 @@ Path functions in `state.py` derive all paths from `state_dir`. `BUNDLE_VERSION`
 ## Key Guidelines
 
 - **Fail-closed**: Any hook/ruleset failure must prevent the container from starting unrestricted
-- **Allowlisting**: Both IP addresses and DNS domains are supported in `.txt` allowlists; bundled defaults use DNS names because they are more stable and easier to audit
+- **Allowlisting**: Both IP addresses and DNS domains are supported in `.txt` allowlists; bundled profiles use DNS names because they are more stable and easier to audit
 - **Minimal changes**: Make surgical, focused changes
 - **Existing tests**: Never remove or modify unrelated tests
 - **Dependencies**: Use uv; runtime dependencies are PyYAML, pydantic, and terok-util

@@ -3,12 +3,14 @@
 
 """Integration tests: Shield.resolve() and CLI resolve."""
 
+import os
 from pathlib import Path
 
 import pytest
 
 from terok_shield import Shield, ShieldConfig
 from terok_shield.cli.main import main
+from tests.testfs import CONFIG_FILENAME
 from tests.testnet import TEST_IP4
 
 # -- Public API resolve ---------------------------------------
@@ -21,7 +23,7 @@ class TestShieldResolve:
     def test_resolve_returns_ips(self, shield_env: Path) -> None:
         """``Shield.resolve()`` returns a list of IPs."""
         sd = shield_env / "containers" / "resolve-test-ctr"
-        ips = Shield(ShieldConfig(state_dir=sd)).resolve()
+        ips = Shield(ShieldConfig(state_dir=sd)).resolve(["dev-standard"])
         assert len(ips) > 0, "Resolve should return at least one IP"
         for ip in ips:
             assert isinstance(ip, str)
@@ -29,7 +31,7 @@ class TestShieldResolve:
     def test_resolve_creates_cache(self, shield_env: Path) -> None:
         """A resolved.ips cache file exists after ``Shield.resolve()``."""
         sd = shield_env / "containers" / "cache-test-ctr"
-        Shield(ShieldConfig(state_dir=sd)).resolve()
+        Shield(ShieldConfig(state_dir=sd)).resolve(["dev-standard"])
 
         allowed = StateBundle(sd).resolved_cache
         assert allowed.is_file(), "resolved.ips should be created"
@@ -41,7 +43,7 @@ class TestShieldResolve:
         cache_file = StateBundle(sd).resolved_cache
         cache_file.write_text(f"{TEST_IP4}\n")
 
-        ips = Shield(ShieldConfig(state_dir=sd)).resolve(force=True)
+        ips = Shield(ShieldConfig(state_dir=sd)).resolve(["dev-standard"], force=True)
 
         assert ips, "Force-resolve should return at least one IP"
         assert TEST_IP4 not in ips, "Sentinel IP should be replaced by real resolution"
@@ -57,6 +59,8 @@ class TestCLIResolve:
 
     def test_cli_resolve(self, shield_env: Path, capsys: pytest.CaptureFixture) -> None:
         """``main(["resolve", container])`` prints resolved IP count."""
+        config_file = Path(os.environ["TEROK_SHIELD_CONFIG_DIR"]) / CONFIG_FILENAME
+        config_file.write_text("default_profiles: [dev-standard]\n")
         main(["--state-dir", str(shield_env), "resolve", "cli-resolve-test"])
         captured = capsys.readouterr()
         assert "Resolved" in captured.out

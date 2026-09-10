@@ -525,9 +525,21 @@ def test_resolve_dispatches_force_flag(
     force: bool,
 ) -> None:
     """resolve delegates to shield.resolve() with the parsed force flag."""
+    cli_dispatch.shield.config.default_profiles = ("base",)
     cli_dispatch.shield.resolve.return_value = [TEST_IP1]
     main(argv)
     cli_dispatch.shield.resolve.assert_called_once_with(force=force)
+
+
+def test_resolve_without_profiles_says_so(
+    cli_dispatch: CliDispatchHarness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """resolve states that no profiles are configured instead of resolving nothing."""
+    cli_dispatch.shield.config.default_profiles = ()
+    main(["resolve", _CONTAINER])
+    cli_dispatch.shield.resolve.assert_not_called()
+    assert "No profiles to resolve" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

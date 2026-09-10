@@ -122,7 +122,7 @@ installed elsewhere, for example one built with nftset support in your home,
 set `dnsmasq_path` in `config.yml` (or `ShieldConfig.dnsmasq_path`). A path
 that is not an executable file stops the launch.
 
-Force a cache refresh (all tiers):
+Force a cache refresh for the `default_profiles` in `config.yml` (all tiers):
 
 ```bash
 terok-shield resolve my-container --force

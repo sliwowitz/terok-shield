@@ -19,7 +19,6 @@ from terok_shield.config_file import ShieldFileConfig
 
 _FIELD_DOCS: dict[str, str] = {
     "mode": "Firewall mode. ``auto`` selects the best available; ``hook`` forces OCI hook mode.",
-    "default_profiles": "Allowlist profiles applied when no explicit list is given.",
     "loopback_ports": "TCP ports forwarded to host loopback via pasta ``-T``.",
     "audit.enabled": "Write per-container JSONL audit logs.",
 }

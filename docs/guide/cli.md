@@ -15,21 +15,21 @@ Launch a shielded container via podman. Resolves DNS, installs hooks, and
 execs into `podman run` with the correct flags.
 
 ```bash
-terok-shield run <container> [--profiles <profile>...] -- <image> [cmd...]
+terok-shield run <container> [--profiles <profile>[,<profile>...]] -- <image> [cmd...]
 ```
 
 | Argument | Description |
 |----------|-------------|
 | `container` | Container name |
-| `--profiles` | Override default profiles (space-separated) |
+| `--profiles` | Profiles to apply (comma-separated); without it, the `default_profiles` from `config.yml` apply |
 | `-- ...` | Everything after `--` is passed to `podman run` |
 
 ```bash
 # Basic usage
-terok-shield run my-container -- alpine:latest sh
+terok-shield run my-container --profiles dev-standard -- alpine:latest sh
 
-# With custom profiles
-terok-shield run my-container --profiles dev-standard dev-python -- alpine:latest sh
+# Multiple profiles
+terok-shield run my-container --profiles dev-standard,dev-python -- alpine:latest sh
 
 # With extra podman flags (after --)
 terok-shield run my-container -- --rm -it -e FOO=bar alpine:latest sh
@@ -45,13 +45,13 @@ Resolve DNS, install hooks, and print the podman flags needed to launch a
 shielded container. Useful for scripting or inspecting what `run` would do.
 
 ```bash
-terok-shield prepare <container> [--profiles <profile>...] [--json]
+terok-shield prepare <container> [--profiles <profile>[,<profile>...]] [--json]
 ```
 
 | Argument | Description |
 |----------|-------------|
 | `container` | Container name |
-| `--profiles` | Override default profiles (space-separated) |
+| `--profiles` | Profiles to apply (comma-separated); without it, the `default_profiles` from `config.yml` apply |
 | `--json` | Output as a JSON array (machine-readable) |
 
 ```bash
@@ -101,7 +101,8 @@ terok-shield status my-container
 
 ## resolve
 
-Resolve DNS domains from the configured profiles and cache the resulting IPs.
+Resolve DNS domains from the `default_profiles` in `config.yml` and cache the
+resulting IPs. When that list is empty, `resolve` says so and resolves nothing.
 
 ```bash
 terok-shield resolve <container> [--force]

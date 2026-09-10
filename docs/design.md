@@ -21,7 +21,7 @@ runtime `/proc` discovery.
 Allowlists are `.txt` files with one entry per line — domain names or raw
 IP/CIDRs. Lines starting with `#` are comments.
 
-Bundled defaults use domain names because they're stable across IP rotations and
+Bundled profiles use domain names because they're stable across IP rotations and
 easy to audit. DNS resolution uses the best available tier:
 
 1. **dnsmasq-live** (preferred) — a per-container dnsmasq instance is started by
@@ -258,7 +258,7 @@ best-effort shield_up/shield_down hub events to the supervisor's
 per-container socket.
 
 `ShieldConfig` is a frozen dataclass with required `state_dir: Path` and
-optional mode, default profiles, loopback ports, profiles dir, audit
+optional mode, default profiles (empty: no profile applies), loopback ports, profiles dir, audit
 settings, and container runtime category (`ShieldRuntime`). The library
 never reads environment variables or config files — all configuration
 comes from the caller.

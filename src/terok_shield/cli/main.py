@@ -289,7 +289,10 @@ def _reject_shield_managed_flags(podman_args: list[str]) -> None:
 
 
 def _cmd_resolve(shield: Shield, container: str, force: bool) -> None:
-    """Resolve DNS profiles and cache results."""
+    """Resolve the configured profiles and cache results, or say that none are configured."""
+    if not shield.config.default_profiles:
+        print("No profiles to resolve: config.yml sets no default_profiles")
+        return
     ips = shield.resolve(force=force)
     label = " (forced)" if force else ""
     print(f"Resolved {len(ips)} IPs for {container}{label}")
