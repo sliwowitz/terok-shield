@@ -1584,7 +1584,7 @@ test = [
 requires-dist = [
     { name = "pydantic", specifier = "~=2.13" },
     { name = "pyyaml", specifier = "~=6.0" },
-    { name = "terok-util", url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a8/terok_util-0.3.1a8-py3-none-any.whl" },
+    { name = "terok-util", url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a9/terok_util-0.3.1a9-py3-none-any.whl" },
 ]
 
 [package.metadata.requires-dev]
@@ -1615,15 +1615,15 @@ test = [
 
 [[package]]
 name = "terok-util"
-version = "0.3.1a8"
-source = { url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a8/terok_util-0.3.1a8-py3-none-any.whl" }
+version = "0.3.1a9"
+source = { url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a9/terok_util-0.3.1a9-py3-none-any.whl" }
 dependencies = [
     { name = "jinja2" },
     { name = "platformdirs" },
     { name = "ruamel-yaml" },
 ]
 wheels = [
-    { url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a8/terok_util-0.3.1a8-py3-none-any.whl", hash = "sha256:cea66f2eccbdcd972657945177df25aa1ec6104a0d8f5f06d04d117e6d42ca01" },
+    { url = "https://github.com/terok-ai/terok-util/releases/download/v0.3.1a9/terok_util-0.3.1a9-py3-none-any.whl", hash = "sha256:91f8eb37bcf80a14683628a2f97338606c5ae1c66c72bc5cef6ee6c0902be166" },
 ]
 
 [package.metadata]
