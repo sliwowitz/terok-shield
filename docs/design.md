@@ -249,7 +249,7 @@ shield = Shield(ShieldConfig(state_dir=Path("/path/to/state")))
 | `state(container)` | Query container shield state (`QUARANTINE`, `UP`, `DOWN`, `DISENGAGED`, `OFFLINE`, `ERROR`) |
 | `rules(container)` | Return current nft ruleset for a container |
 | `resolve(profiles, force=False)` | Resolve DNS profiles and cache results |
-| `status()` | Return mode, profiles, audit config |
+| `status()` | Return mode, available profiles, audit config |
 | `check_environment()` | Probe podman/hooks/DNS-tier health for consumers |
 | `preview(*, down=False, disengaged=False)` | Show ruleset that would be applied |
 

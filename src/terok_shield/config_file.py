@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class AuditFileConfig(BaseModel):
     """Audit section of ``config.yml``."""
 
-    enabled: bool = Field(default=True, description="Enable JSON-lines audit logging")
+    enabled: bool = Field(default=True, description="Enable per-container JSON-lines audit logging")
     model_config = ConfigDict(extra="forbid")
 
 
@@ -39,7 +39,8 @@ class ShieldFileConfig(BaseModel):
     """
 
     mode: Literal["auto", "hook"] = Field(
-        default="auto", description="Firewall mode (``auto`` selects the best available)"
+        default="auto",
+        description="Firewall mode: ``auto`` selects the best available; ``hook`` forces OCI hook mode",
     )
     default_profiles: list[str] = Field(
         default_factory=list,

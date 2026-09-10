@@ -86,9 +86,9 @@ terok-shield status
 ```
 
 ```text
-Mode:     hook
-Audit:    enabled
-Profiles: base, dev-node, dev-python, dev-standard, nvidia-hpc
+Mode:               hook
+Audit:              enabled
+Available profiles: base, dev-node, dev-python, dev-standard, nvidia-hpc
 ```
 
 With a container name, prints the live firewall state (`up`, `down`, `disengaged`,
@@ -111,7 +111,7 @@ terok-shield resolve <container> [--force]
 | Argument | Description |
 |----------|-------------|
 | `container` | Container name (used as the cache key) |
-| `--force` | Bypass cache freshness and re-resolve all domains |
+| `--force` | Re-resolve every domain even when the cache is fresh |
 
 ```bash
 terok-shield resolve my-container

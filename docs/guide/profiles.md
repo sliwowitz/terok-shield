@@ -61,7 +61,7 @@ Custom profiles appear alongside the bundled ones:
 
 ```bash
 terok-shield status
-# Profiles: base, dev-node, dev-python, dev-standard, my-project, nvidia-hpc
+# Available profiles: base, dev-node, dev-python, dev-standard, my-project, nvidia-hpc
 ```
 
 ### Overriding bundled profiles
@@ -99,7 +99,7 @@ from `config.yml`; when that list is empty, it says so and resolves nothing:
 
 ```bash
 terok-shield resolve my-container
-terok-shield resolve my-container --force   # bypass cache freshness
+terok-shield resolve my-container --force   # re-resolve even when the cache is fresh
 ```
 
 ### Default profiles

@@ -642,7 +642,7 @@ def test_preview_requires_down_for_disengage() -> None:
     [
         pytest.param(
             {"mode": "hook", "audit_enabled": True, "profiles": ["dev-standard"]},
-            ["Mode:", "hook", "Audit:", "enabled"],
+            ["Mode:", "hook", "Audit:", "enabled", "Available profiles: dev-standard"],
             id="audit-enabled",
         ),
         pytest.param(

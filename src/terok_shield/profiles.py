@@ -99,5 +99,5 @@ class ProfileLoader:
 
 
 def _bundled_dir() -> Path:
-    """Return the path to the bundled DNS allowlists directory."""
+    """Return the path to the bundled example profiles directory."""
     return Path(str(importlib_resources.files(_BUNDLED_PACKAGE)))

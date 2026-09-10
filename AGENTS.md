@@ -17,7 +17,7 @@
 
 - `src/terok_shield/`: Python package (CLI in `cli/main.py`, command registry in `commands.py`, nft ruleset engine in `nft/` — `rules.py` + `constants.py`, hook orchestration in `hooks/`, OCI hook entrypoint in `resources/nft_hook.py`)
 - `tests/`: `pytest` test suite
-- `src/terok_shield/resources/dns/`: Bundled DNS domain allowlists
+- `src/terok_shield/resources/examples/`: Bundled example allowlist profiles, applied only when a caller names them
 
 ## Build, Lint, and Test Commands
 

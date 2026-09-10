@@ -61,7 +61,7 @@ RESOLVE = CommandDef(
     extras=NEEDS_CTR_STANDALONE,
     args=(
         CONTAINER_ARG,
-        ArgDef(name="--force", action="store_true", help="Bypass cache freshness"),
+        ArgDef(name="--force", action="store_true", help="Re-resolve even when the cache is fresh"),
     ),
 )
 
