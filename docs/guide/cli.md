@@ -86,9 +86,13 @@ terok-shield status
 ```
 
 ```text
+Version:            0.8.0
+Podman:             5.4.0
 Mode:               hook
+Hooks:              global
+Health:             ok
 Audit:              enabled
-Available profiles: base, dev-node, dev-python, dev-standard, nvidia-hpc
+Available profiles: base, dev-node, dev-python, dev-standard, krun_guest, nvidia-hpc
 ```
 
 With a container name, prints the live firewall state (`up`, `down`, `disengaged`,
@@ -101,8 +105,10 @@ terok-shield status my-container
 
 ## resolve
 
-Resolve DNS domains from the `default_profiles` in `config.yml` and cache the
-resulting IPs. When that list is empty, `resolve` says so and resolves nothing.
+Re-resolve a prepared container's policy into its resolution caches: the
+allowlist it launched with, its break-glass overrides, and its security denies.
+`resolve` rewrites no policy. On `dnsmasq-live`, dnsmasq resolves allowed
+domains per query, so `resolve` says so instead of printing an allow count.
 
 ```bash
 terok-shield resolve <container> [--force]

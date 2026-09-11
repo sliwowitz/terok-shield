@@ -27,9 +27,10 @@ from terok_shield.cli.main import (
     _resolve_state_root,
     main,
 )
-from terok_shield.config import ShieldMode
+from terok_shield.config import DnsTier, ShieldMode
 from terok_shield.config_file import ShieldFileConfig
 from terok_shield.run import NftNotFoundError
+from terok_shield.state import StateBundle
 
 from ..testfs import (
     AUDIT_FILENAME,
@@ -521,25 +522,30 @@ def test_main_uses_sys_argv_when_argv_is_none(cli_dispatch: CliDispatchHarness) 
 )
 def test_resolve_dispatches_force_flag(
     cli_dispatch: CliDispatchHarness,
+    tmp_path: Path,
     argv: list[str],
     force: bool,
 ) -> None:
     """resolve delegates to shield.resolve() with the parsed force flag."""
-    cli_dispatch.shield.config.default_profiles = ("base",)
+    cli_dispatch.shield.config.state_dir = tmp_path
     cli_dispatch.shield.resolve.return_value = [TEST_IP1]
     main(argv)
     cli_dispatch.shield.resolve.assert_called_once_with(force=force)
 
 
-def test_resolve_without_profiles_says_so(
+def test_resolve_on_the_live_tier_says_dnsmasq_resolves_per_query(
     cli_dispatch: CliDispatchHarness,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """resolve states that no profiles are configured instead of resolving nothing."""
-    cli_dispatch.shield.config.default_profiles = ()
+    """On dnsmasq-live, resolve names the tier instead of printing an allow count."""
+    StateBundle(tmp_path).dns_tier.write_text(f"{DnsTier.DNSMASQ_LIVE.value}\n")
+    cli_dispatch.shield.config.state_dir = tmp_path
+    cli_dispatch.shield.resolve.return_value = []
     main(["resolve", _CONTAINER])
-    cli_dispatch.shield.resolve.assert_not_called()
-    assert "No profiles to resolve" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "dnsmasq resolves allowed domains per query" in out
+    assert "Resolved" not in out
 
 
 @pytest.mark.parametrize(

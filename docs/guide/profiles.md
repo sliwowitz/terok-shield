@@ -61,7 +61,7 @@ Custom profiles appear alongside the bundled ones:
 
 ```bash
 terok-shield status
-# Available profiles: base, dev-node, dev-python, dev-standard, my-project, nvidia-hpc
+# Available profiles: base, dev-node, dev-python, dev-standard, krun_guest, my-project, nvidia-hpc
 ```
 
 ### Overriding bundled profiles
@@ -93,9 +93,9 @@ resolves it there. See [DNS tiers](modes.md#dns-tiers).
 
 ### Pre-resolving DNS
 
-You can also pre-resolve DNS separately, for debugging or to inspect the
-resolved IPs. `resolve` resolves the [`default_profiles`](#default-profiles)
-from `config.yml`; when that list is empty, it says so and resolves nothing:
+You can also re-resolve a prepared container's DNS separately, for debugging
+or to inspect the resolved IPs. `resolve` refreshes the container's resolution
+caches from the policy it launched with and rewrites no policy:
 
 ```bash
 terok-shield resolve my-container

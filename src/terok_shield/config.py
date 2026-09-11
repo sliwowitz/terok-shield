@@ -273,6 +273,13 @@ class ShieldModeBackend(Protocol):
         """
         ...
 
+    def resolve(self, *, force: bool = False) -> list[str]:
+        """Re-resolve the authored policy into its static-resolution caches.
+
+        Rewrites no tier; *force* re-resolves even when a cache is fresh.
+        """
+        ...
+
     def allow_ip(self, container: str, ip: str) -> None:
         """Live-allow an IP for a running container."""
         ...

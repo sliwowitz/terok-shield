@@ -30,6 +30,7 @@ from .. import Shield, ShieldConfig, ShieldMode
 from ..commands import COMMANDS, needs_container
 from ..container import resolve_state_dir as resolve_container_state_dir
 from ..run import ExecError
+from ..state import recorded_dns_tier
 
 if TYPE_CHECKING:
     from ..config_file import ShieldFileConfig
@@ -289,11 +290,13 @@ def _reject_shield_managed_flags(podman_args: list[str]) -> None:
 
 
 def _cmd_resolve(shield: Shield, container: str, force: bool) -> None:
-    """Resolve the configured profiles and cache results, or say that none are configured."""
-    if not shield.config.default_profiles:
-        print("No profiles to resolve: config.yml sets no default_profiles")
-        return
+    """Re-resolve *container*'s authored policy and print the resolved allow IPs."""
     ips = shield.resolve(force=force)
+    if (tier := recorded_dns_tier(shield.config.state_dir)) is not None and tier.live:
+        print(
+            f"{container} runs on the {tier.value} tier: dnsmasq resolves allowed domains per query"
+        )
+        return
     label = " (forced)" if force else ""
     print(f"Resolved {len(ips)} IPs for {container}{label}")
     for ip in ips:

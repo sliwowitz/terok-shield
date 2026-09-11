@@ -115,7 +115,7 @@ A shared host cache under `<state root>/dns-cache/` (or
 `ShieldConfig.dns_cache_dir`) lets every container with the same allowlist
 reuse one resolution; a resolve where every domain failed is never shared.
 
-Force a cache refresh for the `default_profiles` in `config.yml` (all tiers):
+Force a refresh of a container's resolution caches, even when they are fresh:
 
 ```bash
 terok-shield resolve my-container --force
