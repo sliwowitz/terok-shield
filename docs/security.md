@@ -128,7 +128,8 @@ automatically routed to the correct set. Rejects are cross-family:
 
 ## Fail-closed guarantees
 
-After [`pre_start()`](guide/getting_started.md#quick-start) installs hooks, this
+With setup-installed global hooks and a bundle prepared by
+[`pre_start()`](guide/getting_started.md#quick-start), this
 invariant holds: **no path from "firewall setup failed" to "container running
 unrestricted."**
 
@@ -146,7 +147,7 @@ unrestricted."**
 (`verify_up` / `verify_down` / `verify_quarantine`) and raise if any
 invariant is missing.
 
-The fail-closed guarantee applies once hooks are installed by `pre_start()`.
-**Use `terok-shield run` (or call `pre_start()` via the Python API) before
-starting containers** — without hooks, containers start without firewall rules
-and no egress filtering is applied.
+`terok-shield setup` installs the global hooks. **Use `terok-shield run`
+(or call `pre_start()` via the Python API) before starting containers** to
+verify setup and prepare their annotated state bundles. Containers without
+Shield annotations are not protected by these hooks.

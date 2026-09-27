@@ -10,6 +10,7 @@ against the real podman installation on the host.
 from pathlib import Path
 
 import pytest
+from terok_util import SetupRequiredError
 
 from terok_shield import EnvironmentCheck, HooksInstaller, Shield, ShieldConfig
 from terok_shield.podman_info import (
@@ -17,7 +18,6 @@ from terok_shield.podman_info import (
     has_global_hooks,
     parse_podman_info,
 )
-from terok_shield.run import ShieldNeedsSetup
 
 from ..conftest import hooks_present, nft_missing, podman_missing
 
@@ -69,14 +69,20 @@ class TestHooklessErrorPath:
         """pre_start() raises ShieldNeedsSetup with setup hint when hooks are missing."""
         sd = shield_env / "containers" / "hookless-test"
         shield = Shield(ShieldConfig(state_dir=sd))
-        with pytest.raises(ShieldNeedsSetup, match="terok-shield setup"):
+        with pytest.raises(SetupRequiredError, match="Run setup"):
             shield.pre_start("hookless-test")
 
 
 @pytest.mark.needs_host_features
 @podman_missing
+@nft_missing
 class TestGlobalHooksSetup:
     """Test global hooks installation with real filesystem."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_root_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Honor each test's XDG data directory even when pytest runs as root."""
+        monkeypatch.setattr("terok_util.paths._is_root", lambda: False)
 
     def test_setup_user_hooks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """``HooksInstaller`` installs hooks and updates containers.conf."""

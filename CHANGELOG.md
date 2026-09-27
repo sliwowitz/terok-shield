@@ -1,4 +1,12 @@
 # Changelog
+
+## v0.9.0 (unreleased)
+
+- Own setup receipts and bind standalone global hooks to the setup interpreter.
+- Resolve host tools from each launch's PATH, including NixOS; retain Podman 4.8 support.
+- Remove per-task hook installation. Rerun setup and recreate old bundle containers.
+- Serialize setup with the other packages and preserve command errors for missing host tools.
+
 ## v0.8.0 — Past Prologue
 
 ## What's Changed
@@ -40,4 +48,3 @@ Added PyPI version badge and logo, https://github.com/terok-ai/terok-shield/pull
 
 
 **Full Changelog**: https://github.com/terok-ai/terok-shield/compare/v0.6.41...v0.7.0
-

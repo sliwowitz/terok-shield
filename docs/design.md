@@ -8,7 +8,7 @@ Uses OCI hooks to apply per-container nftables rules inside the container's own
 network namespace. Each container gets an isolated firewall. Works with pasta
 (rootless default) and slirp4netns.
 
-Lifecycle: `Shield.pre_start()` installs the OCI hook (idempotent), resolves DNS
+Lifecycle: `Shield.pre_start()` verifies the setup-installed global hooks, resolves DNS
 (on every tier but `dnsmasq-live`, into `resolved.ips`), pre-generates the complete nft
 ruleset to `ruleset.nft`, and returns podman args with annotations. On each container start, the OCI hook
 reads `state_dir` from annotations, applies the pre-generated `ruleset.nft` inside
@@ -93,10 +93,6 @@ across state files are reliable regardless of input notation (e.g.
 
 ```text
 {state_dir}/
-├── hooks/
-│   ├── terok-shield-createRuntime.json
-│   └── terok-shield-poststop.json
-├── terok-shield-hook              # entrypoint script (stdlib-only)
 ├── policy/                        # v15 tiered +/- policy, one file per tier set
 │   ├── 10-override                #   → nft set t10_override      (break-glass allow, above the deny)
 │   ├── 20-security-deny           #   → nft set t20_security_deny (vault hosts + operator deny)
@@ -109,25 +105,22 @@ across state files are reliable regardless of input notation (e.g.
 ├── dns.tier                       # persisted active DNS tier
 ├── loopback.ports                 # per-container host-loopback TCP ports
 ├── dnsmasq.conf                   # generated dnsmasq configuration (dnsmasq tiers)
+├── dnsmasq.command                # launch command, resolved on each start
 ├── dnsmasq.pid                    # dnsmasq PID (dnsmasq tiers)
-├── dnsmasq.bin                    # the dnsmasq binary the hook launches
+├── dnsmasq.bin                    # live dnsmasq identity (cleanup only)
 ├── dnsmasq.log                    # dnsmasq query log (for `shield watch`)
 ├── resolv.conf                    # bind-mounted over /etc/resolv.conf (every tier)
 ├── container.id                   # podman container ID (short, 12-char hex)
 └── audit.jsonl                    # per-container audit log
 ```
 
-`pre_start()` always writes the `hooks/` descriptors and the
-`terok-shield-hook` entrypoint into the bundle, but podman only uses them
-when per-container `--hooks-dir` persists across restarts. It does not
-today — podman drops a per-container `--hooks-dir` across stop/start
-([containers/podman#17935](https://github.com/containers/podman/issues/17935)) —
-so shield instead installs the hooks once into a **global** directory
-(`<state_root>/shield/hooks`, e.g. `~/.local/share/terok/shield/hooks`) and
-registers that directory in podman's `containers.conf` (`hooks_dir` under
-`[engine]`; `~/.config/containers/containers.conf` for rootless). `terok-shield
-setup` installs the global hooks and patches `containers.conf`; the rest of the
-bundle above stays per-container regardless.
+`terok-shield setup` installs global hooks under `<state_root>/shield/hooks`
+and registers them in `containers.conf`. Task preparation writes only its state
+bundle, so bare Podman starts and restarts retain protection.
+
+Hooks use setup's isolated Python and require no installed terok packages. Host
+tools follow the current PATH; runtimes that omit PATH use a setup-captured search
+path. Setup receipts detect package/interpreter changes and missing artifacts.
 
 ### Data flow diagrams
 
@@ -240,7 +233,7 @@ shield = Shield(ShieldConfig(state_dir=Path("/path/to/state")))
 
 | Method | Purpose |
 |--------|---------|
-| `pre_start(container, profiles)` | Install hooks, resolve DNS, return extra podman args |
+| `pre_start(container, profiles)` | Verify setup, resolve DNS, return extra podman args |
 | `allow(container, target)` | Live-allow a domain/IP for a running container |
 | `deny(container, target)` | Live-deny a domain/IP (best-effort) |
 | `down(container, container_id, *, disengaged=False)` | Switch to DOWN: accept and log; keep the hard-deny floor, the security-deny set, and the private-range reject. `disengaged=True` enforces nothing |

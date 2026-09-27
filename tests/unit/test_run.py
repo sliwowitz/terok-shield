@@ -3,7 +3,6 @@
 
 """Tests for subprocess helpers."""
 
-import shutil
 import subprocess
 from collections.abc import Iterator
 from unittest import mock
@@ -19,7 +18,7 @@ from terok_shield.run import (
     find_nft,
 )
 
-from ..testfs import DRILL_BINARY, NFT_BINARY, NFT_SBIN
+from ..testfs import DNSMASQ_SBIN, DRILL_BINARY, FAKE_STATE_DIR, NFT_BINARY
 from ..testnet import (
     ALIAS_DOMAIN,
     IPV6_CLOUDFLARE,
@@ -37,12 +36,15 @@ def _completed(*, rc: int = 0, stdout: str = "", stderr: str = "") -> mock.Mock:
 
 
 @pytest.fixture
-def runner() -> SubprocessRunner:
+def runner(monkeypatch: pytest.MonkeyPatch) -> SubprocessRunner:
     """Return a fresh subprocess runner with a mocked nft path."""
     with mock.patch("terok_shield.run.find_nft", return_value=NFT_BINARY):
         r = SubprocessRunner()
     # Assume dig is available for most tests; individual tests override.
-    r._has_cache["dig"] = True
+    monkeypatch.setattr(
+        "terok_shield.run.require_host_tool", lambda name: NFT_BINARY if name == "nft" else name
+    )
+    monkeypatch.setattr("terok_shield.run.find_host_tool", lambda name: name)
     return r
 
 
@@ -171,8 +173,7 @@ def test_has_uses_shutil_which(
     expected: bool,
 ) -> None:
     """has() reflects whether the executable can be found."""
-    runner._has_cache.clear()
-    monkeypatch.setattr(shutil, "which", lambda _name, path=None: which_result)
+    monkeypatch.setattr("terok_shield.run.find_host_tool", lambda _name, path=None: which_result)
     assert runner.has("nft") is expected
 
 
@@ -218,6 +219,55 @@ def test_nft_builds_expected_command(
     assert result == "output"
 
 
+@pytest.mark.parametrize("check", [True, False])
+@pytest.mark.parametrize("stdin", [None, "flush ruleset"])
+def test_nft_handles_lookup_failure(
+    runner: SubprocessRunner,
+    subprocess_run: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    check: bool,
+    stdin: str | None,
+) -> None:
+    """A vanished nft stays inside the runner's error boundary."""
+    monkeypatch.setattr(
+        "terok_shield.run.require_host_tool",
+        mock.Mock(side_effect=FileNotFoundError("nft missing")),
+    )
+    if check:
+        with pytest.raises(ExecError, match="nft missing") as error:
+            runner.nft("list", "ruleset", stdin=stdin)
+        assert error.value.rc == 127
+    else:
+        assert runner.nft("list", "ruleset", stdin=stdin, check=False) == ""
+    subprocess_run.assert_not_called()
+
+
+@pytest.mark.parametrize("check", [True, False])
+@pytest.mark.parametrize("missing", ["nsenter", "nft"])
+def test_nft_via_nsenter_handles_lookup_failure(
+    runner: SubprocessRunner,
+    subprocess_run: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    check: bool,
+    missing: str,
+) -> None:
+    """Nested tool lookup failures obey check just like subprocess failures."""
+
+    def resolve(name: str) -> str:
+        if name == missing:
+            raise FileNotFoundError(f"{name} missing")
+        return name
+
+    monkeypatch.setattr("terok_shield.run.require_host_tool", resolve)
+    if check:
+        with pytest.raises(ExecError, match=f"{missing} missing") as error:
+            runner.nft_via_nsenter("my-ctr", "list", "ruleset", pid="999")
+        assert error.value.rc == 127
+    else:
+        assert runner.nft_via_nsenter("my-ctr", "list", "ruleset", pid="999", check=False) == ""
+    subprocess_run.assert_not_called()
+
+
 def test_nft_via_nsenter_enters_container_netns(
     runner: SubprocessRunner,
     subprocess_run: mock.Mock,
@@ -259,6 +309,45 @@ def test_nft_via_nsenter_passes_stdin(
     nsenter_call = subprocess_run.call_args_list[1]
     assert "-f" in nsenter_call[0][0]
     assert nsenter_call[1]["input"] == "flush ruleset"
+
+
+@pytest.mark.parametrize("pid", [None, "999"])
+def test_dnsmasq_via_nsenter_builds_expected_command(
+    runner: SubprocessRunner, subprocess_run: mock.Mock, pid: str | None
+) -> None:
+    """dnsmasq uses the requested binary in the supplied or inspected netns."""
+    subprocess_run.side_effect = ([_completed(stdout="999\n")] if pid is None else []) + [
+        _completed(stdout="started")
+    ]
+    conf = str(FAKE_STATE_DIR / "dnsmasq.conf")
+    assert runner.dnsmasq_via_nsenter("my-ctr", conf, binary=DNSMASQ_SBIN, pid=pid) == "started"
+    assert subprocess_run.call_count == (2 if pid is None else 1)
+    assert subprocess_run.call_args.args[0] == [
+        "podman",
+        "unshare",
+        "nsenter",
+        "-t",
+        "999",
+        "-n",
+        DNSMASQ_SBIN,
+        f"--conf-file={conf}",
+    ]
+
+
+def test_dnsmasq_via_nsenter_handles_lookup_failure(
+    runner: SubprocessRunner, subprocess_run: mock.Mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing nsenter raises the same ExecError as a failed launch."""
+    monkeypatch.setattr(
+        "terok_shield.run.require_host_tool",
+        mock.Mock(side_effect=FileNotFoundError("nsenter missing")),
+    )
+    with pytest.raises(ExecError, match="nsenter missing") as error:
+        runner.dnsmasq_via_nsenter(
+            "my-ctr", str(FAKE_STATE_DIR / "dnsmasq.conf"), binary=DNSMASQ_SBIN, pid="999"
+        )
+    assert error.value.rc == 127
+    subprocess_run.assert_not_called()
 
 
 def test_podman_inspect_returns_stripped_output(
@@ -323,8 +412,7 @@ def test_lookup_all_raises_when_binary_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """lookup_all() raises LookupToolNotFoundError when neither tool is on PATH."""
-    runner._has_cache.clear()
-    monkeypatch.setattr(shutil, "which", lambda name, path=None: None)
+    monkeypatch.setattr("terok_shield.run.find_host_tool", lambda name, path=None: None)
     with pytest.raises(LookupToolNotFoundError, match="no DNS lookup tool found"):
         runner.lookup_all(TEST_DOMAIN)
 
@@ -347,9 +435,8 @@ def test_lookup_all_falls_back_to_drill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without dig, lookup_all() runs drill once per record type and merges."""
-    runner._has_cache.clear()
     monkeypatch.setattr(
-        shutil, "which", lambda name, path=None: DRILL_BINARY if name == "drill" else None
+        "terok_shield.run.find_host_tool", lambda name: DRILL_BINARY if name == "drill" else None
     )
     subprocess_run.side_effect = [
         _completed(stdout=f"{TEST_IP1}\n"),
@@ -369,23 +456,19 @@ def test_lookup_all_falls_back_to_drill(
 
 def test_find_nft_returns_path_from_which(monkeypatch: pytest.MonkeyPatch) -> None:
     """find_nft() returns the PATH result when shutil.which succeeds."""
-    monkeypatch.setattr(shutil, "which", lambda _name, path=None: NFT_BINARY)
+    monkeypatch.setattr("terok_shield.run.find_host_tool", lambda _name, path=None: NFT_BINARY)
     assert find_nft() == NFT_BINARY
 
 
-def test_find_nft_falls_back_to_sbin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """find_nft() checks /usr/sbin/nft when PATH lookup fails."""
-    monkeypatch.setattr(
-        shutil,
-        "which",
-        lambda _name, path=None: NFT_SBIN if path and "/usr/sbin" in path else None,
-    )
-    assert find_nft() == NFT_SBIN
+def test_find_nft_does_not_add_sbin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool missing from the user's PATH stays missing."""
+    monkeypatch.setattr("terok_shield.run.find_host_tool", lambda name: None)
+    assert find_nft() == ""
 
 
 def test_find_nft_returns_empty_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """find_nft() returns empty string when nft is not found anywhere."""
-    monkeypatch.setattr(shutil, "which", lambda _name, path=None: None)
+    monkeypatch.setattr("terok_shield.run.find_host_tool", lambda _name, path=None: None)
     assert find_nft() == ""
 
 
@@ -394,16 +477,6 @@ def test_subprocess_runner_raises_when_nft_missing() -> None:
     with mock.patch("terok_shield.run.find_nft", return_value=""):
         with pytest.raises(NftNotFoundError, match="nft binary not found"):
             SubprocessRunner()
-
-
-def test_subprocess_runner_stores_nft_path() -> None:
-    """SubprocessRunner stores the resolved nft path."""
-    with mock.patch("terok_shield.run.find_nft", return_value=NFT_SBIN):
-        runner = SubprocessRunner()
-    assert runner._nft == NFT_SBIN
-
-
-# ── getent_hosts tests ───────────────────────────────────
 
 
 def test_getent_hosts_queries_both_families(

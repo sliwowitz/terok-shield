@@ -50,7 +50,7 @@ class ShieldFileConfig(BaseModel):
     )
     dnsmasq_path: Path | None = Field(
         default=None,
-        description="dnsmasq binary to run; found on PATH and in the sbin directories when unset",
+        description="dnsmasq binary to run; found on the current host PATH when unset",
     )
     model_config = ConfigDict(extra="forbid")
 
