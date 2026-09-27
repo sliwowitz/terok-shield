@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import TypedDict, Unpack
 
 import pytest
+import terok_util.host_tools as _host_tools
+import terok_util.paths as _util_paths
 
 from terok_shield.config import ShieldConfig, ShieldMode, ShieldRuntime
 from terok_shield.resources import _oci_state as _oci_state_pkg
@@ -22,8 +24,32 @@ from terok_shield.resources import _oci_state as _oci_state_pkg
 # them in ``sys.modules`` so the role scripts' bare ``import
 # _oci_state`` reuses the module the test already has a handle on.
 sys.modules.setdefault("_oci_state", _oci_state_pkg)
+sys.modules.setdefault("_host_tools", _host_tools)
 
 from ..testfs import CONFIG_FILENAME, CONFIG_ROOT_NAME, STATE_ROOT_NAME
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep setup locks and default config/state paths away from the operator's files."""
+    for name in (
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+    ):
+        monkeypatch.setenv(name, str(tmp_path / name.lower()))
+    for name in (
+        "TEROK_ROOT",
+        "TEROK_CONFIG_FILE",
+        "TEROK_SHIELD_STATE_DIR",
+        "TEROK_SHIELD_CONFIG_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(_util_paths, "_is_root", lambda: False)
+    _util_paths._reset_config_caches_for_tests()
 
 
 @pytest.fixture(autouse=True)

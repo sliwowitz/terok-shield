@@ -25,9 +25,8 @@ own network namespace.
 
 ### How it works
 
-1. `Shield.pre_start()` installs the OCI hooks (see
-   [Per-container state bundle](#per-container-state-bundle) for where they
-   land), processes the allowlist profiles, and pre-generates the complete nft
+1. `Shield.pre_start()` verifies the setup-installed global hooks,
+   processes the allowlist profiles, and pre-generates the complete nft
    ruleset to `ruleset.nft`. On the live tier the composed policy lands in
    `policy/40-project-allow` and only literal IP entries seed the sets; on every
    other tier the domains are resolved now, into `resolved.ips`, and the
@@ -39,8 +38,9 @@ own network namespace.
    it fires the stdlib-only hook script at the `createRuntime` stage
 3. The hook reads `state_dir` from annotations and applies the pre-generated
    `ruleset.nft` (gateway addresses already baked in at `pre_start`) inside the
-   container's network namespace via `nsenter`, then starts the recorded
-   dnsmasq binary when `dnsmasq.conf` is present
+   container's network namespace via `nsenter`, then resolves `dnsmasq.command`
+   against the current host `PATH` and starts it when `dnsmasq.conf` is present.
+   If `PATH` is absent (not merely empty), the hook uses setup's captured search path.
 4. On the live tier dnsmasq runs with `--nftset` pointing to the
    `t40_project_allow_v4`/`t40_project_allow_v6` sets — every DNS resolution
    adds the resolved IPs to the live nft project-allow sets before the answer
@@ -85,12 +85,10 @@ preamble (lo, established, DNS, infra ports, +localhost grants) → t00 hard-den
 
 ### Per-container state bundle
 
-Each container's hooks and state are isolated in its own directory:
+Each container's state is isolated in its own directory:
 
 ```text
 {state_dir}/
-├── hooks/                                  # OCI hook descriptors (only if per-container hooks are supported)
-├── terok-shield-hook                       # Hook entrypoint (stdlib-only Python), per-container hooks only
 ├── policy/                                 # v15 tiered +/- policy, one file per tier set
 │   ├── 10-override                         #   → nft set t10_override (break-glass allow)
 │   ├── 20-security-deny                    #   → nft set t20_security_deny (vault hosts + operator deny)
@@ -100,24 +98,18 @@ Each container's hooks and state are isolated in its own directory:
 ├── resolved.ips                            # Resolved allow IPs (t40 seed; every tier but dnsmasq-live)
 ├── ruleset.nft                             # Pre-generated nft ruleset (gateways baked in)
 ├── dnsmasq.conf                            # Generated dnsmasq config (dnsmasq tiers)
+├── dnsmasq.command                         # Launch command, resolved on each start
 ├── dnsmasq.pid                             # dnsmasq PID (dnsmasq tiers)
-├── dnsmasq.bin                             # The dnsmasq binary the hook launches
+├── dnsmasq.bin                             # Live dnsmasq identity (cleanup only)
 ├── resolv.conf                             # Bind-mounted /etc/resolv.conf (every tier)
 ├── upstream.dns                            # Persisted upstream DNS address
 ├── dns.tier                                # Persisted active DNS tier
 └── audit.jsonl                             # Per-container audit log
 ```
 
-> **Where the hooks live.** The `hooks/` descriptors and the
-> `terok-shield-hook` entrypoint above are part of this per-container bundle
-> only when podman supports persistent per-container hooks. It does not today —
-> podman drops a per-container `--hooks-dir` across stop/start
-> ([containers/podman#17935](https://github.com/containers/podman/issues/17935)) —
-> so shield installs the hooks once into a **global** directory and registers it
-> in podman's `containers.conf` (`hooks_dir` under `[engine]`;
-> `~/.config/containers/containers.conf` for rootless). Run `terok-shield setup`
-> to install the global hooks and patch `containers.conf`. Everything else in
-> the bundle stays per-container.
+> **Global hooks.** `terok-shield setup` installs hooks under
+> `<state_root>/shield/hooks` and registers them in `containers.conf`.
+> Task preparation never modifies them; bare Podman restarts remain protected.
 
 ### Running containers
 

@@ -217,7 +217,7 @@ class ShieldConfig:
     root.  Only the tiers that resolve at launch use it.
     """
     dnsmasq_path: Path | None = None
-    """The dnsmasq binary to run; ``None`` finds one on PATH or in the sbin directories.
+    """The dnsmasq binary to run; ``None`` finds one on the current host PATH.
 
     Set it for a dnsmasq built outside the distro package, for example one
     built with nftset support in the operator's home.
