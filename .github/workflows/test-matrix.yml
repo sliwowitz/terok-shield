@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   matrix:
-    uses: sliwowitz/terok-util/.github/workflows/fleet-test-matrix.yml@8fb943b116474bda63c284163ed93c75a8c4f133
+    uses: sliwowitz/terok-util/.github/workflows/fleet-test-matrix.yml@4fd25175fae9d2640ca9ce5e5b75488180876ba5
     with:
       slots: ${{ inputs.slots }}
       krun: ${{ inputs.krun }}

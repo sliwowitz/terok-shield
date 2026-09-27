@@ -1584,7 +1584,7 @@ test = [
 requires-dist = [
     { name = "pydantic", specifier = "~=2.13" },
     { name = "pyyaml", specifier = "~=6.0" },
-    { name = "terok-util", url = "https://github.com/terok-ai/terok-util/releases/download/v0.4.0a1/terok_util-0.4.0a1-py3-none-any.whl" },
+    { name = "terok-util", git = "https://github.com/sliwowitz/terok-util?rev=fix%2Fhost-tool-completeness" },
 ]
 
 [package.metadata.requires-dev]
@@ -1615,24 +1615,13 @@ test = [
 
 [[package]]
 name = "terok-util"
-version = "0.4.0a1"
-source = { url = "https://github.com/terok-ai/terok-util/releases/download/v0.4.0a1/terok_util-0.4.0a1-py3-none-any.whl" }
+version = "0.4.0a2.dev120+g4fd25175f"
+source = { git = "https://github.com/sliwowitz/terok-util?rev=fix%2Fhost-tool-completeness#4fd25175fae9d2640ca9ce5e5b75488180876ba5" }
 dependencies = [
     { name = "jinja2" },
     { name = "packaging" },
     { name = "platformdirs" },
     { name = "ruamel-yaml" },
-]
-wheels = [
-    { url = "https://github.com/terok-ai/terok-util/releases/download/v0.4.0a1/terok_util-0.4.0a1-py3-none-any.whl", hash = "sha256:85bc694e90c6ea2d5c18300b4cbd02131fd40a7a1f431a33baebce5531938efd" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jinja2", specifier = "~=3.1" },
-    { name = "packaging", specifier = "~=26.0" },
-    { name = "platformdirs", specifier = "~=4.11" },
-    { name = "ruamel-yaml", specifier = "==0.19.1" },
 ]
 
 [[package]]
