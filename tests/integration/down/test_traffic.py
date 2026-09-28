@@ -20,7 +20,8 @@ from terok_shield.nft.constants import (
     PRIVATE_RANGES,
 )
 from tests.testnet import (
-    ALLOWED_TARGET_HTTP,
+    ALLOWED_TARGET_HTTPS_PORT,
+    ALLOWED_TARGET_IPS,
     BLOCKED_TARGET_DNS_PORT,
     BLOCKED_TARGET_IP,
     CONNCHECK_HTTP,
@@ -119,9 +120,11 @@ class TestDownTrafficAllowed:
     """Verify allowed targets remain reachable while the shield is down."""
 
     def test_allowed_target_reachable_when_down(self, shielded_container: str) -> None:
-        """Already-allowed HTTP target stays reachable while down."""
+        """Already-allowed TCP target stays reachable while down."""
         _shield().down(shielded_container, shielded_container.id)
-        assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)
+        assert_connectable(
+            shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+        )
 
 
 @pytest.mark.needs_podman

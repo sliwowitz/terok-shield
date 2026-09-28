@@ -13,13 +13,20 @@ from terok_shield.nft.rules import RulesetBuilder, add_elements
 from tests.testnet import (
     ALLOWED_TARGET_HTTP,
     ALLOWED_TARGET_HTTPS,
+    ALLOWED_TARGET_HTTPS_PORT,
     ALLOWED_TARGET_IPS,
     BLOCKED_TARGET_HTTP,
     RFC1918_HOST,
 )
 
 from ..conftest import nft_missing, nsenter_nft, podman_missing
-from ..helpers import assert_blocked, assert_reachable, is_reachable, wget as _wget
+from ..helpers import (
+    assert_blocked,
+    assert_connectable,
+    assert_reachable,
+    is_reachable,
+    wget as _wget,
+)
 
 # -- Low-level nft allow behavior -----------------------------
 
@@ -139,9 +146,9 @@ class TestAllowDenyAPI:
             allowed = shield.allow(shielded_container, ALLOWED_TARGET_IPS[0])
             assert ALLOWED_TARGET_IPS[0] in allowed
 
-            # Allow both Cloudflare IPs (anycast pair)
-            shield.allow(shielded_container, ALLOWED_TARGET_IPS[1])
-            assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)
+            assert_connectable(
+                shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+            )
 
     def test_shield_allow_deny_cycle(self, shielded_container: str) -> None:
         """``Shield.allow()`` then ``Shield.deny()`` blocks IP again."""
