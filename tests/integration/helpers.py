@@ -162,7 +162,8 @@ def assert_connectable(container: str, ip: str, port: int = 53, timeout: int = 5
         container, "nc", "-z", "-w", str(timeout), ip, str(port), timeout=timeout + 5
     )
     assert r.returncode == 0, (
-        f"Expected {ip}:{port} to be reachable, but connection failed: {r.stderr}"
+        f"Expected {ip}:{port} to be reachable, but probe failed (exit {r.returncode}):\n"
+        f"  stdout: {r.stdout!r}\n  stderr: {r.stderr!r}"
     )
 
 
@@ -188,7 +189,11 @@ def assert_not_connectable(container: str, ip: str, port: int = 53, timeout: int
     r = exec_in_container(
         container, "nc", "-z", "-w", str(timeout), ip, str(port), timeout=timeout + 5
     )
-    assert r.returncode != 0, f"Expected {ip}:{port} to be blocked, but connection succeeded"
+    # Podman/exec failures must not masquerade as blocked traffic.
+    assert r.returncode not in (0, 125, 126, 127), (
+        f"Expected {ip}:{port} to be blocked, but probe returned exit {r.returncode}:\n"
+        f"  stdout: {r.stdout!r}\n  stderr: {r.stderr!r}"
+    )
 
 
 def exec_in_container(container: str, *cmd: str, timeout: int = 10) -> subprocess.CompletedProcess:

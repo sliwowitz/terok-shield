@@ -30,7 +30,7 @@ from terok_shield.state import StateBundle
 from tests.testnet import (
     ALLOWED_TARGET_DOMAIN,
     ALLOWED_TARGET_DOMAIN_HTTP,
-    ALLOWED_TARGET_HTTP,
+    ALLOWED_TARGET_HTTPS_PORT,
     ALLOWED_TARGET_IPS,
     GOOGLE_DNS_DOMAIN,
 )
@@ -44,7 +44,8 @@ from ..conftest import (
     podman_missing,
 )
 from ..helpers import (
-    assert_blocked,
+    assert_connectable,
+    assert_not_connectable,
     assert_reachable,
     exec_in_container,
     start_shielded_container,
@@ -143,7 +144,7 @@ class TestLearnedStateLifecycle:
         """A down/up round trip must never forget what the workload learned.
 
         After ``shield up``, the learned IP is still in the allow set and a
-        raw-IP fetch succeeds **without** a fresh DNS query — exactly the
+        raw-IP connection succeeds **without** a fresh DNS query — exactly the
         situation of a client that cached its answer across the down window.
         """
         name, _sd, shield, cid = learned_container
@@ -157,12 +158,14 @@ class TestLearnedStateLifecycle:
         assert any(ip in contents for ip in ALLOWED_TARGET_IPS), (
             f"learned allow-set state lost across down/up:\n{contents}"
         )
-        assert_reachable(name, ALLOWED_TARGET_HTTP)  # raw IP — no re-query involved
+        assert_connectable(
+            name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+        )  # raw IP — no re-query involved
 
     def test_reset_forgets_learned_state_and_relearns(self, learned_container) -> None:
         """``shield reset`` — and only it — drops learned state, reversibly.
 
-        After the reset the raw-IP fetch is blocked again (the set is back
+        After the reset the raw-IP connection is blocked again (the set is back
         to its just-launched contents); a fresh in-container resolution
         re-learns and restores connectivity.
         """
@@ -176,10 +179,12 @@ class TestLearnedStateLifecycle:
         assert not any(ip in contents for ip in ALLOWED_TARGET_IPS), (
             f"reset left learned IPs in the allow set:\n{contents}"
         )
-        assert_blocked(name, ALLOWED_TARGET_HTTP)  # raw IP, no DNS → stays cold
+        assert_not_connectable(
+            name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+        )  # raw IP, no DNS → stays cold
 
         _learn(name, pid)  # the workload re-earns its state
-        assert_reachable(name, ALLOWED_TARGET_HTTP)
+        assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
 
     def test_runtime_denied_domain_gets_nxdomain(self, learned_container) -> None:
         """A runtime ``shield deny <domain>`` sinkholes it in the DNS plane.

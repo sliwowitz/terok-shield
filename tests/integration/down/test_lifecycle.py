@@ -15,7 +15,7 @@ import pytest
 
 from terok_shield import Shield, ShieldConfig, ShieldState
 from tests.testnet import (
-    ALLOWED_TARGET_HTTP,
+    ALLOWED_TARGET_HTTPS_PORT,
     ALLOWED_TARGET_IPS,
     BLOCKED_TARGET_DNS_PORT,
     BLOCKED_TARGET_HTTP,
@@ -34,7 +34,6 @@ from ..helpers import (
     assert_blocked,
     assert_connectable,
     assert_not_connectable,
-    assert_reachable,
     disposable_shield as _shield,
     start_shielded_container,
 )
@@ -223,19 +222,19 @@ class TestDownIPRestoration:
             # Allow Cloudflare IPs and verify reachability
             for ip in ALLOWED_TARGET_IPS:
                 shield.allow(name, ip)
-            assert_reachable(name, ALLOWED_TARGET_HTTP)
+            assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
 
             # Seed these IPs into resolved.ips (simulating DNS resolution)
             StateBundle(sd).resolved_cache.write_text("\n".join(ALLOWED_TARGET_IPS) + "\n")
 
             # Go down (all traffic allowed regardless)
             shield.down(name, cid)
-            assert_reachable(name, ALLOWED_TARGET_HTTP)
+            assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
 
             # Come back up — cached IPs should be restored
             shield.up(name, cid)
             assert shield.state(name) == ShieldState.UP
-            assert_reachable(name, ALLOWED_TARGET_HTTP)
+            assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
 
         finally:
             _podman_rm(name)
@@ -316,12 +315,12 @@ class TestDownFullE2E:
             # Step 1: Default deny is in effect
             assert shield.state(name) == ShieldState.UP
             assert_blocked(name, BLOCKED_TARGET_HTTP)
-            assert_blocked(name, ALLOWED_TARGET_HTTP)
+            assert_not_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
 
             # Step 2: Allow Cloudflare, write cache
             for ip in ALLOWED_TARGET_IPS:
                 shield.allow(name, ip)
-            assert_reachable(name, ALLOWED_TARGET_HTTP)
+            assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
             assert_blocked(name, BLOCKED_TARGET_HTTP)
 
             # Persist to profile.allowed for restoration
@@ -330,7 +329,7 @@ class TestDownFullE2E:
             # Step 3: Down for discovery
             shield.down(name, cid)
             assert shield.state(name) == ShieldState.DOWN
-            assert_reachable(name, ALLOWED_TARGET_HTTP)
+            assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
             assert_connectable(name, BLOCKED_TARGET_IP, BLOCKED_TARGET_DNS_PORT)
 
             # Step 4: Disengage to also check RFC1918 destinations
@@ -348,7 +347,7 @@ class TestDownFullE2E:
             assert shield.state(name) == ShieldState.UP
 
             # Cached IPs should be restored
-            assert_reachable(name, ALLOWED_TARGET_HTTP)
+            assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
             # Blocked target should be blocked again
             assert_blocked(name, BLOCKED_TARGET_HTTP)
 
@@ -404,14 +403,18 @@ class TestDownFullE2E:
         # Allow before going down — persists to live.allowed
         for ip in ALLOWED_TARGET_IPS:
             shield.allow(shielded_container, ip)
-        assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)
+        assert_connectable(
+            shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+        )
 
         # Down/up cycle
         shield.down(shielded_container, shielded_container.id)
         shield.up(shielded_container, shielded_container.id)
 
         # IPs survive because live.allowed is read back by shield_up()
-        assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)
+        assert_connectable(
+            shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+        )
 
 
 from terok_shield.state import StateBundle
