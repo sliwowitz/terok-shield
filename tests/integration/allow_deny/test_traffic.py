@@ -21,9 +21,8 @@ from tests.testnet import (
 
 from ..conftest import nft_missing, nsenter_nft, podman_missing
 from ..helpers import (
-    assert_blocked,
     assert_connectable,
-    assert_reachable,
+    assert_not_connectable,
     is_reachable,
     wget as _wget,
 )
@@ -84,9 +83,8 @@ class TestFirewallAllowing:
         )
         assert r.returncode == 0, f"Add elements failed: {r.stderr}"
 
-        allowed = _wget(container, ALLOWED_TARGET_HTTP, timeout=10)
+        assert_connectable(container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
         blocked = _wget(container, BLOCKED_TARGET_HTTP, timeout=10)
-        assert is_reachable(allowed), "Allowed IP should pass"
         assert blocked.returncode != 0, "Non-allowed IP should be rejected"
 
 
@@ -156,8 +154,12 @@ class TestAllowDenyAPI:
             shield = Shield(ShieldConfig(state_dir=Path(tmp)))
             for ip in ALLOWED_TARGET_IPS:
                 shield.allow(shielded_container, ip)
-            assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)
+            assert_connectable(
+                shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+            )
 
             for ip in ALLOWED_TARGET_IPS:
                 shield.deny(shielded_container, ip)
-            assert_blocked(shielded_container, ALLOWED_TARGET_HTTP)
+            assert_not_connectable(
+                shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+            )

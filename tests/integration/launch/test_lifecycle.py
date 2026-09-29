@@ -15,9 +15,9 @@ import pytest
 
 from terok_shield import Shield, ShieldConfig
 
-from ...testnet import ALLOWED_TARGET_HTTP, ALLOWED_TARGET_IPS
+from ...testnet import ALLOWED_TARGET_HTTPS_PORT, ALLOWED_TARGET_IPS
 from ..conftest import CTR_PREFIX, IMAGE, _podman_rm, hooks_unavailable, nft_missing, podman_missing
-from ..helpers import assert_blocked, assert_reachable, start_shielded_container
+from ..helpers import assert_connectable, assert_not_connectable, start_shielded_container
 
 
 @pytest.mark.needs_podman
@@ -59,14 +59,14 @@ class TestAPILifecycle:
             assert all(ip in allowed for ip in ALLOWED_TARGET_IPS)
 
             # 5. Verify traffic flows
-            assert_reachable(name, ALLOWED_TARGET_HTTP)
+            assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
 
             # 6. Deny all allowed IPs
             for ip in allowed:
                 shield.deny(name, ip)
 
             # 7. Verify blocked
-            assert_blocked(name, ALLOWED_TARGET_HTTP)
+            assert_not_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
 
             # 8. Check status
             status = shield.status()

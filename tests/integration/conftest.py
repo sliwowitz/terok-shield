@@ -32,7 +32,7 @@ from terok_util.matrix import check_capability_contract, tcp_reachable
 
 from terok_shield.podman_info import has_global_hooks
 from terok_shield.run import find_nft
-from tests.testnet import ALLOWED_TARGET_IPS
+from tests.testnet import ALLOWED_TARGET_DNS_PORT, ALLOWED_TARGET_HTTPS_PORT, ALLOWED_TARGET_IPS
 
 from .helpers import keepalive, start_shielded_container
 
@@ -197,7 +197,7 @@ _CAPABILITY_PROBES = {
     "lookup": lambda: _has("dig") or _has("drill"),
     "getent": lambda: _has("getent"),
     "hooks": _hooks_available,
-    "internet": lambda: tcp_reachable(ALLOWED_TARGET_IPS[0], 53),
+    "internet": lambda: tcp_reachable(ALLOWED_TARGET_IPS[0], ALLOWED_TARGET_DNS_PORT),
 }
 
 
@@ -256,28 +256,28 @@ def _pull_image() -> None:
 
 @pytest.fixture(scope="session")
 def _verify_connectivity() -> None:
-    """Verify basic internet connectivity from the host (once per session).
+    """Verify host connectivity to the DNS and TCP-policy probe ports once per session.
 
     Prevents false positives: if the host can't reach the internet,
     ``assert_blocked`` passes trivially (traffic is blocked by the network
-    environment, not by terok-shield). Rootless podman with pasta shares
-    the host's network stack, so host connectivity implies container
-    pre-firewall connectivity.
+    environment, not by terok-shield). This host check is necessary but
+    does not establish container connectivity or rule out later outages.
 
     Raises ``pytest.fail()`` — not ``skip()`` — because broken host networking
     invalidates all traffic-based test results.
     """
     target_ip = ALLOWED_TARGET_IPS[0]
-    try:
-        s = socket.create_connection((target_ip, 53), timeout=5)
-        s.close()
-    except OSError as exc:
-        pytest.fail(
-            f"Pre-flight: cannot reach {target_ip}:53 from the host.\n"
-            "Fix host internet connectivity before running integration tests.\n"
-            "Traffic-based tests would produce false positives when the network "
-            f"is down (assert_blocked passes trivially).\nError: {exc}"
-        )
+    for port in (ALLOWED_TARGET_DNS_PORT, ALLOWED_TARGET_HTTPS_PORT):
+        try:
+            with socket.create_connection((target_ip, port), timeout=5):
+                pass
+        except OSError as exc:
+            pytest.fail(
+                f"Pre-flight: cannot reach {target_ip}:{port} from the host.\n"
+                "Fix host internet connectivity before running integration tests.\n"
+                "Traffic-based tests would produce false positives when the network "
+                f"is down (assert_blocked passes trivially).\nError: {exc}"
+            )
 
 
 @pytest.fixture(scope="session")

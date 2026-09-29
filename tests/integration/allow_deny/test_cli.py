@@ -10,10 +10,10 @@ import pytest
 
 from terok_shield import Shield, ShieldConfig
 from terok_shield.cli.main import main
-from tests.testnet import ALLOWED_TARGET_HTTP, ALLOWED_TARGET_IPS
+from tests.testnet import ALLOWED_TARGET_HTTPS_PORT, ALLOWED_TARGET_IPS
 
 from ..conftest import nft_missing, podman_missing
-from ..helpers import assert_blocked, assert_reachable
+from ..helpers import assert_connectable, assert_not_connectable
 
 
 @pytest.mark.needs_podman
@@ -29,7 +29,9 @@ class TestAllowDenyCLI:
         """``main(["allow", container, ip])`` makes IP reachable."""
         for ip in ALLOWED_TARGET_IPS:
             main(["allow", shielded_container, ip])
-        assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)
+        assert_connectable(
+            shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+        )
 
     def test_cli_deny(self, shielded_container: str) -> None:
         """``main(["deny", container, ip])`` blocks the IP."""
@@ -38,8 +40,12 @@ class TestAllowDenyCLI:
             shield = Shield(ShieldConfig(state_dir=Path(tmp)))
             for ip in ALLOWED_TARGET_IPS:
                 shield.allow(shielded_container, ip)
-            assert_reachable(shielded_container, ALLOWED_TARGET_HTTP)
+            assert_connectable(
+                shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+            )
 
             for ip in ALLOWED_TARGET_IPS:
                 main(["deny", shielded_container, ip])
-            assert_blocked(shielded_container, ALLOWED_TARGET_HTTP)
+            assert_not_connectable(
+                shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT
+            )

@@ -84,6 +84,7 @@ TEST_CUSTOM_CIDR_10_1 = "10.1.0.0/16"
 
 ALLOWED_TARGET_IPS = ["1.1.1.1", "1.0.0.1"]  # Cloudflare anycast pair
 ALLOWED_TARGET_DOMAIN = "one.one.one.one"  # Resolves to both IPs above
+ALLOWED_TARGET_DNS_PORT = 53
 ALLOWED_TARGET_HTTP = "http://1.1.1.1/"  # Plain HTTP (port 80)
 ALLOWED_TARGET_HTTPS = f"https://{ALLOWED_TARGET_DOMAIN}/"  # HTTPS (port 443)
 ALLOWED_TARGET_HTTPS_PORT = 443  # Direct TCP probe, without HTTP redirects or DNS exceptions

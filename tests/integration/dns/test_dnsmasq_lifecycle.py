@@ -27,7 +27,8 @@ from terok_shield.dns.dnsmasq import generate_config, nftset_entry, read_merged_
 from terok_shield.nft.constants import DNSMASQ_BIND_DEFAULT, PASTA_DNS
 from tests.testnet import (
     ALLOWED_TARGET_DOMAIN,
-    ALLOWED_TARGET_HTTP,
+    ALLOWED_TARGET_HTTPS_PORT,
+    ALLOWED_TARGET_IPS,
     BLOCKED_TARGET_HTTP,
     GOOGLE_DNS_DOMAIN,
     GOOGLE_DNS_IP,
@@ -43,7 +44,7 @@ from ..conftest import (
 )
 from ..helpers import (
     assert_blocked,
-    assert_reachable,
+    assert_connectable,
     exec_in_container,
     start_shielded_container,
 )
@@ -313,13 +314,13 @@ class TestDnsmasqInContainer:
 
         allow() registers the domain's nftset line and the in-container
         lookup drives dnsmasq, whose reply populates the allow sets — the
-        dnsmasq tier's whole point.  A raw-IP fetch with nothing allowed
+        dnsmasq tier's whole point.  A raw-IP connection with nothing allowed
         would bypass DNS and assert an unpopulated set.
         """
         name, _sd, shield = dnsmasq_container
         shield.allow(name, ALLOWED_TARGET_DOMAIN)
         exec_in_container(name, "nslookup", ALLOWED_TARGET_DOMAIN)
-        assert_reachable(name, ALLOWED_TARGET_HTTP)
+        assert_connectable(name, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT)
 
     def test_blocked_target_is_denied(self, dnsmasq_container) -> None:
         """Traffic to non-allowed targets is denied by nft."""
