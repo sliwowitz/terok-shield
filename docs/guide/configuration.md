@@ -104,6 +104,12 @@ A shared host cache under `<state root>/dns-cache/` (or
 `ShieldConfig.dns_cache_dir`) lets every container with the same allowlist
 reuse one resolution; a resolve where every domain failed is never shared.
 
+Force a refresh of a container's resolution caches, even when they are fresh:
+
+```bash
+terok-shield resolve my-container --force
+```
+
 ### dnsmasq binary
 
 Shield finds dnsmasq on the current host `PATH`. To run a dnsmasq
@@ -113,12 +119,6 @@ that is not an executable file stops the launch.
 
 If a runtime omits `PATH` (not merely leaves it empty), hooks use setup's
 captured search path instead.
-
-Force a cache refresh (all tiers):
-
-```bash
-terok-shield resolve my-container --force
-```
 
 ## Environment variables
 

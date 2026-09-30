@@ -9,11 +9,9 @@ import pytest
 
 from terok_shield.validation import (
     SAFE_CONTAINER,
-    SAFE_NAME,
     parse_entries,
     validate_container_id,
     validate_container_name,
-    validate_safe_name,
 )
 
 from ..testfs import FORBIDDEN_ABSOLUTE, FORBIDDEN_TRAVERSAL
@@ -53,34 +51,6 @@ def test_validate_container_name_rejects_unsafe_names(value: str) -> None:
     """``validate_container_name()`` rejects traversal and shell metacharacters."""
     with pytest.raises(ValueError):
         validate_container_name(value)
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param("dev-standard", id="simple"),
-        pytest.param("my.profile-v2", id="dots-dashes"),
-    ],
-)
-def test_validate_safe_name_accepts_valid_names(value: str) -> None:
-    """``validate_safe_name()`` preserves safe profile names."""
-    assert validate_safe_name(value) == value
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param("_hidden", id="leading-underscore"),
-        pytest.param(".hidden", id="leading-dot"),
-        pytest.param("-flag", id="leading-dash"),
-        pytest.param("", id="empty"),
-        pytest.param(FORBIDDEN_TRAVERSAL, id="path-traversal"),
-    ],
-)
-def test_validate_safe_name_rejects_unsafe_names(value: str) -> None:
-    """``validate_safe_name()`` is stricter than container-name validation."""
-    with pytest.raises(ValueError):
-        validate_safe_name(value)
 
 
 @pytest.mark.parametrize(
@@ -149,9 +119,7 @@ def test_parse_entries(text: str, expected: list[str]) -> None:
     ("pattern", "value", "matches"),
     [
         pytest.param(SAFE_CONTAINER, "_test", True, id="container-allows-underscore-prefix"),
-        pytest.param(SAFE_NAME, "_test", False, id="safe-name-rejects-underscore-prefix"),
         pytest.param(SAFE_CONTAINER, "test\nname", False, id="container-rejects-newline"),
-        pytest.param(SAFE_NAME, "test\nname", False, id="safe-name-rejects-newline"),
     ],
 )
 def test_regex_patterns(pattern: re.Pattern[str], value: str, matches: bool) -> None:

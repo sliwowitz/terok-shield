@@ -8,9 +8,10 @@ bundled directories.  User profiles override bundled ones with the
 same name, so site-specific customisation works without forking.
 
 Profiles are unified ``+``/``-`` policy files; a loaded profile yields
-its admitted (``+``) targets.  The bundled set ships under
-``resources/examples`` as low-value samples — the real default content
-is owned by terok-executor and terok.
+its admitted (``+``) targets.  The bundled profiles ship under
+``resources/examples`` as samples a caller names explicitly; the curated
+egress sets belong to terok, and the OS-package and provider hosts to
+terok-executor.
 """
 # WAYPOINT: Shield (__init__), HookMode (hooks.mode)
 
@@ -18,7 +19,6 @@ from importlib import resources as importlib_resources
 from pathlib import Path
 
 from .policy import parse_policy
-from .validation import validate_safe_name
 
 _BUNDLED_PACKAGE = "terok_shield.resources.examples"
 
@@ -51,12 +51,14 @@ class ProfileLoader:
         User profiles take precedence over bundled profiles.
 
         Raises:
-            ValueError: If the name contains path separators or traversal.
-            FileNotFoundError: If the profile does not exist.
+            UnknownProfileError: If no profile carries *name*; the message
+                names the available profiles.
         """
-        path = self._find_profile(name)
+        profiles = self._profile_paths()
+        path = profiles.get(name)
         if path is None:
-            raise FileNotFoundError(f"Profile not found: {name!r}")
+            available = ", ".join(sorted(profiles)) or "none"
+            raise UnknownProfileError(f"Unknown profile {name!r}; available profiles: {available}")
         return [e.target for e in parse_policy(path.read_text()) if e.action == "+"]
 
     def compose_profiles(self, names: list[str]) -> list[str]:
@@ -65,8 +67,7 @@ class ProfileLoader:
         Preserves insertion order (first occurrence wins).
 
         Raises:
-            ValueError: If any name contains path separators or traversal.
-            FileNotFoundError: If any named profile does not exist.
+            UnknownProfileError: If any name carries no profile.
         """
         seen: set[str] = set()
         result: list[str] = []
@@ -79,24 +80,30 @@ class ProfileLoader:
 
     def list_profiles(self) -> list[str]:
         """List available profile names (bundled + user, deduplicated)."""
-        names: set[str] = set()
-        for directory in (self._bundled_dir, self._user_dir):
-            if directory.is_dir():
-                names.update(f.stem for f in directory.glob("*.txt"))
-        return sorted(names)
+        return sorted(self._profile_paths())
 
     def _find_profile(self, name: str) -> Path | None:
         """Find a profile file by name.  User profiles override bundled."""
-        validate_safe_name(name)
-        user_path = self._user_dir / f"{name}.txt"
-        if user_path.is_file():
-            return user_path
-        bundled_path = self._bundled_dir / f"{name}.txt"
-        if bundled_path.is_file():
-            return bundled_path
-        return None
+        return self._profile_paths().get(name)
+
+    def _profile_paths(self) -> dict[str, Path]:
+        """Map each available profile name to its file, user overriding bundled.
+
+        Every name comes from the directory listing, never from a caller, so a
+        requested name is matched against what exists rather than spliced into a
+        path: a separator or a traversal simply names no profile.
+        """
+        return {
+            path.stem: path
+            for directory in (self._bundled_dir, self._user_dir)
+            for path in directory.glob("*.txt")
+        }
+
+
+class UnknownProfileError(ValueError):
+    """A requested name matches no profile, user or bundled."""
 
 
 def _bundled_dir() -> Path:
-    """Return the path to the bundled DNS allowlists directory."""
+    """Return the path to the bundled example profiles directory."""
     return Path(str(importlib_resources.files(_BUNDLED_PACKAGE)))
