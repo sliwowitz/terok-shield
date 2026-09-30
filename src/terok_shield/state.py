@@ -86,14 +86,14 @@ hook and package must agree on this protocol.
 Current shape (v18): symbolic dnsmasq launch choice is separate from live
 process identity. Global hooks are setup-owned, not per-container files.
 
+v17: ``dnsmasq.bin`` records the dnsmasq binary the OCI hook launches.
+
 v16: v15 plus two derived seed caches —
 ``override_resolved.ips`` (t10 break-glass) and ``deny_resolved.ips``
-(t20 security-deny).  Both tiers are now statically resolved, so each is
-repopulated *by address* on every ``shield down``/``up`` rebuild instead
-of depending on the DNS plane to re-learn it.  (v15
-replaced the six v14 split allow/deny files with the tiered ``policy/``
-bundle of unified ``+``/``-`` files plus the derived ``resolved.ips``
-cache.)  Earlier shapes are recoverable via
+(t20 security-deny), so both tiers are repopulated *by address* on every
+``shield down``/``up`` rebuild; v15 replaced the six v14 split allow/deny
+files with the tiered ``policy/`` bundle of unified ``+``/``-`` files plus
+the derived ``resolved.ips`` cache.)  Earlier shapes are recoverable via
 ``git log -L /^BUNDLE_VERSION/:src/terok_shield/state.py``.
 """
 
