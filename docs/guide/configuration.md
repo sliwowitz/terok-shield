@@ -45,7 +45,11 @@ Each container gets an isolated state bundle under `containers/`:
         │   ├── 40-project-allow    #   → nft set t40_project_allow (project allowlist)
         │   └── live                #   Runtime allow/deny overlay (+/- lines)
         ├── resolved.ips            # Resolved allow IPs (t40 seed; every tier but dnsmasq-live)
+        ├── override_resolved.ips   # Override names, each with its addresses (t10 seed)
+        ├── deny_resolved.ips       # Security-tier names, each with its addresses (t20 seed)
+        ├── live_deny_resolved.ips  # policy/live denied names, each with its addresses (t20 seed)
         ├── ruleset.nft             # Pre-generated nft ruleset (gateways baked in)
+        ├── override.expiry         # Expiring override addresses + deadlines (the hook times them)
         ├── dnsmasq.conf            # Generated dnsmasq config (dnsmasq tiers)
         ├── dnsmasq.command         # Launch command, resolved on each start
         ├── dnsmasq.pid             # dnsmasq PID (dnsmasq tiers)
@@ -53,6 +57,7 @@ Each container gets an isolated state bundle under `containers/`:
         ├── resolv.conf             # Bind-mounted /etc/resolv.conf (every tier)
         ├── upstream.dns            # Persisted upstream DNS address
         ├── dns.tier                # Persisted active DNS tier
+        ├── audit.enabled           # Creation-time audit flag (the NFLOG reader honours it)
         └── audit.jsonl             # Per-container audit log
 ```
 
@@ -62,13 +67,17 @@ Each container gets an isolated state bundle under `containers/`:
 
 | File | Written by | Purpose |
 |------|-----------|---------|
-| `ruleset.nft` | `pre_start()` | Pre-generated nft ruleset applied by the hook (gateways baked in) |
-| `policy/10-override` | `pre_start()` | Break-glass allow tier (`t10_override`) |
+| `ruleset.nft` | `pre_start()` | Pre-generated nft ruleset applied by the hook (gateways baked in; only the overrides that never expire) |
+| `override.expiry` | `pre_start()` | Expiring override addresses with absolute deadlines; the hook times each one when it applies the ruleset |
+| `policy/10-override` | `pre_start()` / `override()` / `revoke_override()` | Break-glass allow tier (`t10_override`); a line's `%expires` is its kernel-enforced expiry |
 | `policy/20-security-deny` | `pre_start()` / `deny()` | Vault-host + operator deny tier (`t20_security_deny`) |
 | `policy/30-provider-allow` | `pre_start()` | Provider-egress allow tier (`t30_provider_allow`) |
 | `policy/40-project-allow` | `pre_start()` | Project allowlist tier (`t40_project_allow`) — authored domains and IPs |
 | `policy/live` | `allow()` / `deny()` | Runtime allow/deny overlay (`+`/`-` lines; a later verdict flips an earlier one) |
 | `resolved.ips` | `pre_start()` / `resolve()` | Resolved allow IPs seeding `t40_project_allow` (every tier but `dnsmasq-live`) |
+| `override_resolved.ips` | `pre_start()` / `resolve()` | One line per override name with the addresses it resolved to, seeding `t10_override` (every tier) |
+| `deny_resolved.ips` | `pre_start()` / `resolve()` / `up()` / `down()` | One line per security-tier name with its addresses, seeding `t20_security_deny` — what a live `allow()` may never lift; a name that answers nothing at a refresh keeps its addresses |
+| `live_deny_resolved.ips` | `pre_start()` / `resolve()` / `up()` / `down()` | One line per name denied in `policy/live` with its addresses, also seeding `t20_security_deny` — the operator's own, liftable by `allow()` |
 | `dnsmasq.conf` | `pre_start()` | Generated dnsmasq configuration (dnsmasq tiers) |
 | `dnsmasq.command` | `pre_start()` | Requested launch command: `dnsmasq` or the configured `dnsmasq_path` |
 | `dnsmasq.pid` | OCI hook | dnsmasq PID for lifecycle management |
@@ -76,6 +85,7 @@ Each container gets an isolated state bundle under `containers/`:
 | `resolv.conf` | `pre_start()` | Points container DNS at dnsmasq, or at the upstream forwarder on the tiers without it |
 | `upstream.dns` | `pre_start()` | Persisted upstream DNS forwarder address |
 | `dns.tier` | `pre_start()` | Persisted tier (`dnsmasq-live`, `dnsmasq-static`, `lookup`, or `getent`) |
+| `audit.enabled` | `pre_start()` | The creation-time audit flag (`true` / `false`); the NFLOG reader writes no audit lines when it is `false`, and `harvest()` reports it, so an empty harvest is never mistaken for an all-clear |
 | `audit.jsonl` | Hook + Shield methods | Per-container audit log |
 
 ### Config directory

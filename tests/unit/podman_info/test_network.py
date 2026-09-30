@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from terok_shield.nft.constants import PASTA_HOST_LOOPBACK_MAP
 from terok_shield.podman_info.network import (
     _parse_network_cmd_options,
+    host_loopback_addresses,
     parse_resolv_conf,
     parse_slirp4netns_cidr,
     slirp4netns_gateway,
@@ -19,6 +21,7 @@ from tests.testnet import (
     SLIRP4NETNS_CIDR_DEFAULT,
     SLIRP4NETNS_DNS,
     SLIRP4NETNS_GATEWAY,
+    SLIRP4NETNS_GATEWAY_V6,
     TEST_CUSTOM_CIDR_10_1,
     TEST_CUSTOM_CIDR_172,
     TEST_CUSTOM_CIDR_192,
@@ -124,3 +127,41 @@ class TestSlirp4netnsGateway:
         conf = tmp_path / "containers.conf"
         conf.write_text('engine = "scalar-not-table"\n')
         assert _parse_network_cmd_options(conf) == []
+
+
+# ── host_loopback_addresses ───────────────────────────
+
+
+class TestHostLoopbackAddresses:
+    """Where ``host.containers.internal`` takes a container, per network mode."""
+
+    def test_pasta_maps_the_host_loopback(self) -> None:
+        """pasta's ``--map-host-loopback`` address, inside the hard-deny floor."""
+        assert host_loopback_addresses("pasta") == {PASTA_HOST_LOOPBACK_MAP}
+
+    def test_slirp4netns_forwards_its_gateway(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``allow_host_loopback`` makes the gateway, both families, the host's loopback."""
+        monkeypatch.setattr("terok_shield.podman_info.network._SYSTEM_CONF_PATHS", ())
+        assert host_loopback_addresses("slirp4netns") == {
+            SLIRP4NETNS_GATEWAY,
+            SLIRP4NETNS_GATEWAY_V6,
+        }
+
+    def test_slirp4netns_follows_a_custom_cidr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gateway moves with ``containers.conf``'s ``cidr=``, exactly as the ruleset's does."""
+        conf = tmp_path / "containers" / "containers.conf"
+        conf.parent.mkdir()
+        conf.write_text(f'[engine]\nnetwork_cmd_options = ["cidr={TEST_CUSTOM_CIDR_192}"]\n')
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        monkeypatch.setattr("terok_shield.podman_info.network._SYSTEM_CONF_PATHS", ())
+        assert host_loopback_addresses("slirp4netns") == {
+            TEST_CUSTOM_GATEWAY_192,
+            SLIRP4NETNS_GATEWAY_V6,
+        }
+
+    @pytest.mark.parametrize("mode", ["", "bridge"])
+    def test_an_unrecorded_or_unknown_mode_has_none(self, mode: str) -> None:
+        """Nothing recorded, nothing known: no address to treat as the host."""
+        assert host_loopback_addresses(mode) == frozenset()

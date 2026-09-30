@@ -21,6 +21,7 @@ import importlib as _importlib
 import logging
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from importlib.metadata import PackageNotFoundError, version as _meta_version
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,14 +30,24 @@ from typing import TYPE_CHECKING
 from .config import (
     WILDCARDS_NEED_LIVE_TIER,
     DnsTier,
+    OverrideRevocation,
     ShieldConfig,
     ShieldMode,
     ShieldModeBackend,
+    ShieldReading,
     ShieldRuntime,
     ShieldState,
 )
 from .paths import HOOK_ENTRYPOINT_NAME
-from .state import StateBundle, recorded_dns_tier
+from .policy import validate_target
+from .state import (
+    RotationRisk,
+    SecurityTierRefusal,
+    StateBundle,
+    recorded_container_id,
+    recorded_dns_tier,
+    recorded_rotation_risk,
+)
 from .util import is_ip as _is_ip
 
 if TYPE_CHECKING:
@@ -46,6 +57,7 @@ if TYPE_CHECKING:
     from .audit import AuditLogger
     from .commands import COMMANDS
     from .dns.resolver import DnsResolver
+    from .harvest import HarvestEntry, HarvestReport
     from .hooks.install import (
         HooksInstaller,
         ensure_user_hooks_dir_configured,
@@ -62,6 +74,8 @@ if TYPE_CHECKING:
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "BinaryCheck": ("terok_shield.prereqs", "BinaryCheck"),
     "ExecError": ("terok_shield.run", "ExecError"),
+    "HarvestEntry": ("terok_shield.harvest", "HarvestEntry"),
+    "HarvestReport": ("terok_shield.harvest", "HarvestReport"),
     "HooksInstaller": ("terok_shield.hooks.install", "HooksInstaller"),
     "ensure_user_hooks_dir_configured": (
         "terok_shield.hooks.install",
@@ -128,6 +142,30 @@ class EnvironmentCheck:
     issues: list[str] = field(default_factory=list)
     needs_setup: bool = False
     setup_hint: str = ""
+
+
+@dataclass(frozen=True)
+class AllowResult:
+    """What [`Shield.allow`][terok_shield.Shield.allow] granted, and when it takes effect.
+
+    A grant lands one of two ways, and a caller reporting it to an operator
+    has to say which: a running container takes it live, a stopped one only
+    at its next start.
+
+    Attributes:
+        target: The domain or IP the caller asked to allow.
+        ips: The addresses the running ruleset admits now.  Empty when the
+            grant waits for the next start — or when every live attempt
+            failed, which a caller should treat as nothing allowed.
+        live: True when the grant went to the container's running ruleset;
+            False when podman said no process runs for the container — it is
+            stopped, or gone — so the grant sits in its runtime overlay and
+            applies at its next start.
+    """
+
+    target: str
+    ips: tuple[str, ...] = ()
+    live: bool = True
 
 
 class Shield:
@@ -333,13 +371,54 @@ class Shield:
         )
         self.audit.log_event(container, "refresh", detail=f"profiles={','.join(profiles)}")
 
-    def allow(self, container: str, target: str) -> list[str]:
-        """Live-allow a domain or IP for a running container."""
+    def allow(self, container: str, target: str) -> AllowResult:
+        """Allow a domain or IP for *container*: live when it runs, from its next start when not.
+
+        Tier authority is settled before anything changes.  A target the t20
+        security tier refuses — that very host, a name under one of its
+        domains, or anything that resolves to one of its addresses — raises
+        [`SecurityTierRefusal`][terok_shield.state.SecurityTierRefusal] and
+        nothing is granted, not even the addresses that were not shared: a
+        security-tier host is reachable through a break-glass override only.
+        The refusal lands in the audit trail as ``allow_refused``.
+
+        A running container takes the grant live, address by address — an nft
+        failure is logged and skipped — and a domain also joins its dnsmasq
+        config, so the addresses the name rotates to follow.  A stopped
+        container gets the target recorded in its runtime overlay instead, for
+        its next start to apply.  The
+        [`AllowResult`][terok_shield.AllowResult] says which of the two happened.
+        A container counts as stopped only when podman says it has no process
+        — or has no such container, which a recreate under the same name
+        starts from the same bundle — never because its ruleset could not be
+        read: a running one whose listing failed, or that carries no ruleset,
+        takes the live path, where a failure is reported.
+
+        Raises:
+            SecurityTierRefusal: When the security tier refuses the target.
+            ShieldNeedsSetup: A ``*.`` target on a tier that resolves names once.
+            RuntimeError: When neither the ruleset nor podman says whether the
+                container runs — with nothing changed — or a stopped
+                container's bundle was never prepared by a launch.  Also, on
+                a running container with the addresses already added, when
+                its dnsmasq cannot reload to follow the name.
+        """
         from .run import ExecError
 
         self._refuse_static_wildcard(target)
         is_domain = not _is_ip(target)
         ips = [target] if not is_domain else self.dns.resolve_domains([target])
+        try:
+            self._mode.check_security_tier(target, ips)
+        except SecurityTierRefusal as refusal:
+            self.audit.log_event(
+                container, "allow_refused", dest=refusal.address or target, detail=str(refusal)
+            )
+            raise
+        if self._mode.confirmed_posture(container) is ShieldState.OFFLINE:
+            self._mode.allow_offline(target)
+            self.audit.log_event(container, "allowed", dest=target, detail="at next start")
+            return AllowResult(target=target, live=False)
         allowed: list[str] = []
         for ip in ips:
             try:
@@ -352,7 +431,99 @@ class Shield:
         # Update dnsmasq config for domain targets (so future IP rotations are captured)
         if is_domain and allowed:
             self._mode.allow_domain(container, target)
-        return allowed
+        return AllowResult(target=target, ips=tuple(allowed))
+
+    def override(
+        self, container: str, target: str, expires: date | str, *, reason: str
+    ) -> list[str]:
+        """Break glass for *target* on a running container, valid through *expires*, for *reason*.
+
+        The one way past the security tier on a live task — direct reach to a
+        vault-relayed provider host, a LAN service in a private range — and
+        deliberately narrow: *target* joins the t10 override set with a kernel
+        timeout, so the kernel itself ends it when *expires* runs out (a date
+        holds through that day, host local time).  Agents keep using the
+        vault for key relaying; the override only adds the direct route.  The
+        hard-deny floor (link-local, cloud metadata) is never overridden, nor
+        is the host's own loopback, which a ``+localhost:PORT`` grant reaches.
+
+        A break-glass needs both a reason and an expiry, and the shield
+        enforces both: an empty *reason* is refused like a passed *expires*.
+        The reason is recorded on the tier entry and in the audit trail
+        (``override``), which takes the grant the moment the kernel does —
+        before the dnsmasq reload a domain needs, so a failed reload never
+        leaves a grant that holds without a record.  The tier entry is
+        written only after that: the swap is computed from the tier as the
+        grant will leave it, held in memory, so the tier never records a
+        grant the kernel did not take.  A grant and a
+        [`revoke_override`][terok_shield.Shield.revoke_override] never
+        interleave: each holds the container's t10 lock from its read of the
+        tier through its swap, and a grant resolves its names before taking
+        it, so a revoke never waits on a resolver.
+
+        The grant survives ``shield down``/``up``, re-timed at each rebuild,
+        until it expires or the next restart re-derives the tier from the
+        orchestrator's policy — persist it there (``shield.override``) for it
+        to outlive the task's run.
+
+        Returns:
+            The addresses opened: the target itself for an IP or a CIDR.
+
+        Raises:
+            ValueError: For a target no override can carry, an *expires*
+                that is no date or already passed, or an empty *reason*.
+            RuntimeError: When *container* has no running ruleset to take it,
+                or the target resolves to no address — or, with the grant
+                already holding in the kernel, when the tier or the override
+                cache cannot record it (the message says what the next
+                rebuild seeds in its place) or dnsmasq cannot reload to open
+                the name.
+        """
+        when = expires.isoformat() if isinstance(expires, date) else expires
+        return self._mode.override(container, target, when, reason=reason)
+
+    def revoke_override(self, container: str, target: str) -> OverrideRevocation:
+        """End *target*'s break-glass on *container* now, before its expiry runs out.
+
+        The way to close a door [`override`][terok_shield.Shield.override]
+        opened, or one the orchestrator authored as ``shield.override``.  Only
+        an override still in force can be revoked: a target with none, or
+        one whose expiry already passed, raises instead of passing for a
+        success.
+
+        The revoke is ordered to fail closed.  The tier entry goes first, so
+        no ``shield down``/``up`` re-opens the override, and the files a
+        plain ``podman start`` replays are rewritten without it.  Only then
+        is it dropped from the running ruleset's t10 set, in one nft
+        transaction that keeps every other override.  A name's dnsmasq
+        sinkhole punch-through closes too.  The revoke is audited as
+        ``override_revoked`` once nothing running holds the override.  A
+        stopped container's bundle is rewritten for its next start — and a
+        container counts as stopped only when podman says it has no process,
+        or has no such container, never because its ruleset could not be read.
+
+        A revoke stops new connections; connections already open keep running
+        until they close, as they do when the override expires.  It holds
+        until the next restart re-derives the tier from the orchestrator's
+        policy: an override authored there comes back unless it is removed
+        there too.
+
+        Returns:
+            An [`OverrideRevocation`][terok_shield.config.OverrideRevocation]
+            naming the addresses closed, those another override still holds
+            open, and whether the container was running.
+
+        Raises:
+            ValueError: For text that is no domain, IP or CIDR, and for
+                ``localhost``, whose ``+localhost:PORT`` grants are no override.
+            RuntimeError: When *target* has no override in force, or neither
+                the ruleset nor podman says whether the container runs —
+                with nothing changed, in both cases.  Also, with the record
+                already gone, when nft cannot drop it from the running
+                ruleset, or no dnsmasq reloads to sinkhole its name again —
+                the message says which.
+        """
+        return self._mode.revoke_override(container, target)
 
     def deny(self, container: str, target: str) -> list[str]:
         """Live-deny a domain or IP for a running container."""
@@ -432,6 +603,66 @@ class Shield:
         self.audit.log_event(container, "shield_up")
         self.hub_events.shield_up(container, container_id, dossier=self._read_dossier())
 
+    def harvest(self) -> "HarvestReport":
+        """Summarise what this container reached for, from its audit log.
+
+        A read, not a policy change: the entries say what was refused, what
+        the timed window let through and what the DOWN posture accepted only
+        because the shield was down — each with the tier that stands in the
+        way and the remedies that could lift it — and promoting any of them
+        stays an explicit act elsewhere.  The report also says whether audit
+        was on for this container at all: with it off, the reader recorded
+        nothing, and an empty harvest is no all-clear.
+        """
+        from .harvest import harvest
+
+        return harvest(self.config.state_dir)
+
+    def bypass(self, container: str, duration: str | None = None) -> str:
+        """Open the timed allow-all window and return the duration granted.
+
+        *duration* is an nft timeout; ``None`` takes
+        [`bypass_duration`][terok_shield.ShieldConfig.bypass_duration] from the
+        config.  The window lives in the kernel: it closes when the element
+        expires, a rebuild or a restart closes it sooner, and nothing renews it.
+        It accepts what the allowlist would refuse — never the security tier,
+        the private ranges or the hard-deny floor, which all sit above it in
+        the chain — and it opens in the UP posture only, the one chain that
+        reads it.
+
+        Raises:
+            RuntimeError: When the container's posture is not UP.
+            ValueError: When *duration* is not an nft timeout.
+        """
+        duration = duration or self.config.bypass_duration
+        self._mode.arm_window(container, duration)
+        self.audit.log_event(container, "bypass_armed", detail=f"duration={duration}")
+        return duration
+
+    def bypass_off(self, container: str) -> None:
+        """Close the timed allow-all window before its timeout runs out."""
+        self._mode.disarm_window(container)
+        self.audit.log_event(container, "bypass_disarmed")
+
+    def bypass_remaining(self, container: str) -> int | None:
+        """Whole seconds left on the timed allow-all window, or ``None`` when none is open.
+
+        The window half of [`inspect`][terok_shield.Shield.inspect]; a caller
+        that also shows the posture reads both from that one listing instead.
+        """
+        return self.inspect(container).bypass_remaining
+
+    def inspect(self, container: str) -> ShieldReading:
+        """Read *container*'s posture and its timed window from one ruleset listing.
+
+        One ``nft -T list table`` inside the container's netns answers both, so
+        a surface showing both — a status line, a task pane — pays for one
+        listing, and the two are never read a moment apart.  The countdown is
+        the kernel's own, in whole seconds, and reported only for UP: the one
+        posture whose chain reads the window set.
+        """
+        return self._mode.inspect(container)
+
     def reset(self, container: str) -> None:
         """Forget DNS-learned allow state, keeping the authored policy seeds.
 
@@ -491,8 +722,9 @@ class Shield:
 
         Refreshes the caches [`pre_start`][terok_shield.Shield.pre_start] and
         [`refresh`][terok_shield.Shield.refresh] fill — the allow cache on the
-        tiers without DNS interception, the t10 override cache and the t20
-        deny cache — without rewriting any tier.  *force* re-resolves even
+        tiers without DNS interception, the t10 override cache and the two t20
+        deny caches (the security tier's, the runtime overlay's) — without
+        rewriting any tier.  *force* re-resolves even
         when a cache is fresh.  Returns the resolved allow IPs; the
         ``dnsmasq-live`` tier resolves per query, so it returns none.
 
@@ -524,6 +756,7 @@ class Shield:
 # (``terok_shield.prereqs`` / ``.run`` / ``.hooks.install``) for concrete
 # types, so they need not be part of the stable facade.
 __all__ = [
+    "AllowResult",
     "ArgDef",
     "COMMANDS",
     "CommandDef",
@@ -531,13 +764,22 @@ __all__ = [
     "EnvironmentCheck",
     "ExecError",
     "HOOK_ENTRYPOINT_NAME",
+    "HarvestEntry",
+    "HarvestReport",
     "HooksInstaller",
+    "OverrideRevocation",
+    "RotationRisk",
+    "SecurityTierRefusal",
     "Shield",
     "ShieldConfig",
     "ShieldMode",
+    "ShieldReading",
     "ShieldRuntime",
     "ShieldState",
     "ensure_user_hooks_dir_configured",
+    "recorded_container_id",
     "recorded_dns_tier",
+    "recorded_rotation_risk",
     "user_hooks_dir_configured",
+    "validate_target",
 ]

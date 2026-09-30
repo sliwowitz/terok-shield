@@ -33,6 +33,15 @@ BLOCKED_SUBDOMAIN = "api.evil.example.com"  # Subdomain of BLOCKED_DOMAIN
 # ``krun_guest``) have not silently grown a developer-class destination.
 DEV_PYPI_DOMAIN = "pypi.org"
 
+# Security-tier (t20) names: a vault-relayed provider host the orchestrator
+# denies direct egress to, a name under it, and the domain above it.
+VAULT_HOST = "api.vault.example.net"  # A security-tier host — refused by name
+VAULT_SUBDOMAIN = "eu.api.vault.example.net"  # Under VAULT_HOST — refused by suffix
+VAULT_PARENT_DOMAIN = "vault.example.net"  # Above VAULT_HOST — not refused by name
+
+# RFC 6761: every name under .localhost stays on the loopback — never rotates.
+LOCALHOST_SUBDOMAIN = "app.localhost"
+
 # Adversarial domain shapes used by the wire-format sanitiser tests.
 # Centralised here so SonarCloud only flags the constant definitions,
 # not every call site that needs to verify defence against them.
@@ -54,6 +63,11 @@ TEST_IP4 = "203.0.113.1"
 
 # CIDR form for tests that need network notation
 TEST_NET1 = "192.0.2.0/24"
+TEST_NET1_HOST = "192.0.2.77"  # Inside TEST_NET1 — a host a wider override covers
+
+# The default routes the timed bypass window adds — "every destination" per family
+ANY_IPV4 = "0.0.0.0/0"
+ANY_IPV6 = "::/0"
 BROAD_CIDR_8 = "203.0.0.0/8"  # Broad CIDR (prefix <= 16) for classification tests
 
 # ── RFC 1918 / link-local addresses (used to test blocking rules) ──
@@ -67,6 +81,9 @@ KRUN_DNSMASQ_BIND = "169.254.1.3"  # Link-local dnsmasq bind under the krun runt
 # ── slirp4netns default network (10.0.2.0/24) ──
 
 SLIRP4NETNS_GATEWAY = "10.0.2.2"  # Default slirp4netns gateway
+SLIRP4NETNS_GATEWAY_V6 = (
+    "fd00::2"  # slirp4netns IPv6 gateway (fd00:: + 2) — the host's loopback too
+)
 SLIRP4NETNS_DNS = "10.0.2.3"  # Default slirp4netns DNS forwarder
 SLIRP4NETNS_CIDR_DEFAULT = "10.0.2.0/24"  # Default slirp4netns CIDR
 
@@ -157,6 +174,7 @@ EXPECTED_PRIVATE_RANGES: tuple[str, ...] = (
     "fe80::/10",
 )
 # ── Cloud metadata (IMDS) endpoints — the absolute hard-deny floor ──
+AWS_IMDS_V4 = "169.254.169.254"  # Cloud metadata endpoint (IPv4 link-local)
 AWS_IMDS_V6 = "fd00:ec2::254"  # AWS IPv6 metadata endpoint (ULA space)
 
 # ── Normalization test pairs (non-canonical → canonical) ──

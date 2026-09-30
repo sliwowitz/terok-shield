@@ -26,6 +26,7 @@ _RESOURCES = Path(__file__).parents[2] / "src" / "terok_shield" / "resources"
 _STDLIB = {
     "__future__",
     "contextlib",
+    "ipaddress",
     "json",
     "os",
     "pathlib",

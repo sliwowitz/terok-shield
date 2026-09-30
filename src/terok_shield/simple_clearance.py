@@ -205,7 +205,7 @@ class ClearanceSession:
         if not self._queue:
             return
         head = self._queue[0]
-        ok = self._apply_verdict(head, action)
+        ok, reason = self._apply_verdict(head, action)
         if ok:
             self._queue.pop(0)
             mark = "\u2713" if action == "allow" else "\u2717"
@@ -213,11 +213,18 @@ class ClearanceSession:
             label = f"{head.dest} ({head.domain})" if head.domain else head.dest
             print(f"  {mark} {verb} {label}")
         else:
-            print(f"  ! verdict failed for {head.dest} (retry with a/d)")
+            because = f": {reason}" if reason else ""
+            print(f"  ! verdict failed for {head.dest}{because} (retry with a/d)")
         self._prompt_head()
 
-    def _apply_verdict(self, pending: _Pending, action: str) -> bool:
-        """Apply *action* to *pending* by shelling out to ``terok-shield <action>``."""
+    def _apply_verdict(self, pending: _Pending, action: str) -> tuple[bool, str]:
+        """Apply *action* to *pending* by shelling out to ``terok-shield <action>``.
+
+        Returns whether the verdict took and, when it did not, the last line
+        the verb wrote to stderr \u2014 a security-tier refusal says there why
+        retrying the allow cannot help and what can, so the operator must see
+        it rather than a bare failure.
+        """
         # Under Nix (and other setups where ``sys.executable`` is a wrapper
         # that normally rewrites the env on startup) spawning ``python -m
         # terok_shield.cli`` from inside a running terok_shield process
@@ -231,7 +238,11 @@ class ClearanceSession:
             capture_output=True,
             env=child_process_env(),
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True, ""
+        lines = (result.stderr or b"").decode(errors="replace").strip().splitlines()
+        last = lines[-1] if lines else ""
+        return False, "".join(ch if ch.isprintable() else "?" for ch in last)
 
     def _prompt_head(self) -> None:
         """Print the allow/deny prompt for the head-of-queue pending event."""

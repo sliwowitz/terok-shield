@@ -72,9 +72,13 @@ The mechanism:
   range reject
 - On deny: remove from the `t40_project_allow` set, add to the
   `t20_security_deny` set, upsert `-target` into `policy/live`
-- On allow: un-deny from the `t20_security_deny` set if currently denied,
-  add to the `t40_project_allow` set, upsert `+target` into `policy/live`
-  (flipping any prior deny of the same target)
+- On allow: refuse outright when the security tier refuses the target (by
+  name, by a domain above it, or by any address it resolves to — see *Tier
+  authority* below); otherwise lift the operator's own runtime deny from the
+  `t20_security_deny` set if there is one, add to the `t40_project_allow` set,
+  and upsert `+target` into `policy/live` (flipping any prior deny of the same
+  target).  A stopped container gets the `policy/live` upsert alone, which its
+  next start applies.
 - On reload (`shield_up`): compute the effective allow IPs as the composed
   `policy/` tiers plus the runtime overlay, minus the security-deny tier, and
   repopulate the deny sets from the composed denies
@@ -82,6 +86,30 @@ The mechanism:
 Policy composition happens in `state.py` (`StateBundle.read_effective_ips()`)
 before ruleset generation; `nft/rules.py` receives a flat IP list with denied
 entries already subtracted.
+
+### Tier authority
+
+The `t20_security_deny` set carries two kinds of deny that look alike in the
+kernel: the security tier (`policy/20-security-deny` — vault-relayed provider
+hosts the orchestrator denies direct egress to) and the operator's runtime
+denies (`-` lines in `policy/live`).  A live allow may lift the second kind,
+never the first: the only way past the security tier is a t10 override,
+authored with a reason and an expiry.  Shield keeps the two apart all the way
+down — the security tier's names resolve into `deny_resolved.ips`, the
+overlay's denied names into `live_deny_resolved.ips` — so every address in the
+set still says which kind put it there.  Both caches keep one line per name,
+and a name that answers nothing at a refresh keeps the addresses it had: one
+timed-out lookup must never drop a vault host's addresses out of the set.
+
+`Shield.allow` settles tier authority before anything changes.  It resolves the
+target, then refuses it with a typed `SecurityTierRefusal` when the security
+tier names it, names a domain above it, or holds one of its addresses — all or
+nothing, so a name that merely shares an address with a vault host (a CDN
+front) is refused whole, the message naming the shared address.  On the DNS
+tiers without dnsmasq nothing sinkholes a vault host's name, so the container
+can reach an address the cached resolution never saw; there the security
+names are re-resolved for the check first.  `allow_ip` repeats the
+address check against the bundle as defence in depth.
 
 ### IP normalization
 
@@ -101,10 +129,15 @@ across state files are reliable regardless of input notation (e.g.
 │   ├── 40-project-allow           #   → nft set t40_project_allow (project allowlist: common sets + git remote + custom)
 │   └── live                       #   runtime allow/deny overlay (folded into its owning tiers)
 ├── resolved.ips                   # derived: resolved allow IPs (the t40 set seed; every tier but dnsmasq-live)
-├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
+├── override_resolved.ips          # derived: one line per t10 override name, with the addresses it resolved to
+├── deny_resolved.ips              # derived: one line per security-tier name, with its addresses (t20 seed; never lifted by a live allow)
+├── live_deny_resolved.ips         # derived: one line per policy/live denied name, with its addresses (t20 seed; the operator's to lift)
+├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in; overrides that never expire)
+├── override.expiry                # derived: expiring override addresses + absolute deadlines (the hook times them)
 ├── upstream.dns                   # persisted upstream DNS address
 ├── dns.tier                       # persisted active DNS tier
 ├── loopback.ports                 # per-container host-loopback TCP ports
+├── audit.enabled                  # creation-time audit flag; the NFLOG reader honours it
 ├── dnsmasq.conf                   # generated dnsmasq configuration (dnsmasq tiers)
 ├── dnsmasq.command                # launch command, resolved on each start
 ├── dnsmasq.pid                    # dnsmasq PID (dnsmasq tiers)
@@ -118,6 +151,45 @@ across state files are reliable regardless of input notation (e.g.
 `terok-shield setup` installs global hooks under `<state_root>/shield/hooks`
 and registers them in `containers.conf`. Task preparation writes only its state
 bundle, so bare Podman starts and restarts retain protection.
+
+### Override expiry
+
+A t10 override line may carry `%expires=<date>` (valid through that day, host
+local time) or an ISO timestamp. Expiry is enforced by the kernel: the
+`t10_override` sets carry the `timeout` flag, and each override address is
+added with `timeout <seconds>s` — the seconds left until its override runs
+out. Each override carries its own expiry, so the override cache is keyed by
+name: an address takes the expiry of the name that resolved to it, the latest
+one when several did, and none when any of them never expires. An address
+inside an override range is left to the range (nft refuses overlapping
+intervals in one transaction).
+
+Authoring (`pre_start`, `refresh`) drops overrides that already ran out
+(`override_expired` in the audit log). `ruleset.nft` carries only the
+overrides that never expire, because it is replayed verbatim at every start;
+the expiring ones go to `override.expiry` as `<address> <deadline>` lines, and
+the OCI hook appends them to the ruleset's transaction with the seconds left at
+that moment. `shield up` / `down` re-seed t10 the same way from the bundle, and
+the live `Shield.override()` swaps the whole set in one transaction — a flush
+plus the new elements — so every element takes its current timeout.  The DNS
+plane trails the kernel: a running dnsmasq keeps the sinkhole punch-through it
+loaded for an override's name, so every `shield up` / `down` compares the
+dnsmasq config the policy calls for now with the one on disk and relaunches
+dnsmasq when they differ — an expired override's name stops resolving there.
+
+### Pinned names: the rotation risk
+
+`RotationRisk` (in `state.py`) is computed on read from the recorded DNS tier
+and the effective policy: the allowlisted names a tier without live DNS pins
+(`allow`), the denied names `lookup` / `getent` pin with no dnsmasq to sinkhole
+them (`deny`), and the override names every tier pins (`override`). IP and CIDR
+entries and the stable local names (`localhost`, `*.localhost`,
+`host.containers.internal`) are never listed. `RotationRisk.lines(posture)`
+words it per posture. `HookMode` records it as audit `note`s at authoring, on
+`shield_up` and on a plain `shield_down`; the CLI verbs print it to stderr; and
+`recorded_rotation_risk(state_dir)` reads it for an orchestrator. On the tiers
+that pin names, `shield_up` / `shield_down` first re-resolve every cache older
+than an hour or than the policy files (best-effort, never forced).
 
 Hooks use setup's isolated Python and require no installed terok packages. Host
 tools follow the current PATH; runtimes that omit PATH use a setup-captured search
@@ -150,7 +222,10 @@ allow_ip(container, ip)
 │
 ├── safe_ip(ip)                 validate + normalize
 │
-├── ip currently denied?
+├── ip in the security tier?    literal t20 entry or deny_resolved.ips
+│   └── yes → SecurityTierRefusal  (nothing changes: break-glass only)
+│
+├── ip denied by the operator?  policy/live "-" or live_deny_resolved.ips
 │   └── yes → nft delete from t20_security_deny set     (un-deny)
 │
 ├── nft add element             add to t40_project_allow set
@@ -207,19 +282,38 @@ lifecycle step logs a separate entry — actions are `setup`, `allowed`,
 Audit logging is best-effort — write failures are logged as warnings and
 ignored to avoid blocking container operations.
 
+The per-container NFLOG reader appends the workload's side of the story: one
+line per destination per 30 seconds for each terminal refusal (`blocked`, also
+raised as a clearance prompt), window accept (`bypass`), accept the DOWN
+postures made only because the shield is down (`down`), and refusal by the
+t20 deny set (`security_deny`) or a range floor (`private_range`). It matches
+log prefixes exactly, never by substring, so a future prefix cannot pass for
+the one action that prompts. A container created with audit disabled records
+`false` in its bundle's `audit.enabled`, and its reader then writes nothing —
+the prompts still flow. `harvest` reads these lines back, classifying each
+target by destination against the bundle's tiers.
+
 ### Kernel per-packet logs
 
 nftables rules log per-packet events via NFLOG (`log group 100`) — written
 to the kernel log and delivered over netlink to userspace consumers
 (`terok-shield watch`, the per-container NFLOG reader):
 
-- `TEROK_SHIELD_ALLOWED:` new connections to the allow set, logged and counted
-  (not rate-limited -- established traffic is accepted earlier in the chain)
-- `TEROK_SHIELD_DENIED:` traffic rejected by the explicit deny set (operator refused)
-- `TEROK_SHIELD_PRIVATE:` non-allowlisted private-range traffic rejected (RFC 1918 + RFC 4193/4291)
-- `TEROK_SHIELD_BLOCKED:` traffic rejected by the terminal default-deny rule (unclassified)
+- `TEROK_SHIELD_ALLOWED:` new connections accepted by an allow tier (t10, t30, t40) in
+  any posture, logged and counted (not rate-limited -- established traffic is
+  accepted earlier in the chain)
+- `TEROK_SHIELD_DENIED:` traffic rejected by the t20 deny set (the security tier's
+  vault-relayed hosts and the operator's runtime denies)
+- `TEROK_SHIELD_PRIVATE:` traffic rejected by a range floor: the t00 hard-deny floor
+  (IPv4 link-local including IMDS, IPv6 link-local, the AWS IPv6 IMDS, and under
+  slirp4netns the gateway — the host's own loopback — past the preamble's ports)
+  or the t20 private ranges (RFC 1918, RFC 4193)
+- `TEROK_SHIELD_BLOCKED:` traffic rejected by the terminal default-deny rule (unclassified),
+  or dropped in quarantine
 - `TEROK_SHIELD_BYPASS:` traffic accepted through the timed bypass window
-- `TEROK_SHIELD_DOWN:` new connections accepted while the shield is down (DOWN or DISENGAGED posture)
+- `TEROK_SHIELD_DOWN:` new connections accepted only because the shield is down (DOWN or
+  DISENGAGED posture) -- the allow tiers log `ALLOWED` ahead of it, so it marks
+  exactly what UP would have refused
 
 ## Public API
 
@@ -236,13 +330,20 @@ shield = Shield(ShieldConfig(state_dir=Path("/path/to/state")))
 | Method | Purpose |
 |--------|---------|
 | `pre_start(container, profiles)` | Verify setup, resolve DNS, return extra podman args |
-| `allow(container, target)` | Live-allow a domain/IP for a running container |
+| `allow(container, target)` | Allow a domain/IP — live on a running container, recorded for the next start on a stopped one; returns an `AllowResult`, raises `SecurityTierRefusal` for a security-tier target |
+| `override(container, target, expires, *, reason)` | Break glass on a running container: a t10 element kernel-timed to the end of *expires*, its non-empty *reason* recorded on the tier and audited when the kernel takes it; never the hard-deny floor or the host's own loopback |
+| `revoke_override(container, target)` | End an override still in force before its expiry, a live grant or an authored one: the tier entry first, then the replayed `ruleset.nft` / `override.expiry`, then one t10 swap; returns an `OverrideRevocation` (addresses closed, addresses another override keeps open, whether the container was running); raises when none is in force |
 | `deny(container, target)` | Live-deny a domain/IP (best-effort) |
 | `down(container, container_id, *, disengaged=False)` | Switch to DOWN: accept and log; keep the hard-deny floor, the security-deny set, and the private-range reject. `disengaged=True` enforces nothing |
 | `up(container, container_id)` | Restore deny-all mode |
 | `quarantine(container)` | Total network blackout (drop all, log dropped traffic) |
 | `state(container)` | Query container shield state (`QUARANTINE`, `UP`, `DOWN`, `DISENGAGED`, `OFFLINE`, `ERROR`) |
+| `inspect(container)` | Posture and, in UP, the bypass window's seconds left, as a `ShieldReading`, from one `nft -T` listing |
+| `bypass(container, duration)` | Open the timed window and return the duration granted — UP only: any other posture raises, since no other chain reads the window set |
+| `bypass_off(container)` | Close the timed window now, with no posture check: it flushes the window set in any ruleset that declares one — UP, DOWN, DISENGAGED, and an `ERROR` ruleset that still does — and raises where none is declared (`QUARANTINE`, `OFFLINE`) |
+| `bypass_remaining(container)` | Whole seconds left on the timed window, counted in UP only. Outside UP it returns `None` whatever the window set holds, so there it says nothing about the window — an `ERROR` ruleset may still hold one, which `bypass_off` closes |
 | `rules(container)` | Return current nft ruleset for a container |
+| `harvest()` | Read the audit log back as a `HarvestReport`: one entry per target the workload reached for, each with the tier in its way and its remedies, plus whether audit was on |
 | `resolve(*, force=False)` | Re-resolve the authored policy into its resolution caches; rewrites no tier |
 | `status()` | Return mode, available profiles, audit config |
 | `check_environment()` | Probe podman/hooks/DNS-tier health for consumers |
@@ -251,6 +352,10 @@ shield = Shield(ShieldConfig(state_dir=Path("/path/to/state")))
 `container_id` on `up` / `down` is the full podman UUID; it routes the
 best-effort shield_up/shield_down hub events to the supervisor's
 per-container socket.
+
+Module-level readers need no `Shield` and no running container — they read the
+bundle: `recorded_dns_tier(state_dir)`, `recorded_container_id(state_dir)` and
+`recorded_rotation_risk(state_dir)`.
 
 `ShieldConfig` is a frozen dataclass with required `state_dir: Path` and
 optional mode, default profiles (empty: no profile applies), loopback ports, profiles dir, audit

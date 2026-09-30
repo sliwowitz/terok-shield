@@ -20,10 +20,14 @@ Keep in sync with the package-side definitions:
 * ``ANN_STATE_DIR``      ↔ ``terok_shield.config.ANNOTATION_STATE_DIR_KEY``
 * ``ANN_VERSION``        ↔ ``terok_shield.config.ANNOTATION_VERSION_KEY``
 * ``META_PATH_FILE_NAME`` ↔ ``terok_shield.state.meta_path_file``
+* ``OVERRIDE_TABLE`` / ``OVERRIDE_SET`` ↔ ``terok_shield.nft.constants.NFT_TABLE`` /
+  ``TIER_OVERRIDE``
+* ``ELEMENT_TIMEOUT_MAX_SECONDS`` ↔ ``terok_shield.nft.constants.ELEMENT_TIMEOUT_MAX_SECONDS``
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import pwd
@@ -40,7 +44,7 @@ ANN_STATE_DIR = "terok.shield.state_dir"
 ANN_VERSION = "terok.shield.version"
 """OCI annotation carrying the bundle version this container was prepared with."""
 
-BUNDLE_VERSION = 18
+BUNDLE_VERSION = 19
 """Wire-protocol version for the hook ↔ pre_start state-bundle contract.
 
 Bumped whenever the on-disk file layout, the hook → reader argv
@@ -48,6 +52,14 @@ shape, or the wire payload changes incompatibly.  The nft hook hard-
 fails on a version mismatch — deliberately no compatibility window and
 no migration: the remedy is re-creating the task container (or
 ``terok setup`` when the installed hooks are older than the package).
+
+v19: ``pre_start`` records the creation-time audit flag as
+``state_dir/audit.enabled``; the NFLOG reader writes no audit lines when
+it says ``false``.  The DOWN postures log the allow tiers ``ALLOWED``
+ahead of their ``DOWN`` catch-all, which the reader now records.  The t10
+override sets carry the ``timeout`` flag; ``state_dir/override.expiry``
+lists the expiring override addresses with their deadlines, and the nft
+hook appends them to the ruleset's transaction, each timed at apply.
 
 v18: ``dnsmasq.command`` holds the symbolic launch choice or explicit operator
 override. ``dnsmasq.bin`` identifies only the current process for cleanup.
@@ -89,6 +101,28 @@ DNSMASQ_BIN_FILE_NAME = "dnsmasq.bin"
 
 DNSMASQ_COMMAND_FILE_NAME = "dnsmasq.command"
 """Symbolic dnsmasq name, or an explicit operator-provided binary override."""
+
+OVERRIDE_EXPIRY_FILE_NAME = "override.expiry"
+"""The t10 override addresses that expire, each with its deadline, for the hook to time.
+
+One ``<address> <deadline>`` line each, the deadline in whole epoch seconds.
+``pre_start`` / ``refresh`` write it beside ``ruleset.nft``, which carries
+only the overrides that never expire.  An element timeout is relative —
+seconds left — and ``ruleset.nft`` is replayed verbatim at every start of
+the container, so a timeout baked into it at authoring would re-grant an
+override for its full original span on a restart days later.  The hook
+reads the absolute deadlines instead and times each element when it applies
+the ruleset (``timed_override_elements``).
+"""
+
+OVERRIDE_TABLE = "inet terok_shield"
+"""The managed nft table, as the override elements name it."""
+
+OVERRIDE_SET = "t10_override"
+"""Base name of the t10 override sets (``_v4`` / ``_v6``)."""
+
+ELEMENT_TIMEOUT_MAX_SECONDS = 99_999_999
+"""Longest element timeout nft takes as a seconds literal; a later deadline is cut to it."""
 
 META_PATH_FILE_NAME = "meta_path"
 """Per-container pointer to the orchestrator's wire-dossier JSON.
@@ -300,6 +334,61 @@ def resolve_dossier_from_meta(meta_path: str | Path) -> dict[str, str]:
     if not isinstance(decoded, dict):
         return {}
     return {str(k): str(v) for k, v in decoded.items() if v}
+
+
+# ── Timed overrides ──────────────────────────────────────
+
+
+def render_override_expiry(deadlines: list[tuple[str, int]]) -> str:
+    """The ``override.expiry`` text for *deadlines*: ``<address> <deadline>`` per line.
+
+    The package writes the file through this, and the hook reads it back
+    through ``timed_override_elements``, so the two sides of the hook
+    boundary share one format.
+    """
+    return "".join(f"{address} {deadline}\n" for address, deadline in deadlines)
+
+
+def timed_override_elements(state_dir: Path, now: float) -> str:
+    """nft commands adding every t10 override still valid at *now*, each timed to its deadline.
+
+    Read from ``override.expiry`` and appended by the hook to the ruleset it
+    applies, in the same transaction.  An element gets the whole seconds its
+    override has left at *now*, so the kernel drops it on time whenever the
+    ruleset is applied — a restart that replays an old ``ruleset.nft``
+    included.  A deadline already past adds nothing; one further out than
+    nft takes is cut to the longest timeout it does, which only ends the
+    override early.
+
+    The file sits in the hook-validated state dir, yet each line is checked
+    as untrusted input anyway — an address must parse, a deadline must be an
+    integer — and a line that fails is skipped: a malformed entry can only
+    take an override away, never add one.  An absent file is no override.
+    """
+    try:
+        lines = (state_dir / OVERRIDE_EXPIRY_FILE_NAME).read_text().splitlines()
+    except OSError:
+        return ""
+    by_family: dict[int, list[str]] = {4: [], 6: []}
+    for line in lines:
+        fields = line.split()
+        if len(fields) != 2:
+            continue
+        try:
+            net = ipaddress.ip_network(fields[0], strict=False)
+            left = int(fields[1]) - int(now)
+        except ValueError:
+            continue
+        if left <= 0:
+            continue
+        address = str(net.network_address) if net.prefixlen == net.max_prefixlen else str(net)
+        timeout = min(left, ELEMENT_TIMEOUT_MAX_SECONDS)
+        by_family[net.version].append(f"{address} timeout {timeout}s")
+    return "".join(
+        f"add element {OVERRIDE_TABLE} {OVERRIDE_SET}_v{family} {{ {', '.join(elements)} }}\n"
+        for family, elements in by_family.items()
+        if elements
+    )
 
 
 # ── Environment bootstrap ─────────────────────────────────
