@@ -13,21 +13,37 @@ dispatched by the CLI's own aggregated-mode handler
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from terok_util import ArgDef, CommandDef
 
-from ._common import NEEDS_CTR, format_version, print_env_hint
+from ._common import (
+    CONTAINER_ARG,
+    NEEDS_CTR,
+    format_seconds,
+    format_version,
+    print_env_hint,
+)
 
 if TYPE_CHECKING:
     from terok_shield import Shield
 
 
 def _handle_status(shield: Shield, *, container: str | None = None) -> None:
-    """Show shield status, or query a container's firewall state."""
+    """Show shield status, or query a container's firewall state.
+
+    With a container the posture prints as its bare value — ``up``,
+    ``down`` — and an open timed window rides on the same line, from the
+    same listing: ``up (bypass window open, 4m59s left)``.  An open window
+    is a materially different UP, and the one line keeps it from being
+    mistaken for the trusted one.
+    """
     if container:
-        st = shield.state(container)
-        print(st.value)
+        reading = shield.inspect(container)
+        window = reading.bypass_remaining
+        suffix = "" if window is None else f" (bypass window open, {format_seconds(window)} left)"
+        print(f"{reading.state.value}{suffix}")
     else:
         from importlib.metadata import PackageNotFoundError, version as _meta_version
 
@@ -68,6 +84,44 @@ def _handle_logs(shield: Shield, container: str, *, n: int = 50) -> None:
         print(json.dumps(entry))
 
 
+def _handle_harvest(shield: Shield, container: str, *, output_json: bool = False) -> None:
+    """Show what this container reached for — what can be promoted first, the floor last.
+
+    Each row names the tier that stands between the task and the target and
+    the remedies that could lift it (``none`` for the hard-deny floor).
+    ``--json`` emits the whole report: the entries and whether audit was on,
+    since with it off an empty harvest says nothing about the task.
+    """
+    report = shield.harvest()
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "audit_enabled": report.audit_enabled,
+                    "entries": [asdict(entry) for entry in report.entries],
+                }
+            )
+        )
+        return
+    if not report.audit_enabled:
+        print(
+            f"Audit was disabled when {container} was created — its reader records no "
+            "traffic, so a harvest cannot say what the task reached for"
+        )
+    elif not report.entries:
+        print(
+            f"Nothing harvested for {container} — no refusals, no window accepts, "
+            "nothing accepted only because the shield was down"
+        )
+    for entry in report.entries:
+        ports = ",".join(str(port) for port in entry.ports) or "-"
+        remedies = ",".join(entry.remedies) or "none"
+        print(
+            f"{entry.action:<13} {entry.target:<40} x{entry.count:<5} :{ports:<12} "
+            f"{entry.tier:<12} {remedies:<16} {entry.last_seen}"
+        )
+
+
 STATUS = CommandDef(
     name="status",
     help="Show shield configuration overview",
@@ -105,5 +159,21 @@ LOGS = CommandDef(
     args=(
         ArgDef(name="--container", default=None, help="Filter by container name"),
         ArgDef(name="-n", type=int, default=50, help="Number of recent entries"),
+    ),
+)
+
+HARVEST = CommandDef(
+    name="harvest",
+    help="Show what a container reached for (refusals, window and DOWN accepts)",
+    handler=_handle_harvest,
+    extras=NEEDS_CTR,
+    args=(
+        CONTAINER_ARG,
+        ArgDef(
+            name="--json",
+            dest="output_json",
+            action="store_true",
+            help="Emit the report (entries and the audit flag) as JSON instead of a table",
+        ),
     ),
 )

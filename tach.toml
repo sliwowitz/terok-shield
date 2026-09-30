@@ -62,14 +62,18 @@ path = "terok_shield.resources._oci_state"
 layer = "foundation"
 depends_on = []
 
-# Per-container state bundle layout — imports host-wide path constants
+# Per-container state bundle layout — imports host-wide path constants, and
+# the host-loopback addresses no t10 seed may hold under the recorded mode
 [[modules]]
 path = "terok_shield.state"
 layer = "foundation"
 depends_on = [
     "terok_shield.config",
+    "terok_shield.nft.constants",
+    "terok_shield.podman_info",
     "terok_shield.policy",
     "terok_shield.resources._oci_state",
+    "terok_shield.validation",
 ]
 
 # Host-wide filesystem paths (reader script, hook entrypoint filename)
@@ -206,6 +210,12 @@ path = "terok_shield.audit"
 layer = "support"
 depends_on = []
 
+# Harvest — reads the audit log back for review (state is a lower layer)
+[[modules]]
+path = "terok_shield.harvest"
+layer = "support"
+depends_on = []
+
 # Profile loading
 [[modules]]
 path = "terok_shield.profiles"
@@ -224,6 +234,7 @@ path = "terok_shield"
 layer = "support"
 depends_on = [
     "terok_shield.audit",
+    "terok_shield.harvest",
     "terok_shield.profiles",
     "terok_shield.watchers",
 ]

@@ -4,8 +4,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """OCI hook: apply pre-generated terok-shield nft ruleset.
 
-Applies ``ruleset.nft`` (written by ``pre_start()``) and optionally
-starts dnsmasq if ``dnsmasq.conf`` is present in the state directory.
+Applies ``ruleset.nft`` (written by ``pre_start()``), together with the
+expiring t10 overrides listed in ``override.expiry`` — each timed here, at
+apply, from its absolute deadline — and optionally starts dnsmasq if
+``dnsmasq.conf`` is present in the state directory.
 Gateway addresses are baked into the ruleset at generation time — no
 runtime ``/proc`` discovery needed.
 
@@ -137,8 +139,13 @@ def _createruntime(pid: str, sd: Path) -> None:
     if not ruleset.exists():
         raise RuntimeError(f"ruleset.nft not found: {ruleset}")
     nft = _oci_state.find_nft()
+    # Overrides that expire are timed here, from their absolute deadlines,
+    # never baked into ruleset.nft: a replay of an old ruleset at a later
+    # start must not re-grant one for its full original span.  Same
+    # transaction as the ruleset, so the tier lands whole or not at all.
+    timed = _oci_state.timed_override_elements(sd, time.time())
     # WORKAROUND(selinux-nft-stdin): pipe ruleset via stdin; see header.
-    _oci_state.nsenter(pid, nft, "-f", "-", stdin=ruleset.read_text())
+    _oci_state.nsenter(pid, nft, "-f", "-", stdin=ruleset.read_text() + timed)
 
     # Gateway addresses are baked into ruleset.nft by pre_start() — no
     # /proc discovery or dynamic nft set population needed.

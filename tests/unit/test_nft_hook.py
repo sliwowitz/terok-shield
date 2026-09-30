@@ -23,7 +23,19 @@ import pytest
 from terok_shield.resources import _oci_state, nft_hook
 
 from ..testfs import DNSMASQ_SBIN
-from ..testnet import KRUN_DNSMASQ_BIND
+from ..testnet import (
+    IPV6_CLOUDFLARE,
+    IPV6_VERBOSE,
+    IPV6_VERBOSE_CANONICAL,
+    KRUN_DNSMASQ_BIND,
+    TEST_IP1,
+    TEST_IP2,
+    TEST_IP3,
+    TEST_NET1,
+)
+
+# A fixed "now" for the timed-override tests, in epoch seconds.
+_NOW = 1_800_000_000
 
 
 @pytest.fixture(autouse=True)
@@ -378,6 +390,82 @@ def test_createruntime_applies_ruleset_via_nsenter(tmp_path: Path) -> None:
     args = mock_ns.call_args.args
     assert "-" in args  # nft -f - (stdin)
     assert mock_ns.call_args.kwargs.get("stdin") == "table inet terok_shield {}"
+
+
+def test_createruntime_times_each_expiring_override_when_it_applies(tmp_path: Path) -> None:
+    """Expiring overrides join the ruleset's transaction, timed from their deadlines at apply.
+
+    A replay of an old ``ruleset.nft`` at a later start must never re-grant
+    an override for its full original span — so the seconds left are
+    counted here, at the start, and a deadline that has passed adds nothing.
+    """
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "ruleset.nft").write_text("table inet terok_shield {}\n")
+    (sd / _oci_state.OVERRIDE_EXPIRY_FILE_NAME).write_text(
+        _oci_state.render_override_expiry([(TEST_IP1, _NOW + 3600), (TEST_IP2, _NOW - 1)])
+    )
+
+    with (
+        mock.patch("terok_shield.resources._oci_state.nsenter") as mock_ns,
+        mock.patch("terok_shield.resources.nft_hook.time.time", return_value=float(_NOW)),
+    ):
+        nft_hook._createruntime("1", sd)
+
+    assert mock_ns.call_args.kwargs["stdin"] == (
+        "table inet terok_shield {}\n"
+        f"add element inet terok_shield t10_override_v4 {{ {TEST_IP1} timeout 3600s }}\n"
+    )
+
+
+def test_timed_override_elements_split_families_and_keep_ranges(tmp_path: Path) -> None:
+    """One add per family; a range keeps its prefix, a host is named bare as nft lists it."""
+    (tmp_path / _oci_state.OVERRIDE_EXPIRY_FILE_NAME).write_text(
+        _oci_state.render_override_expiry(
+            [(TEST_NET1, _NOW + 60), (IPV6_VERBOSE, _NOW + 7), (IPV6_CLOUDFLARE, _NOW + 8)]
+        )
+    )
+    assert _oci_state.timed_override_elements(tmp_path, _NOW) == (
+        f"add element inet terok_shield t10_override_v4 {{ {TEST_NET1} timeout 60s }}\n"
+        f"add element inet terok_shield t10_override_v6 "
+        f"{{ {IPV6_VERBOSE_CANONICAL} timeout 7s, {IPV6_CLOUDFLARE} timeout 8s }}\n"
+    )
+
+
+def test_timed_override_elements_cut_a_far_deadline_to_what_nft_takes(tmp_path: Path) -> None:
+    """A deadline past nft's longest seconds literal runs out early, never late."""
+    far = _NOW + _oci_state.ELEMENT_TIMEOUT_MAX_SECONDS * 2
+    (tmp_path / _oci_state.OVERRIDE_EXPIRY_FILE_NAME).write_text(
+        _oci_state.render_override_expiry([(TEST_IP1, far)])
+    )
+    assert f"timeout {_oci_state.ELEMENT_TIMEOUT_MAX_SECONDS}s" in (
+        _oci_state.timed_override_elements(tmp_path, _NOW)
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(f"{TEST_IP1}\n", id="no-deadline"),
+        pytest.param(f"{TEST_IP1} soon\n", id="deadline-not-a-number"),
+        pytest.param(f"not-an-address {_NOW + 60}\n", id="not-an-address"),
+        pytest.param(f"{TEST_IP1} {_NOW + 60} extra\n", id="extra-field"),
+        pytest.param(f"{TEST_IP1} {_NOW}\n", id="deadline-now"),
+    ],
+)
+def test_timed_override_elements_skip_what_cannot_be_trusted(tmp_path: Path, line: str) -> None:
+    """A line that fails to parse, or whose override ran out, adds nothing — never a wrong element."""
+    (tmp_path / _oci_state.OVERRIDE_EXPIRY_FILE_NAME).write_text(
+        line + _oci_state.render_override_expiry([(TEST_IP3, _NOW + 5)])
+    )
+    assert _oci_state.timed_override_elements(tmp_path, _NOW) == (
+        f"add element inet terok_shield t10_override_v4 {{ {TEST_IP3} timeout 5s }}\n"
+    )
+
+
+def test_timed_override_elements_without_the_file_add_nothing(tmp_path: Path) -> None:
+    """No file — a bundle with no expiring override — is no element at all."""
+    assert _oci_state.timed_override_elements(tmp_path, _NOW) == ""
 
 
 def test_createruntime_starts_dnsmasq_when_conf_present(tmp_path: Path) -> None:

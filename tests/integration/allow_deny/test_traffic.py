@@ -142,7 +142,8 @@ class TestAllowDenyAPI:
         with tempfile.TemporaryDirectory() as tmp:
             shield = Shield(ShieldConfig(state_dir=Path(tmp)))
             allowed = shield.allow(shielded_container, ALLOWED_TARGET_IPS[0])
-            assert ALLOWED_TARGET_IPS[0] in allowed
+            assert allowed.live
+            assert ALLOWED_TARGET_IPS[0] in allowed.ips
 
             assert_connectable(
                 shielded_container, ALLOWED_TARGET_IPS[0], port=ALLOWED_TARGET_HTTPS_PORT

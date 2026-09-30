@@ -13,7 +13,7 @@ terminal verdict (short-circuit), and a non-match falls through to the next
 tier (a ``Pass``).  Tier order *is* the authority order::
 
     preamble          accept lo / established / DNS / infra ports
-    t00 hard-deny     reject @HARD_DENY_RANGES   (link-local/IMDS — absolute)
+    t00 hard-deny     reject the host's loopback + @HARD_DENY_RANGES  (absolute)
     t10 override      accept @override           (break-glass, above the deny)
     t20 security-deny reject @deny + @PRIVATE_RANGES  (vault hosts + RFC1918)
     t30/40 allow      accept @allow              (provider + project)
@@ -23,7 +23,24 @@ tier (a ``Pass``).  Tier order *is* the authority order::
 Because the deny tier sits *above* the allow tier, an explicit deny wins over
 an allow; an override (t10) sits above the deny and is the only way to reach
 a security-denied host.  The hard-deny floor (t00) sits above the override and
-is absolute.
+is absolute: link-local and IMDS, and the host's own loopback past the ports
+the preamble opens — the slirp4netns gateway, which lies in a private range
+and would otherwise be refused only below t10.  An override that carries an
+expiry is an element with a kernel timeout, like the bypass window's: the
+kernel ends the break-glass on time, with nothing in userspace keeping the
+clock.
+
+The DOWN postures accept by policy instead of refusing.  They keep the UP
+order down to the allow tiers (DISENGAGED drops every reject from it) and end
+in a catch-all that logs ``DOWN`` — so a ``DOWN`` line is precisely a
+connection the UP chain would have refused::
+
+    preamble          accept lo / established / DNS / infra ports
+    t00 hard-deny     reject host loopback + ranges  (plain DOWN only)
+    t10 override      accept @override               (logged ALLOWED)
+    t20 security-deny reject @deny + @PRIVATE_RANGES (plain DOWN only)
+    t30/40 allow      accept @allow                  (logged ALLOWED)
+    catch-all         log DOWN, then the accept policy
 
 Security boundary: only stdlib + ``nft.constants`` imports.  All inputs are
 validated before interpolation into nft commands.
@@ -33,7 +50,7 @@ validated before interpolation into nft commands.
 import ipaddress
 import re
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .constants import (
@@ -42,6 +59,7 @@ from .constants import (
     BYPASS_LOG_PREFIX,
     DENIED_LOG_PREFIX,
     DOWN_LOG_PREFIX,
+    ELEMENT_TIMEOUT_MAX_SECONDS,
     HARD_DENY_RANGES,
     NFLOG_GROUP,
     NFT_TABLE,
@@ -62,6 +80,12 @@ _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # authored timeouts stay restricted to the single-unit _SAFE_TIMEOUT_RE.
 _ELEMENT_TIMEOUT_RE = re.compile(r"^(?:\d+[dhms])+$")
 _ELEMENTS_BLOCK_RE = re.compile(r"elements = \{(.*?)\}", re.DOTALL)
+# An element's countdown as ``nft -T`` prints it, in whole seconds (``expires 299s``) —
+# the only listing the shield reads a countdown from.  A literal, then one bounded run of
+# digits (nft prints durations from unsigned 64-bit milliseconds, so a countdown never
+# runs past 20 digits): one linear scan whatever the listing holds, with no nested
+# repetition to backtrack into.
+_EXPIRES_RE = re.compile(r"\bexpires (\d{1,20})s\b")
 
 # Cross-family reject (auto-selects ICMP / ICMPv6 in an ``inet`` table).
 _REJECT = "reject with icmpx admin-prohibited"
@@ -69,8 +93,10 @@ _REJECT = "reject with icmpx admin-prohibited"
 # The tier sets, in chain order; each is dual-stack (``_v4`` / ``_v6``).  Names
 # mirror the ``policy/<NN>-<name>`` bundle files 1:1 (``t<NN>_<name>``) so the
 # file→rule mapping is self-evident.  ``t40_project_allow`` carries the dnsmasq
-# element timeout (learned IPs); ``bypass_window`` always carries the timeout
-# flag so its elements expire to close the timed allow-all window.
+# element timeout (learned IPs); ``bypass_window`` and ``t10_override`` always
+# carry the timeout flag with no default: the window's element expires to
+# close it, and an override's to end the break-glass on its expiry date.
+# An element added without a timeout is permanent in either.
 _TIER_SETS = (
     TIER_OVERRIDE,
     TIER_SECURITY_DENY,
@@ -78,6 +104,9 @@ _TIER_SETS = (
     TIER_PROJECT_ALLOW,
     SET_BYPASS_WINDOW,
 )
+
+# Sets whose elements carry their own kernel timeout (the ``timeout`` flag, no default).
+_TIMED_SETS = frozenset({TIER_OVERRIDE, SET_BYPASS_WINDOW})
 
 _INPUT_CHAIN = """\
     chain input {
@@ -142,6 +171,7 @@ class RulesetBuilder:
         """
         body = self._join(
             self._preamble_lines(),
+            self._host_loopback_reject(),  # t00 the host's own loopback, past its ports
             self._range_reject(HARD_DENY_RANGES, PRIVATE_LOG_PREFIX),  # t00 absolute
             self._match(TIER_OVERRIDE, "accept", ALLOWED_LOG_PREFIX),  # t10 break-glass
             self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX),  # t20 deny set
@@ -156,34 +186,53 @@ class RulesetBuilder:
     def build_down(self, *, disengaged: bool = False) -> str:
         """Generate the DOWN-posture (manual ``shield down``) ruleset.
 
-        Output policy is ``accept`` and every new connection is logged with
-        the DOWN prefix.  Plain DOWN still enforces the hard-deny floor and
-        the security-deny tier (deny set + private ranges), with the t10
-        override kept *above* the deny — a break-glass host must stay
-        reachable in every posture that enforces the deny.
+        Output policy is ``accept``.  Plain DOWN still enforces the hard-deny
+        floor — the host's own loopback past its ports included — and the
+        security-deny tier (deny set + private ranges), with the t10 override
+        kept *above* the deny — a break-glass host must stay reachable in
+        every posture that enforces the deny.
+
+        The allow tiers (t10 override, t30 provider, t40 project) accept
+        logged ``ALLOWED`` before the catch-all, exactly as UP would, so the
+        catch-all's ``DOWN`` line is left for what the UP posture would have
+        refused: a new connection accepted *only because the shield is down*.
+        That is what makes a task running DOWN harvestable — the reader
+        records each ``DOWN`` line as a promotion candidate.  The timed
+        window has no place here: it only ever widens UP.
 
         Args:
             disengaged: If True (DISENGAGED), enforce nothing: no hard-deny
                 floor, no deny set, no private-range rejects — every
-                destination is accepted and logged.  The tier sets stay
-                declared (unreferenced) so allow-set contents survive the
-                round trip back to ``shield up``.  Private addresses below
+                destination is accepted.  The allow tiers still accept
+                ``ALLOWED`` ahead of the ``DOWN`` catch-all, so a ``DOWN``
+                line keeps its meaning — and since nothing below them is
+                refused, it can name a vault host, IMDS or a LAN address,
+                which a harvest tells apart by destination.  The other tier
+                sets stay declared (unreferenced) so their contents survive
+                the round trip back to ``shield up``.  Private addresses below
                 the deny are reachable in the other postures through a t10
                 override — a host, or a whole CIDR (logged as a warning);
                 DISENGAGED opens everything without one.
         """
         sections = [self._preamble_lines()]
-        if not disengaged:
+        if disengaged:
+            sections.append(self._match(TIER_OVERRIDE, "accept", ALLOWED_LOG_PREFIX))
+        else:
             sections.extend(
                 (
+                    self._host_loopback_reject(),
                     self._range_reject(HARD_DENY_RANGES, PRIVATE_LOG_PREFIX),
-                    self._match(TIER_OVERRIDE, "accept", DOWN_LOG_PREFIX),
+                    self._match(TIER_OVERRIDE, "accept", ALLOWED_LOG_PREFIX),
                     self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX),
                     self._range_reject(PRIVATE_RANGES, PRIVATE_LOG_PREFIX),
                 )
             )
-        sections.append(
-            f'        ct state new log group {NFLOG_GROUP} prefix "{DOWN_LOG_PREFIX}: " counter'
+        sections.extend(
+            (
+                self._match(TIER_PROVIDER_ALLOW, "accept", ALLOWED_LOG_PREFIX),
+                self._match(TIER_PROJECT_ALLOW, "accept", ALLOWED_LOG_PREFIX),
+                self._down_catch_all(),
+            )
         )
         return self._table(self._set_decls(), self._join(*sections), policy="accept")
 
@@ -222,7 +271,11 @@ class RulesetBuilder:
         Expects output from ``nft list table inet terok_shield`` (scoped to the
         managed table), not ``nft list ruleset``.  Verifies the table header,
         ``policy drop``, both chains, the reject type, every tier set, the
-        terminal deny-all rule, and both range-reject floors.
+        terminal deny-all rule, both range-reject floors and — for a builder
+        that knows the slirp4netns gateway — the host-loopback reject above
+        t10.  It also checks that the timed window, if open, is timed: a window
+        element with no timeout is a permanent allow-all below the deny tiers,
+        so a ruleset carrying one is not the UP posture, whatever else it holds.
         """
         errors: list[str] = []
         if f"table {NFT_TABLE}" not in nft_output:
@@ -240,8 +293,11 @@ class RulesetBuilder:
             re.MULTILINE,
         ):
             errors.append("terminal reject-all rule missing")
+        errors.extend(self._verify_ranges(nft_output, self._gateways(), "Host-loopback"))
         errors.extend(self._verify_ranges(nft_output, HARD_DENY_RANGES, "Hard-deny"))
         errors.extend(self._verify_ranges(nft_output, PRIVATE_RANGES, "Private-range"))
+        if _window_never_expires(nft_output):
+            errors.append("bypass window holds an element with no timeout (a permanent allow-all)")
         return errors
 
     def verify_down(self, nft_output: str, *, disengaged: bool = False) -> list[str]:
@@ -249,9 +305,16 @@ class RulesetBuilder:
 
         Verifies the table header, ``policy accept`` on output / ``drop`` on
         input, both chains, every tier set, and the DOWN nflog prefix.
-        Plain DOWN must carry both range-reject floors; DISENGAGED must carry
-        neither floor nor the deny-set reject — a partially applied ruleset
-        that keeps any reject must not pass as DISENGAGED.
+        Plain DOWN must carry both range-reject floors, and the host-loopback
+        reject when the builder knows the slirp4netns gateway; DISENGAGED
+        must carry neither floor nor the deny-set reject — a partially applied
+        ruleset that keeps any reject must not pass as DISENGAGED.
+
+        The ``ALLOWED`` accepts ahead of the catch-all are left unchecked on
+        purpose: they decide what the audit trail records, not what the
+        posture enforces, and a DOWN table applied before they existed is
+        still the DOWN posture — [`shield_state`][terok_shield.hooks.mode.HookMode.shield_state]
+        must keep naming it so rather than report an error.
         """
         errors: list[str] = []
         if f"table {NFT_TABLE}" not in nft_output:
@@ -270,6 +333,7 @@ class RulesetBuilder:
             if re.search(rf"@{TIER_SECURITY_DENY}_v[46]\b.*\breject\b", nft_output):
                 errors.append("deny-set reject rule present in DISENGAGED ruleset")
         else:
+            errors.extend(self._verify_ranges(nft_output, self._gateways(), "Host-loopback"))
             for nets, label in floors:
                 errors.extend(self._verify_ranges(nft_output, nets, label))
         return errors
@@ -335,7 +399,7 @@ class RulesetBuilder:
         lines: list[str] = []
         for base in _TIER_SETS:
             timeout = self._set_timeout if base == TIER_PROJECT_ALLOW else ""
-            timed = base == SET_BYPASS_WINDOW
+            timed = base in _TIMED_SETS
             lines.append(f"    {self._decl(f'{base}_v4', 'ipv4_addr', timeout, timed=timed)}")
             lines.append(f"    {self._decl(f'{base}_v6', 'ipv6_addr', timeout, timed=timed)}")
         return "\n".join(lines)
@@ -348,7 +412,7 @@ class RulesetBuilder:
             set_timeout: a default element timeout (live tier) — adds the
                 ``timeout`` flag *and* a default.
             timed: declare the ``timeout`` flag with no default, so elements
-                carry their own timeout (the bypass window).
+                carry their own timeout (the bypass window, the t10 override).
         """
         if set_timeout:
             return (
@@ -394,6 +458,26 @@ class RulesetBuilder:
             f"        ip6 daddr @{base}_v6 {log}{verdict}"
         )
 
+    def _gateways(self) -> tuple[str, ...]:
+        """The slirp4netns gateway addresses this builder bakes in, validated; none under pasta."""
+        return tuple(safe_ip(gw) for gw in (self._gateway_v4, self._gateway_v6) if gw)
+
+    def _host_loopback_reject(self) -> str:
+        """Refuse the slirp4netns gateway — the host's own loopback — past the ports the preamble opens.
+
+        slirp4netns, launched with ``allow_host_loopback``, forwards its
+        gateway to the host's ``127.0.0.1``, so the gateway is every port the
+        host listens on locally.  The preamble accepts the supervisor's ports
+        and each ``+localhost:PORT`` grant there, one port at a time; this
+        rule refuses the rest, in t00, above the t10 override.  The gateway
+        lies in a private range, whose reject sits below t10, so without it a
+        t10 element taking the gateway in — a break-glass name rebound onto
+        it, a range around it — would open the host whole, whichever path
+        seeded the element.  pasta's host-loopback map needs no rule of its
+        own: it lies inside the link-local floor, already above t10.
+        """
+        return self._range_reject(self._gateways(), PRIVATE_LOG_PREFIX)
+
     @staticmethod
     def _range_reject(nets: tuple[str, ...], prefix: str) -> str:
         """Emit reject rules for a tuple of static CIDR ranges (auto v4/v6)."""
@@ -407,6 +491,14 @@ class RulesetBuilder:
     def _terminal() -> str:
         """Emit the terminal default-deny rule with NFLOG audit (BLOCKED prefix)."""
         return f'        log group {NFLOG_GROUP} prefix "{BLOCKED_LOG_PREFIX}: " counter {_REJECT}'
+
+    @staticmethod
+    def _down_catch_all() -> str:
+        """Emit the DOWN postures' catch-all: log what no allow tier took (DOWN prefix).
+
+        No verdict of its own — the output policy accepts what reaches it.
+        """
+        return f'        ct state new log group {NFLOG_GROUP} prefix "{DOWN_LOG_PREFIX}: " counter'
 
     @staticmethod
     def _verify_common(nft_output: str, *, expect_reject: bool = True) -> list[str]:
@@ -461,9 +553,9 @@ class RulesetBuilder:
     ) -> str:
         """Accept rules for gateway (slirp4netns) host-service ports.
 
-        Literal gateway IPs baked in at generation time; emitted in the preamble
-        before the private-range reject so RFC 1918 traffic to the gateway is
-        accepted.
+        Literal gateway IPs baked in at generation time; emitted in the preamble,
+        ahead of the host-loopback and private-range rejects, so these ports —
+        and only these — reach the gateway.
         """
         if not ports or not (gateway_v4 or gateway_v6):
             return ""
@@ -495,9 +587,25 @@ def add_deny_elements_dual(ips: list[str]) -> str:
     return _emit_dual(add_elements, TIER_SECURITY_DENY, ips)
 
 
-def add_override_elements_dual(ips: list[str]) -> str:
-    """Add IPs to the tier-10 override (break-glass) sets, split by address family."""
-    return _emit_dual(add_elements, TIER_OVERRIDE, ips)
+def add_override_elements_dual(ips: list[str], *, timeouts: Mapping[str, int] | None = None) -> str:
+    """Add IPs to the tier-10 override (break-glass) sets, split by address family.
+
+    *timeouts* gives an element the whole seconds its override has left, so
+    the kernel drops it on its expiry with nothing in userspace keeping time
+    — the way the bypass window closes.  An address absent from *timeouts*
+    is added without one: an override that never expires.
+    """
+    return _emit_dual(add_elements, TIER_OVERRIDE, ips, timeouts=timeouts)
+
+
+def flush_override_sets() -> str:
+    """Empty both tier-10 override sets — the head of a reseed that swaps the whole tier at once.
+
+    Sent in one transaction with the new elements, a flush never leaves the
+    tier empty in between, and a re-added address takes its new timeout even
+    on a kernel that keeps an existing element's timeout on a plain add.
+    """
+    return f"flush set {NFT_TABLE} {TIER_OVERRIDE}_v4\nflush set {NFT_TABLE} {TIER_OVERRIDE}_v6\n"
 
 
 def delete_deny_elements_dual(ips: list[str]) -> str:
@@ -511,9 +619,19 @@ def arm_bypass_window(timeout: str) -> str:
     Adds ``0.0.0.0/0`` / ``::/0`` to the ``bypass_window`` sets with a kernel
     ``timeout`` so the window closes itself when the element expires — no
     userspace timer, fail-closed (any disruption only closes it sooner).
+
+    The sets are flushed first, in the same transaction: a re-arm then always
+    replaces the countdown, even on a kernel that keeps an existing element's
+    timeout on a plain add — so ``bypass --for 1m`` while a two-hour window is
+    open shortens it, as it says.
+
+    Raises:
+        ValueError: When *timeout* is not an nft timeout, or is zero — nft
+            reads ``timeout 0s`` as *never*, which would open a permanent
+            allow-all window no countdown reports.
     """
-    _safe_timeout(timeout)
-    return (
+    _safe_window_timeout(timeout)
+    return disarm_bypass_window() + (
         f"add element {NFT_TABLE} {SET_BYPASS_WINDOW}_v4 {{ 0.0.0.0/0 timeout {timeout} }}\n"
         f"add element {NFT_TABLE} {SET_BYPASS_WINDOW}_v6 {{ ::/0 timeout {timeout} }}\n"
     )
@@ -525,6 +643,70 @@ def disarm_bypass_window() -> str:
         f"flush set {NFT_TABLE} {SET_BYPASS_WINDOW}_v4\n"
         f"flush set {NFT_TABLE} {SET_BYPASS_WINDOW}_v6\n"
     )
+
+
+def parse_window_expiry(nft_output: str) -> int | None:
+    """Whole seconds left on the timed allow-all window, read from an ``nft -T`` table listing.
+
+    Reads only the ``set bypass_window_v4 { … }`` block: the listing carries
+    every tier set ahead of the window, and on the live tier the t40 set's
+    learned addresses print countdowns of their own, so the first
+    ``expires`` in the listing is rarely the window's.  ``-T`` prints the
+    countdown in whole seconds (``expires 299s``) — seconds are the smallest
+    unit the shield reports — and that is the only form read.  A plain
+    listing's compound countdown (``4m59s693ms``) is not mistaken for
+    seconds, ``512ms`` least of all: it reads as no countdown, which is why
+    the posture listing always carries ``-T``.
+
+    Returns ``None`` when the set holds no element, or the listing has no
+    window set at all: the kernel clock is the window's only record, so an
+    empty set means closed rather than unknown.  An element with no timeout
+    at all — a permanent allow-all, which the shield never adds — has no
+    countdown either; [`verify_up`][terok_shield.nft.rules.RulesetBuilder.verify_up]
+    refuses a listing that holds one, so it never reads as UP with the
+    window closed.
+    """
+    match = _EXPIRES_RE.search(_set_block(nft_output, f"{SET_BYPASS_WINDOW}_v4"))
+    return None if match is None else int(match.group(1))
+
+
+def _window_never_expires(nft_output: str) -> bool:
+    """Whether either window set in a table listing holds an element with no timeout.
+
+    Such an element is a *permanent* allow-all: nft keeps it until something
+    deletes it, and it prints with no ``expires`` for
+    [`parse_window_expiry`][terok_shield.nft.rules.parse_window_expiry] to
+    read, so the countdown would report the window closed.  The shield never
+    adds one — a window always carries a non-zero timeout — so finding one
+    means the ruleset was changed from outside, or broken.
+    """
+    for family in ("v4", "v6"):
+        block = _ELEMENTS_BLOCK_RE.search(_set_block(nft_output, f"{SET_BYPASS_WINDOW}_{family}"))
+        if block is None:
+            continue
+        atoms = (atom.split() for atom in block.group(1).split(","))
+        if any(tokens and "timeout" not in tokens for tokens in atoms):
+            return True
+    return False
+
+
+def _set_block(nft_output: str, set_name: str) -> str:
+    """The body of ``set <set_name> { … }`` in a table listing, or ``""`` when it is absent.
+
+    The block ends at the first line holding nothing but the closing brace;
+    an ``elements = { … }`` list never does — its brace closes the line of
+    its last element.
+    """
+    lines = iter(nft_output.splitlines())
+    header = f"set {set_name} {{"
+    if not any(line.strip() == header for line in lines):
+        return ""
+    body: list[str] = []
+    for line in lines:
+        if line.strip() == "}":
+            break
+        body.append(line)
+    return "\n".join(body)
 
 
 def parse_set_elements(nft_output: str) -> list[tuple[str, str]]:
@@ -584,7 +766,12 @@ def restore_elements(set_name: str, elements: list[tuple[str, str]], table: str 
 
 
 def add_elements(
-    set_name: str, ips: list[str], table: str = NFT_TABLE, *, timeout_zero: bool = False
+    set_name: str,
+    ips: list[str],
+    table: str = NFT_TABLE,
+    *,
+    timeout_zero: bool = False,
+    timeouts: Mapping[str, int] | None = None,
 ) -> str:
     """Generate an nft command to add validated IPs to a set.
 
@@ -594,16 +781,21 @@ def add_elements(
     Args:
         timeout_zero: annotate each element with ``timeout 0s`` so it never
             expires, even in a set that carries a default element timeout.
+        timeouts: per-address kernel timeouts in whole seconds (keys in any
+            notation ``safe_ip`` accepts); each is validated before it is
+            written, and ``0`` is refused — nft reads ``timeout 0s`` as
+            *never*, the opposite of an element about to run out.
     """
     set_name = _safe_ident(set_name)
     table = " ".join(_safe_ident(part) for part in table.split())
     valid = [safe_ip(ip) for ip in ips if _try_validate(ip)]
     if not valid:
         return ""
+    timed = {safe_ip(ip): _safe_seconds(seconds) for ip, seconds in (timeouts or {}).items()}
     if timeout_zero:
         elements = ", ".join(f"{ip} timeout 0s" for ip in valid)
     else:
-        elements = ", ".join(valid)
+        elements = ", ".join(f"{ip} timeout {timed[ip]}s" if ip in timed else ip for ip in valid)
     return f"add element {table} {set_name} {{ {elements} }}\n"
 
 
@@ -718,6 +910,37 @@ def _safe_timeout(value: str) -> str:
     """
     if not _SAFE_TIMEOUT_RE.fullmatch(value):
         raise ValueError(f"Invalid nft timeout: {value!r} (expected e.g. '30m', '1h', '60s')")
+    return value
+
+
+def _safe_window_timeout(value: str) -> str:
+    """Validate a bypass-window duration: an nft timeout of at least one unit.
+
+    Raises:
+        ValueError: For anything ``_safe_timeout`` refuses, and for a zero
+            count — nft reads ``timeout 0s`` as *never*, so a zero-length
+            window would be a permanent one.
+    """
+    _safe_timeout(value)
+    if int(value[:-1]) == 0:
+        raise ValueError(
+            f"Invalid window duration: {value!r} — a zero timeout never expires "
+            "(expected e.g. '30m', '1h', '60s')"
+        )
+    return value
+
+
+def _safe_seconds(value: int) -> int:
+    """Validate an element timeout in whole seconds: an int in ``1..ELEMENT_TIMEOUT_MAX_SECONDS``.
+
+    Raises:
+        ValueError: For a non-int, zero (nft's *never*), a negative, or a
+            value past what nft accepts as a seconds literal.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Element timeout must be whole seconds, got {type(value).__name__}")
+    if not 1 <= value <= ELEMENT_TIMEOUT_MAX_SECONDS:
+        raise ValueError(f"Element timeout out of range: {value}s")
     return value
 
 

@@ -10,12 +10,18 @@ A policy file is one entry per line::
     +192.168.1.50:8080                 # allow one host:port
     +localhost:8000                    # reach a service on the host's localhost
     -telemetry.vendor.com              # deny
-    +api.anthropic.com  %reason=harness-test %expires=2026-06-09T12:00Z
+    +api.anthropic.com  %reason=harness-test %expires=2026-06-09
 
 The leading ``+`` (allow) or ``-`` (deny) is **mandatory**.  ``%key=value``
 markers carry optional metadata (``reason``, ``expires``, ``from``,
 ``first``/``last``, ``hits``); ``#`` starts a free-text comment that the
 parser ignores entirely.  Blank and comment-only lines are skipped.
+
+``%expires`` is the one marker the shield enforces, on the t10 override tier:
+a date (``2026-06-09``) keeps the entry valid *through* that day, until the
+host's local midnight that ends it; a full ISO-8601 timestamp
+(``2026-06-09T12:00Z``) until that instant
+([`expiry_deadline`][terok_shield.policy.expiry_deadline]).
 
 The reserved target ``localhost`` is a host-service grant: ``+localhost:PORT``
 opens the host machine's own ``localhost:PORT`` to the container (the loader
@@ -32,13 +38,32 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
+from urllib.parse import quote
 
 Action = Literal["+", "-"]
 """A policy verdict prefix: ``"+"`` (allow) or ``"-"`` (deny)."""
 
 LOCALHOST = "localhost"
 """Reserved target: ``+localhost:PORT`` grants the container access to the host's localhost."""
+
+EXPIRES_MARKER = "expires"
+"""The ``%expires=`` marker key: when a t10 override stops being valid."""
+
+REASON_MARKER = "reason"
+"""The ``%reason=`` marker key: why a t10 override was granted, in the operator's words.
+
+Recorded, never enforced — a break-glass carries its reason with it, so the
+tier file says why each hole in the deny exists.  Free text rides through
+[`marker_value`][terok_shield.policy.marker_value].
+"""
+
+_MARKER_SAFE = ",.:;/()@"
+"""Punctuation a marker value keeps readable; whitespace, ``#`` and ``%`` are always encoded."""
+
+_LAST_INSTANT = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
+"""Where an expiry past the calendar's end saturates — no later moment exists to run out at."""
 
 # A DNS name: dot-separated alphanumeric/hyphen/underscore labels, with an
 # optional leading ``*.`` wildcard for "any subdomain".
@@ -117,6 +142,60 @@ def localhost_ports(entries: list[PolicyEntry]) -> tuple[int, ...]:
     )
 
 
+def expiry_deadline(value: str) -> datetime:
+    """The instant an ``%expires`` value runs out, as a timezone-aware datetime.
+
+    A date — the form an operator writes, and the one an orchestrator passes
+    — keeps the entry valid *through* that day: it runs out at the host's
+    local midnight that ends the day, so ``expires`` set to today still holds
+    until tonight.  A full ISO-8601 timestamp runs out at that instant; one
+    without an offset is read as host local time, like the date.
+
+    Raises:
+        ValueError: When *value* is neither an ISO date nor an ISO timestamp.
+    """
+    text = value.strip()
+    try:
+        day = date.fromisoformat(text)
+    except ValueError:
+        moment = datetime.fromisoformat(text)  # raises ValueError for anything else
+        return moment if moment.tzinfo is not None else moment.astimezone()
+    try:
+        return datetime.combine(day + timedelta(days=1), time.min).astimezone()
+    except (OverflowError, ValueError):  # the calendar's last days: no midnight after them
+        return _LAST_INSTANT
+
+
+def marker_value(text: str) -> str:
+    """*text* as one ``%key=value`` marker value — free text kept to a single token.
+
+    A marker ends at the first whitespace and a ``#`` starts a comment, so a
+    reason written the way an operator types it ("vault outage, direct
+    debug") would break the line it rides on.  Percent-encoding keeps it
+    whole: whitespace, ``#`` and ``%`` itself become ``%XX``, and
+    ``urllib.parse.unquote`` reads the text back unchanged.
+    """
+    return quote(text, safe=_MARKER_SAFE)
+
+
+def entry_deadline(entry: PolicyEntry) -> datetime | None:
+    """When *entry* stops being valid, or ``None`` when it carries no ``%expires`` marker.
+
+    Raises:
+        ValueError: When the marker's value is not a date or a timestamp.
+    """
+    value = entry.meta.get(EXPIRES_MARKER)
+    if value is None:
+        return None
+    try:
+        return expiry_deadline(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid %{EXPIRES_MARKER}={value!r} on {entry.target} "
+            "(expected a date, e.g. 2026-06-09, or an ISO timestamp)"
+        ) from exc
+
+
 def is_ip(target: str) -> bool:
     """True when *target* is an IP literal or CIDR (a domain or ``localhost`` is False)."""
     try:
@@ -148,7 +227,7 @@ def _parse_line(body: str) -> PolicyEntry:
     if target == LOCALHOST:
         _validate_localhost(action, port)
     else:
-        _validate_target(target)
+        validate_target(target)
     return PolicyEntry(action, target, port, _parse_markers(markers))
 
 
@@ -199,8 +278,19 @@ def _parse_port(text: str) -> int:
     return port
 
 
-def _validate_target(target: str) -> None:
-    """Accept a domain (optionally ``*.``-prefixed), an IP literal, or a CIDR."""
+def validate_target(target: str) -> None:
+    """Accept a domain (optionally ``*.``-prefixed), an IP literal, or a CIDR.
+
+    The target grammar every policy line obeys, on its own: no action prefix,
+    no ``:port``, no ``%markers``.  Public so a caller that keeps host lists
+    of its own (an orchestrator's named egress sets, a promotion target)
+    validates them by the same rule the shield will apply, instead of a copy
+    of the pattern that drifts.  A caller that wants a narrower grammar — no
+    wildcards, no CIDRs — layers its own check on top.
+
+    Raises:
+        ValueError: When *target* is neither a domain, an IP literal, nor a CIDR.
+    """
     try:
         ipaddress.ip_network(target, strict=False)
         return
@@ -211,14 +301,20 @@ def _validate_target(target: str) -> None:
 
 
 __all__ = [
+    "EXPIRES_MARKER",
     "LOCALHOST",
+    "REASON_MARKER",
     "Action",
     "PolicyEntry",
     "domain_targets",
+    "entry_deadline",
+    "expiry_deadline",
     "ip_targets",
     "is_ip",
     "localhost_ports",
+    "marker_value",
     "parse_policy",
     "render_policy",
     "render_target",
+    "validate_target",
 ]

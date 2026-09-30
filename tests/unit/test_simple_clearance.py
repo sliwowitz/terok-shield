@@ -184,6 +184,23 @@ class TestHandleOperatorInput:
             session._handle_operator_input("a")
         assert len(session._queue) == 1
 
+    def test_failed_verdict_shows_why(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A refused allow names its reason — the last stderr line — instead of a bare failure."""
+        session = _session(tmp_path)
+        self._enqueue(session)
+        reason = f"Error: {TEST_IP1} is a security-tier address — break-glass only\x1b[0m"
+        fake_result = SimpleNamespace(
+            returncode=1, stdout=b"", stderr=f"warming up\n{reason}\n".encode()
+        )
+        with mock.patch.object(simple_clearance.subprocess, "run", return_value=fake_result):
+            session._handle_operator_input("a")
+        out = capsys.readouterr().out
+        assert f"verdict failed for {TEST_IP1}: Error: {TEST_IP1} is a security-tier address" in out
+        assert "\x1b" not in out
+        assert "warming up" not in out
+
     def test_accept_on_empty_queue_is_silent_noop(self, tmp_path: Path) -> None:
         """``a``/``d`` with nothing queued is a no-op, not a crash."""
         session = _session(tmp_path)

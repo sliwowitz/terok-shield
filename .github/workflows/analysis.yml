@@ -21,6 +21,9 @@ jobs:
     name: Unit tests
     if: github.repository == 'terok-ai/terok-shield'
     runs-on: ubuntu-latest
+    # The suite runs in well under a minute; a hung test must not hold the
+    # runner for GitHub's six-hour default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:

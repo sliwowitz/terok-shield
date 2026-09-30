@@ -36,7 +36,7 @@ from pathlib import Path
 
 from ..paths import dns_cache_dir
 from ..run import CommandRunner
-from ..state import STATE_DIR_MODE
+from ..state import STATE_DIR_MODE, read_name_resolution, render_name_resolution
 from ..util import is_ip as _is_ip
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,16 @@ class DnsResolver:
         resolved = self._resolve_announced(domains)
         all_ips = raw_ips + resolved
 
+        if domains and not resolved and self._cache_current(cache_path, source_mtime):
+            # Not one name answered (a DNS outage, a broken resolver) while the
+            # cache holds an answer for this very policy that merely aged out:
+            # keep it — stale addresses beat none.  Left untouched, the cache
+            # stays stale, so the next resolve tries again.  (The deny caches
+            # need more than this — a name that fails *alone* must keep its
+            # addresses too — so they resolve per name, through
+            # ``resolve_names_and_cache`` with ``keep_unanswered``.)
+            logger.warning("no name in %s resolved — keeping the previous answer", cache_path.name)
+            return self._read_cache(cache_path)
         self._write_cache(cache_path, all_ips)
         # An all-domains-failed resolve (DNS outage, broken resolver) is fine
         # for one container but must not poison every task on the host for
@@ -130,6 +140,108 @@ class DnsResolver:
         if resolved or not domains:
             self._write_cache(host_path, all_ips)
         return all_ips
+
+    def resolve_names_and_cache(
+        self,
+        names: list[str],
+        cache_path: Path,
+        *,
+        force: bool = False,
+        source_mtime: float = 0.0,
+        keep_unanswered: bool = False,
+        kind: str = "override",
+    ) -> dict[str, list[str]]:
+        """Resolve each of *names* on its own and cache which addresses came from which name.
+
+        The name-keyed sibling of
+        [`resolve_and_cache`][terok_shield.dns.resolver.DnsResolver.resolve_and_cache],
+        for a tier whose entries need more than a pool of addresses: the t10
+        override, where every entry carries its own expiry and an address must
+        be timed to the expiry of the name it came from, and the two t20 deny
+        caches.  The same freshness rules hold (one hour, and never older than
+        *source_mtime*), and a resolve in which not one name answered keeps a
+        cache that merely aged out.  No host-wide cache: such names are few,
+        and a deny must never take a partial answer from another container.
+
+        *keep_unanswered*: a name that answers nothing this time keeps the
+        addresses it had, where an answering name takes its new ones.  For
+        the deny caches, one lookup timing out must not drop a vault host's
+        addresses out of the t20 set at the next rebuild — in the DOWN
+        posture, and wherever nothing sinkholes the name, that would open the
+        host — so a stale answer beats none.  For the override cache, a
+        lookup timing out must not end a break-glass early.  An address that
+        an answering name no longer gives is dropped either way.
+        *kind* names the names in the stderr announcement.
+
+        Returns:
+            Each name with addresses, after *keep_unanswered*; a name left
+            with none is absent.
+        """
+        resolved = self.resolve_names(
+            names,
+            cache_path,
+            force=force,
+            source_mtime=source_mtime,
+            keep_unanswered=keep_unanswered,
+            kind=kind,
+        )
+        if resolved is None:
+            cached = read_name_resolution(cache_path) or {}
+            return {name: cached[name] for name in names if name in cached}
+        self._write_text(cache_path, render_name_resolution(resolved))
+        return resolved
+
+    def resolve_names(
+        self,
+        names: list[str],
+        cache_path: Path,
+        *,
+        force: bool = False,
+        source_mtime: float = 0.0,
+        keep_unanswered: bool = False,
+        kind: str = "override",
+    ) -> dict[str, list[str]] | None:
+        """What [`resolve_names_and_cache`][terok_shield.dns.resolver.DnsResolver.resolve_names_and_cache] would cache — without writing it.
+
+        The same rules, with *cache_path* only read: for a caller that may
+        persist an answer only once something else has taken it.  A live
+        override grant resolves its names, swaps the running t10 set, and
+        only then records the grant and caches what it seeded — a grant
+        refused for want of an answer must leave the cache as it was.
+
+        Returns:
+            Each name with addresses, as the cache would hold them after
+            *keep_unanswered* — or ``None`` when the cache stands as it is:
+            fresh, or kept through a resolve in which not one name answered.
+        """
+        max_age = 0 if force else _CACHE_MAX_AGE
+        cached = read_name_resolution(cache_path)
+        if cached is not None and self._cache_fresh(cache_path, max_age, source_mtime):
+            return None
+        answers = self._resolve_each_announced(names, kind)
+        # A cache in the flat format answers no name, yet still seeds its tier:
+        # a total failure leaves it standing too, never an empty cache.
+        if names and not any(answers.values()) and self._cache_current(cache_path, source_mtime):
+            logger.warning("no name in %s resolved — keeping the previous answer", cache_path.name)
+            return None
+        if keep_unanswered and cached:
+            for name in (n for n in names if not answers.get(n) and cached.get(n)):
+                logger.warning(
+                    "%s answered nothing — %s keeps its previous addresses", name, cache_path.name
+                )
+                answers[name] = cached[name]
+        return {name: ips for name, ips in answers.items() if ips}
+
+    def _resolve_each_announced(self, names: list[str], kind: str) -> dict[str, list[str]]:
+        """[`resolve_each`][terok_shield.dns.resolver.DnsResolver.resolve_each], announced on stderr like a batch."""
+        if not names:
+            return {}
+        rounds = -(-len(names) // MAX_RESOLVE_WORKERS)
+        bound = rounds * RESOLVE_TIMEOUT * 2
+        print(f"Resolving {len(names)} {kind} names, up to {bound} s.", file=sys.stderr)
+        answers = self.resolve_each(names)
+        print(f"Resolved {sum(1 for ips in answers.values() if ips)} names.", file=sys.stderr)
+        return answers
 
     def _resolve_announced(self, domains: list[str]) -> list[str]:
         """Resolve *domains* and tell the operator what the wait is for.
@@ -148,24 +260,42 @@ class DnsResolver:
         print(f"Resolved to {len(ips)} addresses in {elapsed:.1f} s.", file=sys.stderr)
         return ips
 
-    def resolve_domains(self, domains: list[str]) -> list[str]:
+    def resolve_domains(self, domains: list[str], *, quiet: bool = False) -> list[str]:
         """Resolve domain names to IPs (A + AAAA), best-effort and concurrent.
 
         Probes for a lookup tool once, then resolves every domain on a small thread
         pool — a batch costs about its slowest single lookup. Unresolvable
-        domains are skipped with a warning; results are deduplicated in
+        domains are skipped with a warning (a typo or a DNS failure), logged
+        always and printed to stderr unless *quiet*: a background check — the
+        security-tier refresh before a live allow — must not crowd out the
+        one line its own caller prints there.  Results are deduplicated in
         first-seen (input) order.
         """
+        per_domain = self.resolve_each(domains, quiet=quiet)
+        return list(dict.fromkeys(ip for ips in per_domain.values() for ip in ips))
+
+    def resolve_each(self, domains: list[str], *, quiet: bool = False) -> dict[str, list[str]]:
+        """Resolve every domain on its own: the addresses per name, in input order.
+
+        The per-name form of [`resolve_domains`][terok_shield.dns.resolver.DnsResolver.resolve_domains],
+        with the same lookup-tool probe, thread pool and warnings; a name that
+        resolved to nothing maps to an empty list.
+        """
         if not domains:
-            return []
+            return {}
         if self._runner.has("dig") or self._runner.has("drill"):
             resolve = self._resolve_via_lookup
         else:
             logger.warning("neither dig nor drill found — using getent for DNS resolution")
             resolve = self._resolve_via_getent
         with ThreadPoolExecutor(max_workers=min(len(domains), MAX_RESOLVE_WORKERS)) as pool:
-            per_domain = pool.map(resolve, domains)
-        return list(dict.fromkeys(ip for ips in per_domain for ip in ips))
+            per_domain = list(pool.map(resolve, domains))
+        for domain in (d for d, ips in zip(domains, per_domain, strict=True) if not ips):
+            message = f"No address for {domain}."
+            logger.warning(message)
+            if not quiet:
+                print(message, file=sys.stderr)
+        return dict(zip(domains, per_domain, strict=True))
 
     # ── Resolution detail ───────────────────────────────────
 
@@ -185,21 +315,11 @@ class DnsResolver:
                     "lookup returned nothing for %r but NSS resolved it — the tool is broken here",
                     domain,
                 )
-        return self._warn_if_empty(domain, ips)
+        return ips
 
     def _resolve_via_getent(self, domain: str) -> list[str]:
         """Resolve via NSS (``getent``) — the path taken when ``dig`` is absent."""
-        ips = self._runner.getent_hosts(domain, timeout=RESOLVE_TIMEOUT)
-        return self._warn_if_empty(domain, ips)
-
-    @staticmethod
-    def _warn_if_empty(domain: str, ips: list[str]) -> list[str]:
-        """Say so on an empty resolution (typo or DNS failure); pass the IPs through."""
-        if not ips:
-            message = f"No address for {domain}."
-            logger.warning(message)
-            print(message, file=sys.stderr)
-        return ips
+        return self._runner.getent_hosts(domain, timeout=RESOLVE_TIMEOUT)
 
     # ── Cache mechanics ─────────────────────────────────────
 
@@ -242,15 +362,32 @@ class DnsResolver:
         return (time.time() - mtime) < max_age
 
     @staticmethod
+    def _cache_current(path: Path, source_mtime: float) -> bool:
+        """True when *path* holds an answer for the current policy — stale by age at most.
+
+        Unlike ``_cache_fresh`` it ignores age: a cache that post-dates the
+        authored policy still answers for it, however long ago it was written.
+        """
+        try:
+            return path.stat().st_mtime >= source_mtime
+        except OSError:
+            return False
+
+    @staticmethod
     def _read_cache(path: Path) -> list[str]:
         """Read cached IPs from a resolved file."""
         if not path.is_file():
             return []
         return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
+    @classmethod
+    def _write_cache(cls, path: Path, ips: list[str]) -> None:
+        """Write resolved IPs atomically, one per line."""
+        cls._write_text(path, "\n".join(ips) + "\n" if ips else "")
+
     @staticmethod
-    def _write_cache(path: Path, ips: list[str]) -> None:
-        """Write resolved IPs atomically (unique temp file + rename).
+    def _write_text(path: Path, text: str) -> None:
+        """Write a cache file atomically (unique temp file + rename).
 
         The host-level file is shared across concurrently starting tasks — a
         torn read would seed a container with a truncated allowlist — and two
@@ -261,7 +398,7 @@ class DnsResolver:
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
-                f.write("\n".join(ips) + "\n" if ips else "")
+                f.write(text)
             os.replace(tmp, path)
         except OSError:
             with contextlib.suppress(OSError):

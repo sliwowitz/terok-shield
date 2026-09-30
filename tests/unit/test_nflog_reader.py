@@ -12,6 +12,7 @@ in the script itself requires anything outside the standard library.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import struct
 from pathlib import Path
@@ -19,7 +20,10 @@ from unittest import mock
 
 import pytest
 
+from terok_shield.nft import constants as nft_constants
+from terok_shield.nft.rules import RulesetBuilder
 from terok_shield.resources import nflog_reader as reader
+from terok_shield.state import StateBundle
 
 from ..testfs import (
     AUDIT_FILENAME,
@@ -33,6 +37,7 @@ from ..testfs import (
 )
 from ..testnet import (
     DNSMASQ_DOMAIN,
+    IPV6_LINK_LOCAL,
     IPV6_MCAST_ALL_ROUTERS,
     IPV6_MCAST_MLDV2,
     TEST_DOMAIN,
@@ -40,6 +45,7 @@ from ..testnet import (
     TEST_DOMAIN_MARKUP,
     TEST_IP1,
     TEST_IP2,
+    TEST_IP3,
     TEST_IP99,
 )
 
@@ -377,6 +383,19 @@ class TestIsNoiseDest:
         """Unparseable input maps to False so malformed data falls through to emit."""
         assert reader._is_noise_dest("not-an-ip") is False
 
+    def test_icmpv6_to_link_local_unicast_is_noise(self) -> None:
+        """The kernel's neighbour-discovery probes are not the workload's doing."""
+        assert reader._is_noise_dest(IPV6_LINK_LOCAL, socket.IPPROTO_ICMPV6) is True
+
+    @pytest.mark.parametrize(
+        "proto",
+        [socket.IPPROTO_TCP, socket.IPPROTO_UDP, 0],
+        ids=["tcp", "udp", "unknown"],
+    )
+    def test_a_connection_to_link_local_unicast_is_not_noise(self, proto: int) -> None:
+        """A TCP or UDP attempt at a link-local address is the workload's own, and recorded."""
+        assert reader._is_noise_dest(IPV6_LINK_LOCAL, proto) is False
+
 
 class TestResolveHubSocketPath:
     """``_resolve_hub_socket_path`` picks the per-container path or the explicit override.
@@ -492,7 +511,7 @@ class TestSocketEmitterContainerExited:
 
 
 class TestAttrsToEvent:
-    """``_attrs_to_event`` must keep only BLOCKED-prefixed packets."""
+    """``_attrs_to_event`` keeps the refusals and the window accepts, nothing else."""
 
     def test_blocked_prefix_returns_event(self) -> None:
         attrs = {
@@ -502,6 +521,15 @@ class TestAttrsToEvent:
         event = reader._attrs_to_event(attrs)
         assert event is not None
         assert event.dest == TEST_IP1
+
+    def test_bypass_prefix_returns_a_bypass_event(self) -> None:
+        attrs = {
+            reader._NFULA_PREFIX: b"TEROK_SHIELD_BYPASS\x00",
+            reader._NFULA_PAYLOAD: _ipv4_tcp_packet(dest=TEST_IP1, port=443),
+        }
+        event = reader._attrs_to_event(attrs)
+        assert event is not None
+        assert event.action == "bypass"
 
     def test_non_blocked_prefix_returns_none(self) -> None:
         attrs = {
@@ -514,6 +542,55 @@ class TestAttrsToEvent:
         attrs = {
             reader._NFULA_PREFIX: b"BLOCKED\x00",
             reader._NFULA_PAYLOAD: b"\x00" * 5,
+        }
+        assert reader._attrs_to_event(attrs) is None
+
+    @pytest.mark.parametrize(
+        ("prefix", "action"),
+        [
+            pytest.param(f"{nft_constants.BLOCKED_LOG_PREFIX}: ", "blocked", id="blocked"),
+            pytest.param(f"{nft_constants.BYPASS_LOG_PREFIX}: ", "bypass", id="bypass"),
+            pytest.param(f"{nft_constants.DOWN_LOG_PREFIX}: ", "down", id="down"),
+            pytest.param(f"{nft_constants.DENIED_LOG_PREFIX}: ", "security_deny", id="denied"),
+            pytest.param(f"{nft_constants.PRIVATE_LOG_PREFIX}: ", "private_range", id="private"),
+            pytest.param("DENIED", "security_deny", id="bare-tag"),
+            pytest.param(nft_constants.PRIVATE_LOG_PREFIX, "private_range", id="no-separator"),
+        ],
+    )
+    def test_each_recorded_tag_maps_to_its_action(self, prefix: str, action: str) -> None:
+        """Every recorded prefix carries its own action — stemmed, bare, with or without ``: ``."""
+        attrs = {
+            reader._NFULA_PREFIX: prefix.encode() + b"\x00",
+            reader._NFULA_PAYLOAD: _ipv4_tcp_packet(dest=TEST_IP1, port=443),
+        }
+        event = reader._attrs_to_event(attrs)
+        assert event is not None
+        assert event.action == action
+
+    def test_an_allow_tier_accept_is_not_recorded(self) -> None:
+        """``ALLOWED`` is the bulk of all traffic — nothing to review, so nothing to keep."""
+        attrs = {
+            reader._NFULA_PREFIX: f"{nft_constants.ALLOWED_LOG_PREFIX}: ".encode() + b"\x00",
+            reader._NFULA_PAYLOAD: _ipv4_tcp_packet(dest=TEST_IP1, port=443),
+        }
+        assert reader._attrs_to_event(attrs) is None
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "TEROK_SHIELD_QUARANTINE_BLOCKED: ",
+            "TEROK_SHIELD_BLOCKED_LEGACY: ",
+            "XBLOCKED",
+            "NOT_DENIED: ",
+            "TEROK_SHIELD_: ",
+            "",
+        ],
+    )
+    def test_a_tag_merely_containing_a_known_one_is_dropped(self, prefix: str) -> None:
+        """Exact matching: a new tag that contains ``BLOCKED`` must never become a prompt."""
+        attrs = {
+            reader._NFULA_PREFIX: prefix.encode() + b"\x00",
+            reader._NFULA_PAYLOAD: _ipv4_tcp_packet(dest=TEST_IP1, port=443),
         }
         assert reader._attrs_to_event(attrs) is None
 
@@ -533,6 +610,24 @@ class TestParseMessages:
         events = reader._parse_messages(blocked + allowed)
         assert len(events) == 1
         assert events[0].dest == TEST_IP1
+
+    def test_mixed_batch_keeps_the_deny_set_and_the_floors_and_drops_allowed(self) -> None:
+        """DENIED and PRIVATE are kept as audit-only actions; ALLOWED stays dropped."""
+        batch = b"".join(
+            _nflog_message(f"{prefix}: ", _ipv4_tcp_packet(dest=dest, port=443))
+            for prefix, dest in (
+                (nft_constants.DENIED_LOG_PREFIX, TEST_IP1),
+                (nft_constants.ALLOWED_LOG_PREFIX, TEST_IP2),
+                (nft_constants.PRIVATE_LOG_PREFIX, TEST_IP3),
+                (nft_constants.DOWN_LOG_PREFIX, TEST_IP99),
+            )
+        )
+        events = reader._parse_messages(batch)
+        assert [(e.action, e.dest) for e in events] == [
+            ("security_deny", TEST_IP1),
+            ("private_range", TEST_IP3),
+            ("down", TEST_IP99),
+        ]
 
 
 class TestBuildBindMsg:
@@ -574,6 +669,49 @@ class TestDomainCache:
         cache = reader._DomainCache(tmp_path)
         cache.refresh()  # no log file — should not raise
         assert cache.lookup(TEST_IP1) == ""
+
+    def test_refresh_rereads_the_log_only_when_it_changed(self, tmp_path: Path) -> None:
+        """A miss on an unchanged log costs a stat, not a full read — misses are the common case."""
+        log = tmp_path / DNSMASQ_LOG_FILENAME
+        log.write_text(f"reply {TEST_DOMAIN} is {TEST_IP1}\n")
+        cache = reader._DomainCache(tmp_path)
+        cache.refresh()
+
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("re-read")):
+            cache.refresh()  # unchanged: no read at all
+
+        with log.open("a") as handle:
+            handle.write(f"reply {DNSMASQ_DOMAIN} is {TEST_IP2}\n")
+        cache.refresh()
+
+        assert cache.lookup(TEST_IP1) == TEST_DOMAIN
+        assert cache.lookup(TEST_IP2) == DNSMASQ_DOMAIN
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(OSError("gone"), id="oserror"),
+            pytest.param(UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"), id="not-utf8"),
+        ],
+    )
+    def test_a_failed_read_keeps_the_previous_mapping(
+        self, tmp_path: Path, failure: Exception
+    ) -> None:
+        """A read that fails after the log changed leaves the cache as it was, and retries later."""
+        log = tmp_path / DNSMASQ_LOG_FILENAME
+        log.write_text(f"reply {TEST_DOMAIN} is {TEST_IP1}\n")
+        cache = reader._DomainCache(tmp_path)
+        cache.refresh()
+        with log.open("a") as handle:
+            handle.write(f"reply {DNSMASQ_DOMAIN} is {TEST_IP2}\n")
+
+        with mock.patch.object(Path, "read_text", side_effect=failure):
+            cache.refresh()  # kept, not raised
+        assert cache.lookup(TEST_IP1) == TEST_DOMAIN
+        assert cache.lookup(TEST_IP2) == ""
+
+        cache.refresh()  # the change was never parsed, so the next refresh reads it
+        assert cache.lookup(TEST_IP2) == DNSMASQ_DOMAIN
 
 
 # ── Emitters ──────────────────────────────────────────────────────────
@@ -801,7 +939,7 @@ class TestReaderSession:
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
         fake_sock = _FakeSocket()
 
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
 
         def fake_select(rfds: list, *_args: object, **_kwargs: object) -> tuple[list, list, list]:
             session._stop_requested = True  # exit after the first tick
@@ -834,7 +972,7 @@ class TestReaderSession:
 
         emitter = _FlakyEmitter()
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=emitter)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         # Drive two ticks so a failed emit on tick 1 can retry on tick 2
         # without the dedup window suppressing the retry.
         session._maybe_emit(raw, now=0.0)
@@ -879,8 +1017,10 @@ class TestReaderSession:
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
         fake_sock = _FakeSocket()
         noise = [
-            reader._RawBlockEvent(dest=IPV6_MCAST_ALL_ROUTERS, port=0, proto=socket.IPPROTO_ICMPV6),
-            reader._RawBlockEvent(dest=IPV6_MCAST_MLDV2, port=0, proto=socket.IPPROTO_ICMPV6),
+            reader._RawPacketEvent(
+                dest=IPV6_MCAST_ALL_ROUTERS, port=0, proto=socket.IPPROTO_ICMPV6
+            ),
+            reader._RawPacketEvent(dest=IPV6_MCAST_MLDV2, port=0, proto=socket.IPPROTO_ICMPV6),
         ]
 
         def fake_select(rfds: list, *_args: object, **_kwargs: object) -> tuple[list, list, list]:
@@ -905,8 +1045,8 @@ class TestReaderSession:
         session._domain_cache._mapping = {TEST_IP1: TEST_DOMAIN, TEST_IP2: TEST_DOMAIN}
         fake_sock = _FakeSocket()
         events = [
-            reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP),
-            reader._RawBlockEvent(dest=TEST_IP2, port=443, proto=socket.IPPROTO_TCP),
+            reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP),
+            reader._RawPacketEvent(dest=TEST_IP2, port=443, proto=socket.IPPROTO_TCP),
         ]
 
         def fake_select(rfds: list, *_args: object, **_kwargs: object) -> tuple[list, list, list]:
@@ -939,7 +1079,7 @@ class TestReaderSession:
                 "meta_path": str(meta),
             },
         )
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
         blocked = next(payload for kind, payload in recorder.calls if kind == "blocked")
@@ -956,8 +1096,8 @@ class TestReaderSession:
         fake_sock = _FakeSocket()
         # Two *distinct* IPs, no domain in cache → two emissions expected.
         events = [
-            reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP),
-            reader._RawBlockEvent(dest=TEST_IP99, port=443, proto=socket.IPPROTO_TCP),
+            reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP),
+            reader._RawPacketEvent(dest=TEST_IP99, port=443, proto=socket.IPPROTO_TCP),
         ]
 
         def fake_select(rfds: list, *_args: object, **_kwargs: object) -> tuple[list, list, list]:
@@ -987,7 +1127,7 @@ class TestAuditBlockAppend:
     def test_block_writes_audit_line_with_expected_shape(self, tmp_path: Path) -> None:
         recorder = _RecordingEmitter()
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
         audit_path = tmp_path / AUDIT_FILENAME
@@ -1010,7 +1150,7 @@ class TestAuditBlockAppend:
 
         recorder = _RecordingEmitter()
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
         entries = [
@@ -1022,7 +1162,7 @@ class TestAuditBlockAppend:
         """No resolved domain → no ``domain`` key in the audit entry (vs. empty string)."""
         recorder = _RecordingEmitter()
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
         entry = json.loads((tmp_path / AUDIT_FILENAME).read_text().splitlines()[0])
@@ -1037,7 +1177,7 @@ class TestAuditBlockAppend:
             emitter=recorder,
             static_dossier={"task": "abc", "project": "terok"},
         )
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
         entry = json.loads((tmp_path / AUDIT_FILENAME).read_text().splitlines()[0])
@@ -1047,7 +1187,7 @@ class TestAuditBlockAppend:
         """Shield-only deployments don't pad audit rows with an empty ``dossier`` key."""
         recorder = _RecordingEmitter()
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
         entry = json.loads((tmp_path / AUDIT_FILENAME).read_text().splitlines()[0])
@@ -1071,7 +1211,7 @@ class TestAuditBlockAppend:
 
         emitter = _AlwaysFailingEmitter()
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=emitter)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
         audit_path = tmp_path / AUDIT_FILENAME
@@ -1085,7 +1225,7 @@ class TestAuditBlockAppend:
         (tmp_path / AUDIT_FILENAME).mkdir()
 
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         session._maybe_emit(raw, now=0.0)
 
         # Wire still received the event despite audit failure.
@@ -1096,7 +1236,7 @@ class TestAuditBlockAppend:
         """Anything other than TCP/UDP gets the numeric proto in the audit entry."""
         recorder = _RecordingEmitter()
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=0, proto=132)  # SCTP
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=0, proto=132)  # SCTP
         session._maybe_emit(raw, now=0.0)
 
         entry = json.loads((tmp_path / AUDIT_FILENAME).read_text().splitlines()[0])
@@ -1124,7 +1264,7 @@ class TestAuditBlockAppend:
 
         emitter = _AlwaysFailingEmitter()
         session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=emitter)
-        raw = reader._RawBlockEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
         # Five NFLOG packets within the same dedup window — TCP retries.
         for t in (0.0, 1.0, 2.0, 5.0, 10.0):
             session._maybe_emit(raw, now=t)
@@ -1228,3 +1368,285 @@ class _FakeSocket:
 
     def close(self) -> None:
         """No-op — present so ``ReaderSession.run``'s finally block can call it."""
+
+
+class TestBypassWindowRecords:
+    """While the window is open nothing is refused, so nothing is prompted on."""
+
+    def test_bypass_event_is_audited_but_never_prompted(self, tmp_path: Path) -> None:
+        """The window's traffic reaches audit.jsonl; the clearance wire stays quiet."""
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        event = reader._RawPacketEvent(
+            dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP, action="bypass"
+        )
+
+        session._maybe_emit(event, now=0.0)
+
+        assert recorder.calls == []
+        entries = [
+            json.loads(line) for line in (tmp_path / AUDIT_FILENAME).read_text().splitlines()
+        ]
+        assert [e["action"] for e in entries] == ["bypass"]
+        assert entries[0]["dest"] == TEST_IP1
+
+    def test_a_window_accept_does_not_mute_a_later_refusal(self, tmp_path: Path) -> None:
+        """Dedup is scoped per action, so the same host still records both verdicts."""
+        session = reader.ReaderSession(
+            state_dir=tmp_path, container="c1", emitter=_RecordingEmitter()
+        )
+        bypassed = reader._RawPacketEvent(
+            dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP, action="bypass"
+        )
+        blocked = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+
+        session._maybe_emit(bypassed, now=0.0)
+        session._maybe_emit(blocked, now=1.0)
+
+        entries = [
+            json.loads(line) for line in (tmp_path / AUDIT_FILENAME).read_text().splitlines()
+        ]
+        assert [e["action"] for e in entries] == ["bypass", "blocked"]
+
+    def test_repeated_window_accepts_stay_bounded(self, tmp_path: Path) -> None:
+        """An open window must not write one audit line per retransmit."""
+        session = reader.ReaderSession(
+            state_dir=tmp_path, container="c1", emitter=_RecordingEmitter()
+        )
+        event = reader._RawPacketEvent(
+            dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP, action="bypass"
+        )
+
+        session._maybe_emit(event, now=0.0)
+        session._maybe_emit(event, now=1.0)
+        session._maybe_emit(event, now=session._DEDUP_WINDOW_S + 1.0)
+
+        lines = (tmp_path / AUDIT_FILENAME).read_text().splitlines()
+        assert len(lines) == 2
+
+
+class TestAuditOnlyRecords:
+    """The DOWN catch-all, the t20 deny set and the range floors are recorded, never prompted on."""
+
+    @pytest.mark.parametrize("action", ["down", "security_deny", "private_range"])
+    def test_audited_but_never_prompted(self, tmp_path: Path, action: str) -> None:
+        """None of these is a question an allow can answer, so the clearance wire stays quiet."""
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        event = reader._RawPacketEvent(
+            dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP, action=action
+        )
+
+        session._maybe_emit(event, now=0.0)
+
+        assert recorder.calls == []
+        entries = [
+            json.loads(line) for line in (tmp_path / AUDIT_FILENAME).read_text().splitlines()
+        ]
+        assert [(e["action"], e["dest"]) for e in entries] == [(action, TEST_IP1)]
+
+    @pytest.mark.parametrize("action", ["down", "security_deny", "private_range"])
+    def test_dedup_is_scoped_by_action(self, tmp_path: Path, action: str) -> None:
+        """An audit-only line must not mute a terminal refusal to the same host, nor its prompt."""
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        audit_only = reader._RawPacketEvent(
+            dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP, action=action
+        )
+        blocked = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+
+        session._maybe_emit(audit_only, now=0.0)
+        session._maybe_emit(blocked, now=1.0)
+
+        entries = [
+            json.loads(line) for line in (tmp_path / AUDIT_FILENAME).read_text().splitlines()
+        ]
+        assert [e["action"] for e in entries] == [action, "blocked"]
+        assert [kind for kind, _ in recorder.calls] == ["blocked"]
+
+    @pytest.mark.parametrize("action", ["down", "security_deny", "private_range"])
+    def test_repeats_stay_bounded(self, tmp_path: Path, action: str) -> None:
+        """One line per target per window, however often the workload retries."""
+        session = reader.ReaderSession(
+            state_dir=tmp_path, container="c1", emitter=_RecordingEmitter()
+        )
+        event = reader._RawPacketEvent(
+            dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP, action=action
+        )
+
+        for now in (0.0, 1.0, 5.0, session._DEDUP_WINDOW_S + 1.0):
+            session._maybe_emit(event, now=now)
+
+        assert len((tmp_path / AUDIT_FILENAME).read_text().splitlines()) == 2
+
+    def test_kernel_neighbour_probes_to_link_local_are_not_recorded(self, tmp_path: Path) -> None:
+        """ICMPv6 to fe80::/10 hits the hard-deny floor on the kernel's schedule, not the task's."""
+        session = reader.ReaderSession(
+            state_dir=tmp_path, container="c1", emitter=_RecordingEmitter()
+        )
+        probe = reader._RawPacketEvent(
+            dest=IPV6_LINK_LOCAL, port=0, proto=socket.IPPROTO_ICMPV6, action="private_range"
+        )
+        attempt = reader._RawPacketEvent(
+            dest=IPV6_LINK_LOCAL, port=443, proto=socket.IPPROTO_TCP, action="private_range"
+        )
+
+        session._maybe_emit(probe, now=0.0)
+        session._maybe_emit(attempt, now=1.0)
+
+        entries = [
+            json.loads(line) for line in (tmp_path / AUDIT_FILENAME).read_text().splitlines()
+        ]
+        assert [(e["dest"], e["port"]) for e in entries] == [(IPV6_LINK_LOCAL, 443)]
+
+
+class TestAuditFlag:
+    """The reader honours the audit flag ``pre_start`` recorded in the bundle."""
+
+    @staticmethod
+    def _disable_audit(state_dir: Path) -> None:
+        """Record audit as off, the way ``pre_start`` does for an ``audit_enabled=False`` config."""
+        StateBundle(state_dir).audit_flag.write_text("false\n")
+
+    def test_a_refusal_is_still_prompted_with_audit_off(self, tmp_path: Path) -> None:
+        """Audit off silences the log, never the clearance flow."""
+        self._disable_audit(tmp_path)
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        raw = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+
+        session._maybe_emit(raw, now=0.0)
+
+        assert [kind for kind, _ in recorder.calls] == ["blocked"]
+        assert not (tmp_path / AUDIT_FILENAME).exists()
+
+    @pytest.mark.parametrize("action", ["bypass", "down", "security_deny", "private_range"])
+    def test_an_audit_only_event_is_dropped_before_any_lookup(
+        self, tmp_path: Path, action: str
+    ) -> None:
+        """With nowhere to go, an audit-only event costs nothing — not even the domain lookup."""
+        self._disable_audit(tmp_path)
+        recorder = _RecordingEmitter()
+        session = reader.ReaderSession(state_dir=tmp_path, container="c1", emitter=recorder)
+        event = reader._RawPacketEvent(
+            dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP, action=action
+        )
+
+        with mock.patch.object(session, "_resolve_domain") as lookup:
+            session._maybe_emit(event, now=0.0)
+
+        lookup.assert_not_called()
+        assert recorder.calls == []
+        assert not (tmp_path / AUDIT_FILENAME).exists()
+
+    @pytest.mark.parametrize(
+        "flag",
+        [pytest.param("true\n", id="on"), pytest.param(None, id="never-recorded")],
+    )
+    def test_audit_lines_are_written_unless_the_bundle_says_off(
+        self, tmp_path: Path, flag: str | None
+    ) -> None:
+        """Only an explicit ``false`` is off — the shield's default and the reader's old behaviour."""
+        if flag is not None:
+            StateBundle(tmp_path).audit_flag.write_text(flag)
+        session = reader.ReaderSession(
+            state_dir=tmp_path, container="c1", emitter=_RecordingEmitter()
+        )
+        event = reader._RawPacketEvent(
+            dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP, action="down"
+        )
+
+        session._maybe_emit(event, now=0.0)
+
+        assert (tmp_path / AUDIT_FILENAME).read_text().count('"down"') == 1
+
+    def test_a_garbled_flag_reads_as_on(self, tmp_path: Path) -> None:
+        """Non-UTF-8 content is not an explicit ``false``."""
+        StateBundle(tmp_path).audit_flag.write_bytes(b"\xff\xfe")
+        assert reader._read_audit_flag(tmp_path) is True
+
+
+class TestDedupPruning:
+    """The dedup maps forget keys whose window has passed, once per window."""
+
+    def test_a_sweep_does_not_grow_the_maps_forever(self, tmp_path: Path) -> None:
+        """Keys older than the window are dropped; what they would have suppressed is nothing."""
+        session = reader.ReaderSession(
+            state_dir=tmp_path, container="c1", emitter=_RecordingEmitter()
+        )
+        for dest in (TEST_IP1, TEST_IP2, TEST_IP99):
+            raw = reader._RawPacketEvent(dest=dest, port=443, proto=socket.IPPROTO_TCP)
+            session._maybe_emit(raw, now=0.0)
+        assert len(session._last_audit) == len(session._last_emit) == 3
+
+        later = reader._RawPacketEvent(dest=TEST_IP3, port=443, proto=socket.IPPROTO_TCP)
+        session._maybe_emit(later, now=session._DEDUP_WINDOW_S + 1.0)
+
+        assert set(session._last_audit) == set(session._last_emit) == {f"blocked:{TEST_IP3}"}
+
+    def test_a_key_inside_its_window_survives_a_prune(self, tmp_path: Path) -> None:
+        """Pruning changes no decision: a recent key still suppresses its repeat."""
+        session = reader.ReaderSession(
+            state_dir=tmp_path, container="c1", emitter=_RecordingEmitter()
+        )
+        early = reader._RawPacketEvent(dest=TEST_IP1, port=443, proto=socket.IPPROTO_TCP)
+        recent = reader._RawPacketEvent(dest=TEST_IP2, port=443, proto=socket.IPPROTO_TCP)
+        session._maybe_emit(early, now=0.0)
+        session._maybe_emit(recent, now=20.0)
+
+        session._maybe_emit(recent, now=session._DEDUP_WINDOW_S + 1.0)  # prunes the early key
+
+        assert set(session._last_audit) == {f"blocked:{TEST_IP2}"}
+        assert len((tmp_path / AUDIT_FILENAME).read_text().splitlines()) == 2
+
+
+class TestProtocolDrift:
+    """The reader's mirrored protocol constants match the package's — it cannot import them."""
+
+    @staticmethod
+    def _ruleset_prefixes() -> set[str]:
+        """Every ``*_LOG_PREFIX`` the nft constants define."""
+        return {
+            value for name, value in vars(nft_constants).items() if name.endswith("_LOG_PREFIX")
+        }
+
+    def test_every_ruleset_prefix_is_recorded_or_dropped_on_purpose(self) -> None:
+        """A new prefix fails here until the reader decides what it is."""
+        decided = {*reader._TAG_ACTIONS, *reader._UNRECORDED_TAGS}
+        for prefix in self._ruleset_prefixes():
+            assert prefix.startswith(reader._PREFIX_STEM), prefix
+            assert prefix.removeprefix(reader._PREFIX_STEM) in decided, prefix
+
+    def test_every_reader_tag_is_a_ruleset_prefix(self) -> None:
+        """No stale tag: each one the reader knows is a prefix the ruleset can emit."""
+        known = {reader._PREFIX_STEM + tag for tag in reader._TAG_ACTIONS}
+        known |= {reader._PREFIX_STEM + tag for tag in reader._UNRECORDED_TAGS}
+        assert known == self._ruleset_prefixes()
+
+    def test_nflog_group_matches(self) -> None:
+        assert reader.NFLOG_GROUP == nft_constants.NFLOG_GROUP
+
+    def test_rendered_prefixes_round_trip_through_the_tag_table(self) -> None:
+        """Every prefix and group the generated rulesets carry reads back as the table says."""
+        rulesets = "".join(
+            (
+                RulesetBuilder().build_up(),
+                RulesetBuilder().build_down(),
+                RulesetBuilder().build_down(disengaged=True),
+                RulesetBuilder.build_quarantine(),
+            )
+        )
+        prefixes = set(re.findall(r'prefix "([^"]*)"', rulesets))
+        assert prefixes == {f"{prefix}: " for prefix in self._ruleset_prefixes()}
+        for prefix in prefixes:
+            attrs = {
+                reader._NFULA_PREFIX: prefix.encode() + b"\x00",
+                reader._NFULA_PAYLOAD: _ipv4_tcp_packet(dest=TEST_IP1, port=443),
+            }
+            event = reader._attrs_to_event(attrs)
+            tag = prefix.removesuffix(": ").removeprefix(reader._PREFIX_STEM)
+            assert (event.action if event else None) == reader._TAG_ACTIONS.get(tag), prefix
+        assert set(re.findall(r"log group (\d+)", rulesets)) == {str(reader.NFLOG_GROUP)}
+
+    def test_the_audit_flag_file_is_the_bundles(self, tmp_path: Path) -> None:
+        assert StateBundle(tmp_path).audit_flag.name == reader._AUDIT_FLAG_FILE_NAME
