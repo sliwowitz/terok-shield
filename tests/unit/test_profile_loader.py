@@ -10,7 +10,7 @@ import pytest
 from terok_shield.profiles import ProfileLoader, UnknownProfileError
 
 from ..testfs import FAKE_PROFILES_DIR, FORBIDDEN_TRAVERSAL, NONEXISTENT_DIR
-from ..testnet import CUSTOM_DOMAIN, DEV_PYPI_DOMAIN, TEST_DOMAIN, TEST_IP1
+from ..testnet import CUSTOM_DOMAIN, DEV_PYPI_DOMAIN, LOCALHOST_GRANT, TEST_DOMAIN, TEST_IP1
 from .helpers import write_lines
 
 
@@ -86,9 +86,11 @@ def test_load_profile_keeps_host_service_grant_ports(tmp_path: Path) -> None:
     The port is what routes the grant to the ruleset preamble; dropping it
     would leave a bare ``localhost`` the loader cannot act on.
     """
-    write_lines(tmp_path / "llm.txt", ["+localhost:9931", f"+{TEST_IP1}:8080", f"-{TEST_DOMAIN}"])
+    write_lines(
+        tmp_path / "llm.txt", [f"+{LOCALHOST_GRANT}", f"+{TEST_IP1}:8080", f"-{TEST_DOMAIN}"]
+    )
     assert ProfileLoader(user_dir=tmp_path).load_profile("llm") == [
-        "localhost:9931",
+        LOCALHOST_GRANT,
         f"{TEST_IP1}:8080",
     ]
 

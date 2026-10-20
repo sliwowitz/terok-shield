@@ -32,6 +32,8 @@ from ..testnet import (
     BROAD_CIDR_8,
     CONTAINER_HOSTNAME,
     IPV6_CLOUDFLARE,
+    LOCALHOST_GRANT,
+    LOCALHOST_GRANT_PORT,
     SLIRP4NETNS_GATEWAY,
     TEST_DOMAIN,
     TEST_DOMAIN2,
@@ -877,15 +879,15 @@ def test_pre_start_opens_a_profile_localhost_grant_in_the_preamble(
     config = make_config(loopback_ports=(8080,))
     harness = make_hook_mode(config=config)
     harness.runner.run.return_value = _MODERN_PODMAN_INFO
-    harness.profiles.compose_profiles.return_value = ["localhost:9931"]
+    harness.profiles.compose_profiles.return_value = [LOCALHOST_GRANT]
 
     harness.mode.pre_start("test", ["llm"])
 
     bundle = StateBundle(config.state_dir)
-    assert "+localhost:9931" in bundle.tier_path("project_allow").read_text()
+    assert f"+{LOCALHOST_GRANT}" in bundle.tier_path("project_allow").read_text()
     ruleset = bundle.ruleset.read_text()
     assert f"tcp dport 8080 ip daddr {PASTA_HOST_LOOPBACK_MAP} accept" in ruleset
-    assert f"tcp dport 9931 ip daddr {PASTA_HOST_LOOPBACK_MAP} accept" in ruleset
+    assert f"tcp dport {LOCALHOST_GRANT_PORT} ip daddr {PASTA_HOST_LOOPBACK_MAP} accept" in ruleset
 
 
 def test_hooks_installer_writes_role_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
