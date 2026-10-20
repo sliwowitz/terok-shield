@@ -359,6 +359,22 @@ def test_effective_policy_localhost_ports_span_every_tier(tmp_path: Path) -> Non
     assert bundle.read_effective().localhost_ports() == (8000, 9090)
 
 
+def test_read_effective_loopback_ports_unions_supervisor_ports_with_policy_grants(
+    tmp_path: Path,
+) -> None:
+    """The preamble ports are ``loopback.ports`` plus every ``+localhost:PORT`` grant, deduplicated."""
+    bundle = StateBundle(tmp_path)
+    bundle.policy_dir.mkdir()
+    bundle.loopback_ports.write_text("8000\n8001\n")
+    bundle.tier_path("project_allow").write_text("+localhost:9931\n+localhost:8000\n")
+    assert bundle.read_effective_loopback_ports() == (8000, 8001, 9931)
+
+
+def test_read_effective_loopback_ports_is_empty_without_either_source(tmp_path: Path) -> None:
+    """No ``loopback.ports`` file and no policy tiers yield no preamble ports."""
+    assert StateBundle(tmp_path).read_effective_loopback_ports() == ()
+
+
 def test_effective_policy_composes_ips_and_domains_by_action(tmp_path: Path) -> None:
     """Compose folds live into its tiers and splits IPs/domains, allow minus deny."""
     bundle = StateBundle(tmp_path)

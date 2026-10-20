@@ -80,6 +80,19 @@ def test_load_profile_uses_user_override(tmp_path: Path) -> None:
     assert ProfileLoader(user_dir=tmp_path).load_profile("base") == [CUSTOM_DOMAIN, TEST_IP1]
 
 
+def test_load_profile_keeps_host_service_grant_ports(tmp_path: Path) -> None:
+    """A ``+localhost:PORT`` grant (or any ``host:port``) keeps its port through loading.
+
+    The port is what routes the grant to the ruleset preamble; dropping it
+    would leave a bare ``localhost`` the loader cannot act on.
+    """
+    write_lines(tmp_path / "llm.txt", ["+localhost:9931", f"+{TEST_IP1}:8080", f"-{TEST_DOMAIN}"])
+    assert ProfileLoader(user_dir=tmp_path).load_profile("llm") == [
+        "localhost:9931",
+        f"{TEST_IP1}:8080",
+    ]
+
+
 def test_compose_profiles_merges_and_deduplicates() -> None:
     """compose_profiles() merges multiple profiles while deduplicating entries."""
     entries = ProfileLoader(user_dir=NONEXISTENT_DIR).compose_profiles(["base", "dev-standard"])
