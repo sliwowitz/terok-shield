@@ -39,6 +39,14 @@ Shield-managed flags (`--name`, `--hooks-dir`, `--annotation`, `--cap-drop`,
 `--cap-add`, `--security-opt`, `--network`) are set automatically and rejected
 if passed after `--`.
 
+`run` and `prepare` author the container's state bundle (`ruleset.nft`, the
+policy tiers, the audit log) under
+`$XDG_STATE_HOME/terok/shield/containers/<container>` — or under the global
+`--state-dir` root when given — and stamp that path into the container's
+`terok.shield.state_dir` annotation. Every other verb finds the bundle through
+that annotation, so it works on any shielded container regardless of who
+launched it.
+
 ## prepare
 
 Resolve DNS, install hooks, and print the podman flags needed to launch a
