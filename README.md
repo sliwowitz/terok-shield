@@ -112,6 +112,13 @@ with a default-deny firewall — only destinations in the
 terok-shield run my-container --profiles dev-standard,my-project -- alpine:latest sh
 ```
 
+To see — or apply by hand — the ruleset those profiles produce, without
+setup, podman or any state:
+
+```bash
+terok-shield preview --profiles dev-standard,my-project > rules.nft
+```
+
 ### 3. Allow a domain at runtime
 
 ```bash

@@ -777,6 +777,36 @@ def test_preview_delegates_to_ruleset_builder(
     assert harness.mode.preview(**kwargs) == expected
 
 
+@pytest.mark.parametrize("down", [False, True], ids=["up", "down"])
+def test_preview_composes_profiles_into_the_live_tier_ruleset(
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+    down: bool,
+) -> None:
+    """preview(profiles=…) is the ruleset the hook applies for those profiles — without any state.
+
+    The profiles' ``+localhost:PORT`` grants join the preamble next to the
+    config's own ports, their literal IPs seed the t40 set, and their
+    domains are absent: the live tier learns those per query, so the
+    preview approximates nothing.  Nothing is resolved, inspected or written.
+    """
+    config = make_config(loopback_ports=(8080,))
+    harness = make_hook_mode(config=config, ruleset=RulesetBuilder(loopback_ports=(8080,)))
+    harness.profiles.compose_profiles.return_value = [LOCALHOST_GRANT, TEST_IP1, TEST_DOMAIN]
+
+    ruleset = harness.mode.preview(down=down, profiles=["llm"])
+
+    harness.profiles.compose_profiles.assert_called_once_with(["llm"])
+    assert f"tcp dport 8080 ip daddr {PASTA_HOST_LOOPBACK_MAP} accept" in ruleset
+    assert f"tcp dport {LOCALHOST_GRANT_PORT} ip daddr {PASTA_HOST_LOOPBACK_MAP} accept" in ruleset
+    assert f"add element inet terok_shield t40_project_allow_v4 {{ {TEST_IP1} }}" in ruleset
+    assert TEST_DOMAIN not in ruleset
+    assert ("policy accept" in ruleset) is down
+    harness.runner.run.assert_not_called()
+    harness.dns.resolve_and_cache.assert_not_called()
+    assert not StateBundle(config.state_dir).ruleset.exists()
+
+
 @pytest.mark.parametrize(
     ("runner_output", "expected"),
     [

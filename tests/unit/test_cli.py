@@ -277,6 +277,13 @@ def test_preview_parser_supports_flags(
     assert parsed.disengaged is expected_disengaged
 
 
+def test_preview_parser_supports_profiles(parser: argparse.ArgumentParser) -> None:
+    """preview takes the same comma-separated ``--profiles`` as the launch verbs."""
+    parsed = parser.parse_args(["preview", "--profiles", "base,my-project"])
+    assert parsed.profiles == ["base", "my-project"]
+    assert parser.parse_args(["preview"]).profiles is None
+
+
 def test_parser_supports_state_dir_flag(parser: argparse.ArgumentParser) -> None:
     """The global --state-dir option is available to all commands."""
     parsed = parser.parse_args(["--state-dir", FAKE_STATE_DIR_STR, "status"])
@@ -590,20 +597,26 @@ def test_allow_and_deny_dispatch_to_shield(
         pytest.param(
             ["preview"],
             "preview",
-            mock.call(down=False, disengaged=False),
+            mock.call(down=False, disengaged=False, profiles=None),
             id="preview-default",
         ),
         pytest.param(
             ["preview", "--down"],
             "preview",
-            mock.call(down=True, disengaged=False),
+            mock.call(down=True, disengaged=False, profiles=None),
             id="preview-down",
         ),
         pytest.param(
             ["preview", "--down", "--disengage"],
             "preview",
-            mock.call(down=True, disengaged=True),
+            mock.call(down=True, disengaged=True, profiles=None),
             id="preview-down-disengage",
+        ),
+        pytest.param(
+            ["preview", "--profiles", "base,my-project"],
+            "preview",
+            mock.call(down=False, disengaged=False, profiles=["base", "my-project"]),
+            id="preview-profiles",
         ),
         pytest.param(["profiles"], "profiles_list", mock.call(), id="profiles"),
     ],
