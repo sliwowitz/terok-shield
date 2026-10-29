@@ -87,10 +87,24 @@ COMMANDS: CommandTree = CommandTree(
         _lazy("prepare", "Prepare shield and print podman flags", "launch:PREPARE"),
         _lazy("run", "Launch a shielded container via podman", "launch:RUN"),
         _lazy("resolve", "Resolve DNS profiles and cache IPs", "launch:RESOLVE"),
-        _lazy("allow", "Live-allow a domain or IP for a container", "control:ALLOW"),
+        _lazy(
+            "allow",
+            "Allow a domain or IP for a container (live, or at its next start when stopped)",
+            "control:ALLOW",
+        ),
         _lazy("deny", "Live-deny a domain or IP for a container", "control:DENY"),
+        _lazy(
+            "override",
+            "Open a break-glass override above the security tier until a date, or revoke it",
+            "control:OVERRIDE",
+        ),
         _lazy("down", "Switch container to the DOWN posture (accept + log)", "control:DOWN"),
         _lazy("up", "Restore deny-all mode for a container", "control:UP"),
+        _lazy(
+            "bypass",
+            "Open, close or show the timed allow-all window for a container",
+            "control:BYPASS",
+        ),
         _lazy(
             "reset",
             "Forget DNS-learned allow state (back to authored policy seeds)",
@@ -102,6 +116,11 @@ COMMANDS: CommandTree = CommandTree(
             "control:QUARANTINE",
         ),
         _lazy("rules", "Show current nft rules for a container", "control:RULES"),
+        _lazy(
+            "harvest",
+            "Show what a container reached for (refusals, window and DOWN accepts)",
+            "observe:HARVEST",
+        ),
         _lazy(
             "watch",
             "Stream shield events — audit log, NFLOG packets, and DNS blocks on the dnsmasq tiers",

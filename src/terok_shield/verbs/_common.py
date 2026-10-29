@@ -15,12 +15,15 @@ version/environment formatting used by the status-style verbs.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING, Any
 
 from terok_util import ArgDef
 
+from ..state import recorded_rotation_risk
+
 if TYPE_CHECKING:
-    from terok_shield import EnvironmentCheck
+    from terok_shield import EnvironmentCheck, Shield, ShieldState
 
 
 def csv_list(value: str) -> list[str]:
@@ -74,6 +77,21 @@ def format_version(v: tuple[int, ...]) -> str:
     return ".".join(str(p) for p in v) if v != (0,) else "unknown"
 
 
+def format_seconds(seconds: int) -> str:
+    """Render a countdown in whole seconds the way nft spells durations (``4m59s``, ``1h``).
+
+    Zero units are left out, so an hour reads ``1h`` rather than ``1h0m0s``;
+    nothing at all left reads ``0s`` — the last second of a window.
+    """
+    parts: list[str] = []
+    rest = max(seconds, 0)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
+        amount, rest = divmod(rest, size)
+        if amount:
+            parts.append(f"{amount}{unit}")
+    return "".join(parts) or "0s"
+
+
 def print_env_hint(env: EnvironmentCheck) -> None:
     """Print human-readable environment issues and setup hint."""
     if env.issues:
@@ -83,3 +101,15 @@ def print_env_hint(env: EnvironmentCheck) -> None:
     if env.setup_hint:
         print()
         print(env.setup_hint)
+
+
+def print_rotation_risk(shield: Shield, posture: ShieldState) -> None:
+    """Print, to stderr, the names the container's DNS tier pins that matter in *posture*.
+
+    Read from the bundle, never the audit log — the warning reaches the
+    operator with audit off too — and written to stderr, so ``prepare``'s
+    eval-ready stdout stays exactly the podman flags.
+    """
+    risk = recorded_rotation_risk(shield.config.state_dir)
+    for line in risk.lines(posture) if risk is not None else ():
+        print(line, file=sys.stderr)

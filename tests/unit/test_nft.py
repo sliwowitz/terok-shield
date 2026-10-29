@@ -9,12 +9,19 @@ the asserted invariant clearer; they should never hide rule ordering,
 allow-vs-deny semantics, or input-validation guarantees.
 """
 
+import ipaddress
+import re
+import signal
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+
 import pytest
 
 from terok_shield.nft.constants import (
     BLOCKED_LOG_PREFIX,
     BYPASS_LOG_PREFIX,
     DOWN_LOG_PREFIX,
+    ELEMENT_TIMEOUT_MAX_SECONDS,
     HARD_DENY_RANGES,
     NFT_TABLE,
     PASTA_HOST_LOOPBACK_MAP,
@@ -31,12 +38,16 @@ from terok_shield.nft.rules import (
     arm_bypass_window,
     delete_deny_elements_dual,
     disarm_bypass_window,
+    flush_override_sets,
     parse_set_elements,
+    parse_window_expiry,
     restore_elements,
     safe_ip,
 )
 
 from ..testnet import (
+    ANY_IPV4,
+    ANY_IPV6,
     AWS_IMDS_V6,
     IPV4_CIDR_HOST_BITS,
     IPV4_CIDR_HOST_BITS_CANONICAL,
@@ -45,7 +56,10 @@ from ..testnet import (
     IPV6_VERBOSE,
     IPV6_VERBOSE_CANONICAL,
     LINK_LOCAL_DNS,
+    LOCALHOST_GRANT_PORT,
     SLIRP4NETNS_DNS,
+    SLIRP4NETNS_GATEWAY,
+    SLIRP4NETNS_GATEWAY_V6,
     TEST_DOMAIN,
     TEST_IP1,
     TEST_IP2,
@@ -62,6 +76,7 @@ _ALLOWED_LOG_PREFIX = "TEROK_SHIELD_ALLOWED"
 _BYPASS_LOG_PREFIX = "TEROK_SHIELD_BYPASS"
 _DOWN_LOG_PREFIX = "TEROK_SHIELD_DOWN"
 _BLOCKED_LOG_PREFIX = "TEROK_SHIELD_BLOCKED"
+_PRIVATE_LOG_PREFIX = "TEROK_SHIELD_PRIVATE"
 _ADMIN_PROHIBITED = "admin-prohibited"
 _INPUT_CHAIN = "chain input"
 _OUTPUT_CHAIN = "chain output"
@@ -232,6 +247,19 @@ def test_hook_ruleset_tier_order_is_authority_order() -> None:
     private = rs.index(PRIVATE_RANGES[0])  # 10.0.0.0/8
     allow = rs.index("@t40_project_allow_v4")
     assert hard_deny < override < deny < private < allow
+
+
+def test_the_window_sits_below_every_deny() -> None:
+    """The timed window widens only what the allowlist refuses — never t00 or t20.
+
+    So a ``bypass`` record is always an allowlist miss: vault hosts, private
+    ranges and the floor stay refused (and recorded as such) while it is open.
+    """
+    rs = RulesetBuilder().build_up()
+    window = rs.index("@bypass_window_v4")
+    for deny in (HARD_DENY_RANGES[0], "@t20_security_deny_v4", PRIVATE_RANGES[0]):
+        assert rs.index(deny) < window, deny
+    assert window < rs.index(f'prefix "{_BLOCKED_LOG_PREFIX}: " counter reject')
 
 
 def test_v6_imds_floor_is_absolute() -> None:
@@ -521,17 +549,87 @@ def test_add_override_elements_dual_targets_the_override_set() -> None:
     assert _add_element_command("t10_override_v6", IPV6_CLOUDFLARE) in cmd
 
 
+def test_override_elements_carry_the_seconds_their_override_has_left() -> None:
+    """A timed override is an element with a kernel timeout; one that never expires has none."""
+    cmd = add_override_elements_dual(
+        [TEST_IP1, TEST_IP2, IPV6_VERBOSE], timeouts={TEST_IP1: 86399, IPV6_VERBOSE: 60}
+    )
+    assert (
+        f"add element {NFT_TABLE} t10_override_v4 {{ {TEST_IP1} timeout 86399s, {TEST_IP2} }}"
+        in cmd
+    )
+    # Keys in any notation safe_ip accepts find their (canonical) element.
+    assert f"t10_override_v6 {{ {IPV6_VERBOSE_CANONICAL} timeout 60s }}" in cmd
+
+
+@pytest.mark.parametrize(
+    "seconds",
+    [
+        pytest.param(0, id="zero-means-never"),
+        pytest.param(-5, id="negative"),
+        pytest.param(True, id="bool"),
+        pytest.param(1.5, id="float"),
+        pytest.param(ELEMENT_TIMEOUT_MAX_SECONDS + 1, id="past-nft-seconds-literal"),
+    ],
+)
+def test_override_element_timeouts_are_validated(seconds: object) -> None:
+    """``timeout 0s`` would mean *never* — the opposite of an override about to run out."""
+    with pytest.raises(ValueError):
+        add_override_elements_dual([TEST_IP1], timeouts={TEST_IP1: seconds})  # type: ignore[dict-item]
+
+
+def test_the_override_sets_carry_their_own_element_timeouts() -> None:
+    """t10 declares the ``timeout`` flag with no default: each element brings its own, or none."""
+    for rs in (RulesetBuilder().build_up(), RulesetBuilder(set_timeout="30m").build_down()):
+        assert "set t10_override_v4 { type ipv4_addr; flags interval, timeout; }" in rs
+        assert "set t10_override_v6 { type ipv6_addr; flags interval, timeout; }" in rs
+
+
+def test_flush_override_sets_empties_both_families() -> None:
+    """The head of an atomic t10 reseed."""
+    assert flush_override_sets() == (
+        f"flush set {NFT_TABLE} t10_override_v4\nflush set {NFT_TABLE} t10_override_v6\n"
+    )
+
+
 def test_arm_bypass_window_adds_default_routes_with_timeout() -> None:
     """arm_bypass_window() adds 0.0.0.0/0 and ::/0 to the timed sets with the timeout."""
     cmd = arm_bypass_window("30m")
-    assert f"add element {NFT_TABLE} bypass_window_v4 {{ 0.0.0.0/0 timeout 30m }}" in cmd
-    assert f"add element {NFT_TABLE} bypass_window_v6 {{ ::/0 timeout 30m }}" in cmd
+    assert f"add element {NFT_TABLE} bypass_window_v4 {{ {ANY_IPV4} timeout 30m }}" in cmd
+    assert f"add element {NFT_TABLE} bypass_window_v6 {{ {ANY_IPV6} timeout 30m }}" in cmd
+
+
+def test_arm_bypass_window_flushes_before_it_adds() -> None:
+    """A re-arm replaces the countdown, even on a kernel that keeps an element's timeout on a plain add."""
+    cmd = arm_bypass_window("1m")
+    assert cmd.startswith(disarm_bypass_window())
+    assert cmd.count("add element") == 2
 
 
 def test_arm_bypass_window_rejects_bad_timeout() -> None:
     """arm_bypass_window() validates the timeout before interpolating it."""
     with pytest.raises(ValueError):
         arm_bypass_window("30m; drop")
+
+
+@pytest.mark.parametrize("duration", ["0s", "0m", "0h", "00d"])
+def test_arm_bypass_window_refuses_a_zero_duration(duration: str) -> None:
+    """nft reads ``timeout 0s`` as *never*: a zero-length window would be a permanent allow-all."""
+    with pytest.raises(ValueError, match="never expires"):
+        arm_bypass_window(duration)
+
+
+# nft refuses a seconds literal of nine digits or more ("Error: value too
+# large", nft 1.1.6 in a throwaway user netns: ``timeout 99999999s`` loads,
+# ``timeout 100000000s`` does not).  Pinned apart from the constant it bounds,
+# so raising both copies of the cap together cannot pass unnoticed — a far
+# deadline would then fail the hook's one ``nft -f`` transaction, and the start.
+NFT_SECONDS_LITERAL_LIMIT = 100_000_000
+
+
+def test_the_element_timeout_cap_is_one_nft_accepts() -> None:
+    """The longest timeout the shield writes is a seconds literal nft still takes."""
+    assert ELEMENT_TIMEOUT_MAX_SECONDS < NFT_SECONDS_LITERAL_LIMIT
 
 
 def test_disarm_bypass_window_flushes_both_families() -> None:
@@ -549,6 +647,38 @@ _builder = RulesetBuilder()
 def test_verify_up_accepts_the_generated_hook_ruleset() -> None:
     """verify_up() accepts the enforcing ruleset generated by RulesetBuilder."""
     assert _builder.verify_up(_builder.build_up()) == []
+
+
+@pytest.mark.parametrize(
+    ("window", "permanent"),
+    [
+        pytest.param(f"{ANY_IPV4} timeout 300s expires 299s", False, id="timed"),
+        pytest.param(f"{ANY_IPV4} timeout 5m expires 4m59s693ms", False, id="timed-compound"),
+        pytest.param("", False, id="closed"),
+        pytest.param(ANY_IPV4, True, id="no-timeout"),
+        pytest.param(f"{TEST_IP1} timeout 60s expires 59s, {ANY_IPV4}", True, id="one-of-two"),
+    ],
+)
+def test_verify_up_refuses_a_window_that_never_expires(window: str, permanent: bool) -> None:
+    """A window element with no timeout is a permanent allow-all below the deny tiers.
+
+    It prints with no countdown, so a reader would call the window closed and
+    the posture the trusted UP: verify_up() names it instead, and the posture
+    reads as an error.
+    """
+    errors = _builder.verify_up(_builder.build_up() + _table_listing(window=window))
+    assert any("no timeout" in error for error in errors) is permanent
+
+
+def test_verify_up_reads_the_v6_window_too() -> None:
+    """``::/0`` with no timeout is as permanent as its v4 twin."""
+    listing = _table_listing().replace(
+        "\tset bypass_window_v6 {\n\t\ttype ipv6_addr\n\t\tflags interval,timeout\n\t}\n",
+        "\tset bypass_window_v6 {\n\t\ttype ipv6_addr\n\t\tflags interval,timeout\n"
+        f"\t\telements = {{ {ANY_IPV6} }}\n\t}}\n",
+    )
+    assert ANY_IPV6 in listing
+    assert any("no timeout" in error for error in _builder.verify_up(_builder.build_up() + listing))
 
 
 @pytest.mark.parametrize(
@@ -718,16 +848,83 @@ def _rule_for(ruleset: str, set_name: str) -> str:
     return next(ln for ln in ruleset.splitlines() if f"@{set_name} " in ln)
 
 
-def test_override_accept_is_audited_in_both_postures() -> None:
+@pytest.mark.parametrize(
+    "ruleset",
+    [
+        pytest.param(RulesetBuilder().build_up(), id="up"),
+        pytest.param(RulesetBuilder().build_down(), id="down"),
+        pytest.param(RulesetBuilder().build_down(disengaged=True), id="disengaged"),
+    ],
+)
+def test_override_accept_is_audited_in_every_posture(ruleset: str) -> None:
     """A break-glass accept carries an NFLOG tag — it is terminal, so nothing else logs it.
 
-    The t10 verdict ends evaluation before the tiers (and, in the down posture, before
-    the catch-all ``ct state new`` log), so an untagged accept would make
+    The t10 verdict ends evaluation before the tiers (and, in the down postures,
+    before the catch-all ``ct state new`` log), so an untagged accept would make
     exactly the traffic an auditor cares about most the only traffic that
-    leaves no trace.
+    leaves no trace.  It is tagged ``ALLOWED`` everywhere: a ``DOWN`` line is
+    reserved for what UP would have refused, which an override is not.
     """
-    assert _ALLOWED_LOG_PREFIX in _rule_for(RulesetBuilder().build_up(), "t10_override_v4")
-    assert _DOWN_LOG_PREFIX in _rule_for(RulesetBuilder().build_down(), "t10_override_v4")
+    rule = _rule_for(ruleset, "t10_override_v4")
+    assert _ALLOWED_LOG_PREFIX in rule
+    assert _DOWN_LOG_PREFIX not in rule
+
+
+_ALLOW_TIER_SETS = (
+    "t10_override_v4",
+    "t10_override_v6",
+    "t30_provider_allow_v4",
+    "t30_provider_allow_v6",
+    "t40_project_allow_v4",
+    "t40_project_allow_v6",
+)
+
+
+@pytest.mark.parametrize("disengaged", [False, True], ids=["down", "disengaged"])
+def test_down_postures_accept_the_allow_tiers_before_the_catch_all(disengaged: bool) -> None:
+    """The allow tiers accept ``ALLOWED`` ahead of the ``DOWN`` log, in both down postures.
+
+    That ordering is what gives a ``DOWN`` line its meaning — accepted only
+    because the shield is down, so UP would have refused it — and what makes
+    a task running down harvestable without every allowed connection
+    drowning the candidates.
+    """
+    ruleset = RulesetBuilder().build_down(disengaged=disengaged)
+    catch_all = ruleset.index("ct state new log")
+    for set_name in _ALLOW_TIER_SETS:
+        rule = _rule_for(ruleset, set_name)
+        assert _ALLOWED_LOG_PREFIX in rule, set_name
+        assert rule.endswith(" accept"), set_name
+        assert ruleset.index(rule) < catch_all, set_name
+
+
+def test_plain_down_keeps_the_up_tier_order_above_its_catch_all() -> None:
+    """Plain DOWN refuses what UP refuses, in UP's order, before anything reaches the DOWN log.
+
+    The floor sits above the override, the override above the deny, and the
+    deny and private ranges above the allow tiers — so the deny still wins
+    over an allow, and only what UP would have sent to its terminal reject
+    falls through to the catch-all.
+    """
+    rs = RulesetBuilder().build_down()
+    order = [
+        rs.index(HARD_DENY_RANGES[0]),
+        rs.index("@t10_override_v4"),
+        rs.index("@t20_security_deny_v4"),
+        rs.index(PRIVATE_RANGES[0]),
+        rs.index("@t30_provider_allow_v4"),
+        rs.index("@t40_project_allow_v4"),
+        rs.index("ct state new log"),
+    ]
+    assert order == sorted(order)
+
+
+def test_disengaged_references_neither_the_deny_set_nor_the_window() -> None:
+    """DISENGAGED enforces nothing: the deny set and the window stay declared but unreferenced."""
+    rs = RulesetBuilder().build_down(disengaged=True)
+    assert "@t20_security_deny" not in rs
+    assert "@bypass_window" not in rs
+    assert "set t20_security_deny_v4" in rs
 
 
 def test_bypass_prefix_marks_only_the_timed_window() -> None:
@@ -869,6 +1066,27 @@ def test_verify_down_disengaged_flags_a_retained_reject(
         marker, f"        {leaked_rule}\n{marker}", 1
     )
     assert any(expected_error in error for error in _builder.verify_down(leaked, disengaged=True))
+
+
+@pytest.mark.parametrize("disengaged", [False, True], ids=["down", "disengaged"])
+def test_verify_down_does_not_require_the_allowed_pre_accepts(disengaged: bool) -> None:
+    """A down table applied before the ``ALLOWED`` pre-accepts existed is still that posture.
+
+    The pre-accepts decide what the audit trail records, not what is
+    enforced, so ``shield_state`` must keep naming such a table DOWN (or
+    DISENGAGED) rather than report an error.
+    """
+    # The earlier shapes: no allow-tier accept at all, except plain DOWN's
+    # override, which was tagged DOWN.
+    older_lines: list[str] = []
+    for line in _builder.build_down(disengaged=disengaged).splitlines():
+        if _ALLOWED_LOG_PREFIX not in line:
+            older_lines.append(line)
+        elif not disengaged and "@t10_override" in line:
+            older_lines.append(line.replace(_ALLOWED_LOG_PREFIX, _DOWN_LOG_PREFIX))
+    older = "\n".join(older_lines)
+    assert "@t40_project_allow" not in older
+    assert _builder.verify_down(older, disengaged=disengaged) == []
 
 
 def test_verify_down_rejects_an_up_ruleset() -> None:
@@ -1036,6 +1254,91 @@ class TestGatewayPortRules:
             RulesetBuilder(gateway_v6="10.0.2.2")
 
 
+# ── The host's own loopback: refused above the override ──────────
+
+
+def _slirp4netns_builder() -> RulesetBuilder:
+    """A builder for a slirp4netns container with one host-service port in its preamble."""
+    return RulesetBuilder(
+        dns=SLIRP4NETNS_DNS,
+        loopback_ports=(LOCALHOST_GRANT_PORT,),
+        gateway_v4=SLIRP4NETNS_GATEWAY,
+        gateway_v6=SLIRP4NETNS_GATEWAY_V6,
+    )
+
+
+def _gateway_rejects(ruleset: str) -> list[str]:
+    """The rule lines that refuse either slirp4netns gateway address outright."""
+    return [
+        line.strip()
+        for line in ruleset.splitlines()
+        if "reject" in line
+        and any(f"daddr {gw} " in line for gw in (SLIRP4NETNS_GATEWAY, SLIRP4NETNS_GATEWAY_V6))
+    ]
+
+
+@pytest.mark.parametrize(
+    "ruleset",
+    [
+        pytest.param(_slirp4netns_builder().build_up(), id="up"),
+        pytest.param(_slirp4netns_builder().build_down(), id="down"),
+    ],
+)
+def test_the_host_gateway_is_refused_above_the_override(ruleset: str) -> None:
+    """slirp4netns forwards its gateway to the host's loopback: past the preamble's ports, t00 refuses it.
+
+    The gateway sits in a private range, whose reject lies *below* t10 — so
+    without a rule of its own, any t10 element taking it in (a break-glass
+    name rebound onto it, a range around it) would open every port the host
+    listens on locally.  The preamble's per-port accept still comes first.
+    """
+    v4, v6 = _gateway_rejects(ruleset)
+    assert v4.startswith(f"ip daddr {SLIRP4NETNS_GATEWAY} ")
+    assert v6.startswith(f"ip6 daddr {SLIRP4NETNS_GATEWAY_V6} ")
+    override = ruleset.index("@t10_override_v4")
+    port = ruleset.index(f"tcp dport {LOCALHOST_GRANT_PORT} ip daddr {SLIRP4NETNS_GATEWAY} accept")
+    assert port < ruleset.index(v4) < override
+    assert ruleset.index(v6) < override
+    assert _PRIVATE_LOG_PREFIX in v4  # read back as private_range, classed by destination
+
+
+def test_disengaged_leaves_the_host_gateway_open_like_everything_else() -> None:
+    """DISENGAGED enforces nothing, so it carries no reject — the gateway's included."""
+    assert _gateway_rejects(_slirp4netns_builder().build_down(disengaged=True)) == []
+
+
+def test_pasta_needs_no_host_loopback_rule_of_its_own() -> None:
+    """pasta's host-loopback map lies inside the link-local floor, which already sits above t10."""
+    rs = RulesetBuilder(loopback_ports=(LOCALHOST_GRANT_PORT,)).build_up()
+    floor = ipaddress.ip_network(HARD_DENY_RANGES[0])
+    assert ipaddress.ip_address(PASTA_HOST_LOOPBACK_MAP) in floor
+    assert rs.index(f"ip daddr {floor} ") < rs.index("@t10_override_v4")
+    assert not [ln for ln in rs.splitlines() if f"daddr {PASTA_HOST_LOOPBACK_MAP} log" in ln]
+
+
+@pytest.mark.parametrize(
+    ("build", "verify"),
+    [
+        pytest.param(lambda b: b.build_up(), lambda b, out: b.verify_up(out), id="up"),
+        pytest.param(lambda b: b.build_down(), lambda b, out: b.verify_down(out), id="down"),
+    ],
+)
+def test_a_ruleset_missing_the_host_gateway_reject_fails_verification(
+    build: Callable[[RulesetBuilder], str],
+    verify: Callable[[RulesetBuilder, str], list[str]],
+) -> None:
+    """The reject is a security invariant: a builder that knows the gateway checks it was applied."""
+    builder = _slirp4netns_builder()
+    applied = build(builder)
+    assert verify(builder, applied) == []
+    stripped = "\n".join(
+        line for line in applied.splitlines() if line.strip() not in _gateway_rejects(applied)
+    )
+    errors = verify(builder, stripped)
+    assert f"Host-loopback reject rule for {SLIRP4NETNS_GATEWAY} missing" in errors
+    assert f"Host-loopback reject rule for {SLIRP4NETNS_GATEWAY_V6} missing" in errors
+
+
 # ── _safe_timeout validation ─────────────────────────────
 
 
@@ -1196,3 +1499,129 @@ class TestRestoreElements:
             restore_elements("bad; flush ruleset", [(TEST_IP1, "")])
         with pytest.raises(ValueError):
             restore_elements("t40_project_allow_v4", [("not-an-ip", "")])
+
+
+def _table_listing(*, window: str = "", learned: str = "") -> str:
+    """A table listing as nft prints it: a t40 set with a learned element ahead of the window set."""
+    t40 = f"\t\telements = {{ {learned} }}\n" if learned else ""
+    win = f"\t\telements = {{ {window} }}\n" if window else ""
+    return (
+        "table inet terok_shield {\n"
+        "\tset t40_project_allow_v4 {\n\t\ttype ipv4_addr\n\t\tflags interval,timeout\n"
+        f"\t\ttimeout 30m\n{t40}\t}}\n\n"
+        "\tset bypass_window_v4 {\n\t\ttype ipv4_addr\n\t\tflags interval,timeout\n"
+        f"{win}\t}}\n\n"
+        "\tset bypass_window_v6 {\n\t\ttype ipv6_addr\n\t\tflags interval,timeout\n\t}\n"
+        "}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("window", "expected"),
+    [
+        pytest.param(f"{ANY_IPV4} timeout 300s expires 299s", 299, id="numeric-seconds"),
+        pytest.param(f"{ANY_IPV4} timeout 7200s expires 7198s", 7198, id="numeric-hours"),
+        pytest.param(f"{ANY_IPV4} timeout 2s expires 0s", 0, id="numeric-last-second"),
+        pytest.param("", None, id="no-element"),
+    ],
+)
+def test_parse_window_expiry_reads_whole_seconds(window: str, expected: int | None) -> None:
+    """The window's countdown in whole seconds, the way ``nft -T`` prints it."""
+    assert parse_window_expiry(_table_listing(window=window)) == expected
+
+
+@pytest.mark.parametrize(
+    "countdown",
+    [
+        pytest.param("1h59m58s", id="compound-hours"),
+        pytest.param("4m59s693ms", id="milliseconds"),
+        pytest.param("512ms", id="last-second"),
+    ],
+)
+def test_parse_window_expiry_reads_the_numeric_time_form_alone(countdown: str) -> None:
+    """A plain listing's compound countdown is no ``-T`` output, and is never misread as seconds.
+
+    ``512ms`` is not 512 of anything: only whole seconds are read, the form ``-T`` prints.
+    """
+    listing = _table_listing(window=f"{ANY_IPV4} timeout 5m expires {countdown}")
+    assert parse_window_expiry(listing) is None
+
+
+_LINEAR_BUDGET_S = 1.0
+"""Wall time a hostile listing may cost: a linear scan takes milliseconds, backtracking minutes."""
+
+_HOSTILE_RUN = 100_000
+"""How often a hostile listing repeats its run — far past any countdown nft prints."""
+
+
+@contextmanager
+def _within_budget(seconds: float) -> Iterator[None]:
+    """Fail the block the moment it has run *seconds* of wall time — never wait it out.
+
+    A ``SIGALRM`` timer cuts the block off: the regex engine checks for
+    signals while it matches, so a backtracking scan fails here at the
+    budget instead of hanging the suite for minutes or hours — which no CI
+    job would end.  Read afterwards, a stopwatch would only report the
+    hang once it was over.  The previous handler and timer come back
+    whatever happens.
+    """
+
+    def _over_budget(_signum: int, _frame: object) -> None:
+        pytest.fail(f"ran past its {seconds} s budget: the scan backtracks", pytrace=False)
+
+    previous = signal.signal(signal.SIGALRM, _over_budget)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.parametrize(
+    "countdown",
+    [
+        pytest.param("1" * _HOSTILE_RUN + "x", id="digits-then-junk"),
+        pytest.param("1" * _HOSTILE_RUN + "s", id="digits-past-any-countdown"),
+        pytest.param("1m" * _HOSTILE_RUN + "x", id="compound-run"),
+        pytest.param("1 expires " * _HOSTILE_RUN, id="repeated-keyword"),
+    ],
+)
+def test_parse_window_expiry_reads_a_hostile_listing_in_linear_time(countdown: str) -> None:
+    """No input makes the countdown parse backtrack: a long garbage run is read once and refused."""
+    listing = _table_listing(window=f"{ANY_IPV4} timeout 300s expires {countdown}")
+    with _within_budget(_LINEAR_BUDGET_S):
+        expiry = parse_window_expiry(listing)
+    assert expiry is None
+
+
+def test_the_budget_cuts_off_a_scan_that_backtracks() -> None:
+    """The watchdog fails a catastrophic scan at the budget — the hang it exists to catch."""
+    backtracking = re.compile(r"\bexpires ((?:\d+)+)s\b")  # nested repetition: exponential
+    with pytest.raises(pytest.fail.Exception, match="budget"), _within_budget(_LINEAR_BUDGET_S):
+        backtracking.search(f"expires {'1' * _HOSTILE_RUN}x")
+
+
+def test_parse_window_expiry_reads_only_the_window_set() -> None:
+    """A learned t40 address prints its countdown first; it is not the window's."""
+    listing = _table_listing(learned=f"{TEST_IP1} expires 1799s")
+    assert parse_window_expiry(listing) is None
+    listing = _table_listing(
+        learned=f"{TEST_IP1} expires 1799s", window=f"{ANY_IPV4} timeout 300s expires 42s"
+    )
+    assert parse_window_expiry(listing) == 42
+
+
+def test_parse_window_expiry_reads_a_listing_cut_short() -> None:
+    """A listing that ends inside the window block still yields the countdown it holds."""
+    listing = (
+        "table inet terok_shield {\n\tset bypass_window_v4 {\n"
+        f"\t\telements = {{ {ANY_IPV4} timeout 300s expires 42s }}\n"
+    )
+    assert parse_window_expiry(listing) == 42
+
+
+@pytest.mark.parametrize("output", ["", "table inet terok_shield {\n}\n"], ids=["empty", "no-set"])
+def test_parse_window_expiry_without_a_window_set(output: str) -> None:
+    """No table, or a table without the window set, reads as no window."""
+    assert parse_window_expiry(output) is None

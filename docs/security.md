@@ -43,14 +43,28 @@ SAST scan.
 - `safe_ip()` — validates and normalizes IPs/CIDRs via `ipaddress.ip_address`/`ip_network` (dual-stack); returns canonical string form to ensure reliable state-file comparisons
 - `_safe_port()` — validates port range, rejects bools
 - `_safe_ident()` / `_safe_timeout()` — validate nft set/table names and set-element timeouts
+- `_safe_seconds()` — validates a per-element override timeout: whole seconds, at least 1
+  (nft reads `timeout 0s` as *never*), at most the longest seconds literal nft accepts
+- `_safe_window_timeout()` — validates a bypass-window duration: a `_safe_timeout()` value
+  with a non-zero count, for the same reason — a zero-length window would never close
+
+The OCI hook also writes nft syntax for one thing: the expiring t10 override
+elements it times at apply (`override.expiry`, see below). Each line is
+checked as untrusted input — the address must parse, the deadline must be an
+integer — and a line that fails is skipped, so a malformed entry can only take
+an override away.
 
 **Self-verification:** `RulesetBuilder.verify_up()` checks post-apply
 invariants: managed table present, drop policy, both chains, reject type,
 dual-stack allow and deny sets declared, all private ranges (RFC 1918/3927 +
-RFC 4193/4291) blocked, terminal deny rule with the `BLOCKED` log prefix.
-`verify_down()` checks accept policy on output, drop on input, the bypass
-log prefix, and the range rejects — present for DOWN, absent for DISENGAGED
-(which must also carry no deny-set reject);
+RFC 4193/4291) blocked, terminal deny rule with the `BLOCKED` log prefix,
+and — for a slirp4netns container — the reject of its gateway above t10.
+`verify_down()` checks accept policy on output, drop on input, the `DOWN`
+log prefix, and the range rejects — present for DOWN, with the gateway
+reject, absent for DISENGAGED (which must also carry no deny-set reject). The allow-tier accepts the DOWN
+postures log `ALLOWED` ahead of their catch-all are deliberately not
+verified: they shape the audit trail, not what is enforced, and a down table
+applied before they existed must still read as its posture;
 `verify_quarantine()` checks the blackout ruleset. `shield up` / `down` /
 `quarantine` run the matching verifier after applying and raise on any error.
 
@@ -92,7 +106,7 @@ The workload cannot modify nftables rules because `CAP_NET_ADMIN` and
 **Hook mode** (per-container netns, output chain):
 
 ```text
-preamble (lo, established, DNS, infra ports, +localhost grants) → t00 hard-deny (link-local + IMDS) → t10 override → t20 security-deny (@t20_security_deny + RFC1918/RFC4193) → t30 provider allow → t40 project allow → bypass window → terminal reject (log BLOCKED)
+preamble (lo, established, DNS, infra ports, +localhost grants) → t00 hard-deny (link-local + IMDS + the host's own loopback) → t10 override (kernel-timed to its expiry) → t20 security-deny (@t20_security_deny + RFC1918/RFC4193) → t30 provider allow → t40 project allow → bypass window (UP only) → terminal reject (log BLOCKED)
 ```
 
 **Rule ordering rationale:** tier order *is* the authority order — an
@@ -102,10 +116,119 @@ RFC 4193 private-range rejects) sits *above* the provider- and project-allow
 tiers, so an explicit deny wins over an allow, and a private-range host can be
 reached **only** via the break-glass override tier (`@t10_override_v4`/`_v6`) —
 not by adding it to an allow set. The hard-deny floor (`t00`, link-local +
-169.254.0.0/16 IMDS) sits above even the override and is absolute. Denied
+169.254.0.0/16 IMDS) sits above even the override and is absolute. So does
+the host's own loopback: pasta's map lies inside the link-local floor, and
+under slirp4netns `t00` refuses the gateway too, past the ports the preamble
+opens. The gateway lies in a private range, whose reject sits below the
+override, so without that rule a t10 element taking it in would open every
+port the host listens on locally. The gateway is the one the container
+launched with: `pre_start` records it in the bundle, and every rebuild and
+override check reads it from there, so a `cidr=` changed in `containers.conf`
+since the launch moves no running container's gateway. Denied
 destinations are rejected and logged with the `DENIED` prefix and stay denied
 across `shield up` / restarts via the security-deny tier and the `policy/live`
 overlay. The terminal rule is a `reject` (not a bare drop).
+
+The timed bypass window sits *below* every deny: it accepts what the
+allowlist would refuse, never a vault host, a private range or the hard-deny
+floor, and only the UP chain reads it.
+
+### Break-glass expiry is kernel-enforced
+
+A t10 override with `%expires` is a set element with a kernel timeout: the
+kernel drops it when its override runs out (a date holds through that day,
+host local time), as it closes the bypass window — nothing in userspace keeps
+the clock, so a crashed or absent host process cannot stretch it. An override
+that already ran out is never authored. `ruleset.nft` is replayed verbatim at
+every start of the container, so expiring overrides stay out of it: the OCI
+hook reads their absolute deadlines from `override.expiry` and times each
+element when it applies the ruleset, in the same transaction. A restart that
+replays an old ruleset therefore never re-grants an override past its expiry.
+Every `shield up` / `down` re-times the elements from the same deadlines.
+
+That is the address plane. On the `dnsmasq-*` tiers an override of a *name*
+also opens it in the DNS sinkhole, and a running dnsmasq keeps serving the
+config it loaded: past the expiry the name still resolves, so an address the
+host rotates to — one the t20 set never held — is reachable while the shield
+is down or a bypass window is open. That window closes at the next `shield up`
+/ `down`, which compares the dnsmasq config the policy calls for with the one
+dnsmasq runs and relaunches it when they differ, or at a restart through the
+orchestrator's `refresh`. A plain `podman start` replays the last written
+config, so it keeps the name open until the next posture change.
+
+A live break-glass (`Shield.override`) needs a reason as well as an expiry —
+the shield refuses one without — and records both on the tier entry. Its
+`override` audit event is attempted the moment the nft transaction commits,
+ahead of the tier entry and the dnsmasq reload a name needs, so neither of
+those failing can cost a grant the kernel holds its record. The record is
+still best-effort, like every audit event: with audit disabled none is
+written, and a write that fails only logs a warning — the grant stands either
+way. The tier entry comes after the kernel: the override names
+resolve first, held in memory, and the swap is computed from the tier as the
+grant will leave it; the entry is written only once the kernel has taken that
+swap, and the override cache takes the answers the swap was seeded from only
+after the entry, so the next rebuild finds the cache fresh and resolves
+nothing. A refused or failed grant therefore leaves nothing behind that a
+later `shield up` / `down` would grant, and leaves the cache as it was — a
+grant refused during a DNS outage does not empty the cache the overrides
+already in force are reseeded from. The granted name must answer afresh;
+another override whose lookup fails meanwhile keeps the addresses the cache
+holds for it, so one grant never ends another. If the tier cannot record a
+grant the kernel already holds, the error says what the next rebuild seeds in
+its place: nothing, or the earlier entry for that target, whose own expiry may
+be later. dnsmasq is reloaded either way, but its config comes from the tier,
+so a first grant of a name the tier could not record stays sinkholed — the
+error says that too.
+
+A grant and a revoke never interleave. Each holds a per-container lock
+(`override.lock`, an `flock` in the state directory) from its read of the t10
+tier through its swap and its record, so a revoke that lands while a grant's
+names resolve stays revoked — the grant swaps from the tier as the revoke left
+it — and two grants at once both stay in the kernel. A grant resolves its
+names before it takes the lock, so a revoke never waits on a resolver. An
+expiry that runs out while the names resolve is refused before anything
+reaches the kernel or the audit trail.
+
+A revoke (`Shield.revoke_override`, `terok-shield override --off`) fails
+closed. The tier entry goes first, then the `ruleset.nft` / `override.expiry`
+a start replays, and only then the running t10 set. A failure at any later
+step therefore leaves nothing that a rebuild or a plain start would re-open.
+An `override_revoked` event is written only once no running ruleset holds the
+override. If nft cannot drop it, the revoke fails, says the running ruleset
+still admits it until the next `shield up` / `down`, and writes no such event.
+A ruleset listing that fails is never taken for a stopped container: the
+revoke — and a live `allow` — asks podman whether the container has a
+process, swaps the running set when it does, treats a container podman has
+no record of as stopped, and changes nothing when podman cannot say. A name's
+dnsmasq config is rewritten even when no dnsmasq runs to reload it, and the
+revoke reports that nothing serves the change before the next start.
+
+The kernel ends new connections only, at a revoke as at an expiry: the
+ruleset accepts established traffic ahead of every tier, so a connection
+opened through the override — a tunnel, a keep-alive — keeps its direct
+route until it closes. The verb says so whenever it reports an override
+closing.
+
+The t10 seed holds only what an override may open. A grant checks its own
+target's fresh answer, yet it re-resolves every override name, and so do a
+re-resolve and a rebuild over a stale cache. So the seed itself leaves out
+any address on the host's own loopback or in the hard-deny floor, and notes
+it in the log and the audit trail. The `t00` rules refuse those addresses
+above t10 regardless.
+
+### The deny on tiers without dnsmasq
+
+The security tier denies vault-relayed provider hosts by *address*, so that
+the deny holds in the DOWN posture and against direct-IP access. On the
+`dnsmasq-*` tiers the names are also sinkholed in DNS, so an address a vault
+host rotates to is never even learned. On `lookup` and `getent` nothing
+sinkholes them: the deny holds only the addresses the names resolved to, and
+an address they rotate to escapes it — while the shield is down, or while up
+through an allowlisted name that shares the address or an open bypass window.
+Shield narrows the gap (`shield up` / `down` re-resolve caches older than an
+hour or than the policy before they rebuild) and names it: the log, an audit
+`note` and the CLI verbs say which denied names it holds by resolved address
+only, worded for the posture. Run a dnsmasq tier to close it.
 
 ### Dual-stack (IPv4 + IPv6)
 
@@ -118,7 +241,9 @@ are maintained:
 
 On the live tier the project-allow sets also carry a `timeout` flag so
 dnsmasq-learned entries auto-expire. Parallel `t20_security_deny_v4` /
-`t20_security_deny_v6` sets hold explicitly denied destinations.
+`t20_security_deny_v6` sets hold explicitly denied destinations. The
+`t10_override` and `bypass_window` sets always carry the `timeout` flag with
+no default: each element brings its own timeout, or none at all.
 
 DNS resolution queries both A and AAAA records, and resolved addresses are
 automatically routed to the correct set. Rejects are cross-family:

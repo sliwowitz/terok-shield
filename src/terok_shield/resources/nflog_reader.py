@@ -5,10 +5,27 @@
 
 """Stream blocked-connection events out of one container for the clearance flow.
 
+Refusals at the terminal rule reach the operator as clearance requests and
+land in the audit log.  Everything else the reader keeps lands in the audit
+log only, because none of it is a question an operator can answer on the spot:
+
+* accepts through the timed allow-all window — nothing was refused;
+* new connections the DOWN postures accepted only because the shield is down —
+  what the UP posture would have refused, recorded so a task can be harvested
+  while it runs down;
+* refusals by the t20 deny set (vault-relayed hosts, the operator's runtime
+  denies) and by the range floors (link-local and IMDS, the private ranges) —
+  break-glass territory at best, never a one-click allow.
+
+Accepts by the policy itself are not recorded: they are the bulk of all
+traffic, and recording them would bury the lines worth reading.  When the
+container was created with audit disabled, the reader writes no audit lines at
+all; the clearance prompts still flow.
+
 Subscribes to the kernel's NFLOG group inside a single container's network
-namespace, deduplicates by destination IP, and publishes each unique block as
-an event.  Events always travel as JSON; the reader itself never speaks
-D-Bus.  Two destinations are supported:
+namespace, deduplicates by destination, and publishes each unique terminal
+refusal as an event.  Events always travel as JSON; the reader itself never
+speaks D-Bus.  Two destinations are supported:
 
 * ``--emit=socket`` (default): write events to a unix socket served by the
   ``terok-clearance`` hub.  The hub lives in the *host* user namespace, where
@@ -65,12 +82,37 @@ _SAFE_CONTAINER_ID = re.compile(r"^[0-9a-fA-F]{12,64}$")
 
 # ── Protocol constants duplicated from terok-shield core ──────────────
 # The script is standalone so it cannot import from the package.  Keep in sync
-# with the canonical definitions:
-#   NFLOG_GROUP           ↔ terok_shield.nft.constants.NFLOG_GROUP
-#   _BLOCKED_PREFIX_TAG   ↔ terok_shield.nft.rules nflog prefix for the
-#                           interactive deny rule
+# with the canonical definitions (``test_nflog_reader`` pins every one):
+#   NFLOG_GROUP               ↔ terok_shield.nft.constants.NFLOG_GROUP
+#   _PREFIX_STEM + each tag   ↔ terok_shield.nft.constants.*_LOG_PREFIX
+#   _AUDIT_FLAG_FILE_NAME     ↔ terok_shield.state.StateBundle.audit_flag
 NFLOG_GROUP = 100
-_BLOCKED_PREFIX_TAG = "BLOCKED"
+
+#: The stem every shield log prefix starts with; the tag after it names the rule.
+_PREFIX_STEM = "TEROK_SHIELD_"
+
+#: Log tag → the action the reader records for it.  Matched exactly, never by
+#: substring: a future tag that merely *contains* ``BLOCKED`` must not be
+#: classified as a terminal refusal, because only that action reaches the
+#: clearance wire as a prompt.  Every action but ``blocked`` is audit-only.
+_TAG_ACTIONS: dict[str, str] = {
+    "BLOCKED": "blocked",  # the terminal default-deny — the one question for an operator
+    "BYPASS": "bypass",  # accepted through the timed allow-all window
+    "DOWN": "down",  # accepted only because the shield is down — UP would have refused it
+    # ``security_deny``, not ``denied``: ``denied`` is the host-side audit line
+    # ``Shield.deny()`` writes for the operator's own verdict.
+    "DENIED": "security_deny",  # refused by the t20 deny set
+    "PRIVATE": "private_range",  # refused by a range floor (t00 hard-deny or t20 private)
+}
+
+#: Tags the reader drops on purpose.  ``ALLOWED`` marks an accept by the policy
+#: itself — the bulk of all traffic, and nothing to review.
+_UNRECORDED_TAGS = frozenset({"ALLOWED"})
+
+#: Bundle file where ``pre_start`` records whether audit was on when the
+#: container was created.  The reader honours it: no audit lines when it says
+#: ``false``.
+_AUDIT_FLAG_FILE_NAME = "audit.enabled"
 
 
 # ── Wire-format sanitiser (producer side, container-out) ──────────────
@@ -135,10 +177,13 @@ _NLM_F_ACK = 4
 _AF_INET = 2
 _IPPROTO_TCP = 6
 _IPPROTO_UDP = 17
+_IPPROTO_ICMPV6 = 58
 
-#: Human-readable protocol names for audit entries.  Numeric IP protocol
-#: numbers leak in for anything outside TCP/UDP — rare in practice (ICMP
-#: is suppressed earlier as noise) but better than a misleading "tcp" label.
+#: Human-readable protocol names for audit entries.  Anything outside TCP/UDP
+#: is recorded by its IP protocol number, port 0 — a ping to a refused address
+#: is recorded (and prompted on) like any other refusal; only the kernel's own
+#: IPv6 link-local chatter is dropped as noise (``_is_noise_dest``).  A number
+#: beats a misleading "tcp" label.
 _PROTO_NAMES: dict[int, str] = {_IPPROTO_TCP: "tcp", _IPPROTO_UDP: "udp"}
 
 _NLMSG_HDR = struct.Struct("=IHHII")
@@ -375,14 +420,44 @@ def _resolve_binary(name: str) -> str:
 #: reader drops them before dedup / emit.  See polish backlog.
 _IPV6_LINK_LOCAL_MULTICAST = ipaddress.IPv6Network("ff02::/16")
 
+#: IPv6 link-local unicast.  The kernel's neighbour discovery probes its
+#: neighbours there on a schedule of its own (NUD), and conntrack does not
+#: track those ICMPv6 packets, so every probe reaches the hard-deny floor —
+#: a steady trickle nothing in the workload asked for.  Only ICMPv6 to it is
+#: noise: a TCP or UDP connection to a link-local address is the workload's
+#: own attempt, and is recorded like any other.
+_IPV6_LINK_LOCAL = ipaddress.IPv6Network("fe80::/10")
 
-def _is_noise_dest(dest: str) -> bool:
-    """Return True for traffic the clearance flow should silently drop."""
+
+def _is_noise_dest(dest: str, proto: int = 0) -> bool:
+    """Return True for traffic the reader should silently drop — kernel chatter, not the workload.
+
+    Everything to IPv6 link-local multicast, and ICMPv6 (*proto*) to IPv6
+    link-local unicast.
+    """
     try:
         addr = ipaddress.ip_address(dest)
     except ValueError:
         return False
-    return isinstance(addr, ipaddress.IPv6Address) and addr in _IPV6_LINK_LOCAL_MULTICAST
+    if not isinstance(addr, ipaddress.IPv6Address):
+        return False
+    if addr in _IPV6_LINK_LOCAL_MULTICAST:
+        return True
+    return proto == _IPPROTO_ICMPV6 and addr in _IPV6_LINK_LOCAL
+
+
+def _read_audit_flag(state_dir: Path) -> bool:
+    """Whether audit was on when this container was created, as ``pre_start`` recorded it.
+
+    Read once per reader: the flag is a creation-time fact of the bundle,
+    like its DNS tier.  Only an explicit ``false`` turns recording off — an
+    absent or unreadable flag keeps it on, the reader's behaviour before the
+    flag existed and the shield's own default.
+    """
+    try:
+        return (state_dir / _AUDIT_FLAG_FILE_NAME).read_text().strip() != "false"
+    except (OSError, ValueError):  # absent, or non-UTF-8 content
+        return True
 
 
 class ReaderSession:
@@ -405,7 +480,10 @@ class ReaderSession:
     attempt (TCP SYN retransmits, wget's own retries, etc.) without
     suppressing legitimate re-attempts after the operator has actually seen
     and dismissed the first notification.  Notification-level dedup
-    (replacing still-visible notifications) belongs to the notifier.
+    (replacing still-visible notifications) belongs to the notifier.  A key
+    whose window has passed counts as never seen, so the maps are pruned of
+    those keys once per window — a sweep across many destinations must not
+    grow them for the container's whole lifetime.
     """
 
     #: Seconds for which a dedup key stays muted after one emission.  Short
@@ -431,10 +509,16 @@ class ReaderSession:
         ``meta_path`` entry, when present, points at a JSON file the reader
         will re-read at every emit so name-changes (e.g. podman rename) and
         late-bound metadata land on the wire without restarting the reader.
+
+        Whether to write audit lines at all is read from the bundle here,
+        once: the operator's choice at creation (``audit.enabled``) holds
+        for the container's whole life, and the clearance prompts flow
+        regardless.
         """
         self._state_dir = state_dir
         self._container = container
         self._emitter = emitter
+        self._audit_enabled = _read_audit_flag(state_dir)
         self._static_dossier = dict(static_dossier or {})
         meta_path = self._static_dossier.get(_META_PATH_KEY)
         self._meta_path: Path | None = Path(meta_path) if meta_path else None
@@ -459,6 +543,7 @@ class ReaderSession:
         # without giving up the wire's retry-on-failure semantics.
         self._last_emit: dict[str, float] = {}
         self._last_audit: dict[str, float] = {}
+        self._pruned_at = float("-inf")
         self._next_id = 1
         self._stop_requested = False
 
@@ -491,7 +576,7 @@ class ReaderSession:
             for event in _drain(sock):
                 self._maybe_emit(event, now)
 
-    def _maybe_emit(self, event: _RawBlockEvent, now: float) -> None:
+    def _maybe_emit(self, event: _RawPacketEvent, now: float) -> None:
         """Filter noise, dedupe by domain-or-dest, emit if fresh.
 
         The wire dedup key (``_last_emit``) is only mutated once the
@@ -513,25 +598,53 @@ class ReaderSession:
         line and the wire payload see the same snapshot, and a renamed
         container won't appear differently on either side of the same
         block.
+
+        Only a terminal refusal (``blocked``) goes on the wire; every other
+        action is audit-only.  With audit disabled for this container, an
+        audit-only event has nowhere to go, so it is dropped before the
+        domain lookup it would otherwise cost.
         """
-        if _is_noise_dest(event.dest):
+        self._prune(now)
+        if _is_noise_dest(event.dest, event.proto):
+            return
+        wires = event.action == "blocked"
+        if not wires and not self._audit_enabled:
             return
         domain = self._resolve_domain(event.dest)
-        dedup_key = domain or event.dest
+        # Scoped by action: a window accept must not mute the audit line for a
+        # refusal to the same host thirty seconds later, or the other way round.
+        dedup_key = f"{event.action}:{domain or event.dest}"
         last_emit = self._last_emit.get(dedup_key)
         last_audit = self._last_audit.get(dedup_key)
-        emit_fresh = last_emit is None or (now - last_emit) >= self._DEDUP_WINDOW_S
-        audit_fresh = last_audit is None or (now - last_audit) >= self._DEDUP_WINDOW_S
+        emit_fresh = wires and (last_emit is None or (now - last_emit) >= self._DEDUP_WINDOW_S)
+        audit_fresh = self._audit_enabled and (
+            last_audit is None or (now - last_audit) >= self._DEDUP_WINDOW_S
+        )
         if not emit_fresh and not audit_fresh:
             return
         dossier = self._resolve_dossier()
-        if audit_fresh and self._append_audit_block(event, domain, dossier):
+        if audit_fresh and self._append_audit_record(event, domain, dossier):
             self._last_audit[dedup_key] = now
         if emit_fresh:
             request_id = f"{self._container}:{self._next_id}"
             self._next_id += 1
             if self._emit_connection_blocked(event, domain, request_id, dossier):
                 self._last_emit[dedup_key] = now
+
+    def _prune(self, now: float) -> None:
+        """Forget dedup keys whose window has passed — at most once per window.
+
+        A key older than the window behaves exactly as an absent one (the next
+        event for it is fresh), so dropping it changes no decision; it only
+        stops a sweep across many destinations from growing both maps for as
+        long as the container lives.
+        """
+        if now - self._pruned_at < self._DEDUP_WINDOW_S:
+            return
+        self._pruned_at = now
+        for stamps in (self._last_emit, self._last_audit):
+            for key in [key for key, seen in stamps.items() if now - seen >= self._DEDUP_WINDOW_S]:
+                del stamps[key]
 
     def _resolve_domain(self, dest: str) -> str:
         """Look *dest* up in the domain cache, refreshing once on miss."""
@@ -543,7 +656,7 @@ class ReaderSession:
 
     def _emit_connection_blocked(
         self,
-        event: _RawBlockEvent,
+        event: _RawPacketEvent,
         domain: str,
         request_id: str,
         dossier: Dossier,
@@ -600,8 +713,8 @@ class ReaderSession:
                 dossier[str(key)] = str(value)
         return dossier
 
-    def _append_audit_block(self, event: _RawBlockEvent, domain: str, dossier: Dossier) -> bool:
-        """Write one ``"action": "blocked"`` entry to ``state_dir/audit.jsonl``.
+    def _append_audit_record(self, event: _RawPacketEvent, domain: str, dossier: Dossier) -> bool:
+        """Write one entry to ``state_dir/audit.jsonl``, tagged with the event's action.
 
         Inlined (rather than importing ``terok_shield.audit.AuditLogger``)
         because the reader script is shipped as a stdlib-only resource —
@@ -626,7 +739,7 @@ class ReaderSession:
         entry = {
             "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "container": _sanitize_str(self._container),
-            "action": "blocked",
+            "action": event.action,
             "dest": _sanitize_str(event.dest),
             "port": event.port,
             "proto": _PROTO_NAMES.get(event.proto, str(event.proto)),
@@ -839,12 +952,22 @@ class JsonEmitter:
 
 
 @dataclass(frozen=True)
-class _RawBlockEvent:
+class _RawPacketEvent:
     """Pre-enrichment fields pulled straight from one NFLOG packet."""
 
     dest: str
     port: int
     proto: int
+    action: str = "blocked"
+    """What the ruleset did with the packet, from its nflog prefix (``_TAG_ACTIONS``).
+
+    ``"blocked"`` for a refusal at the terminal rule, ``"bypass"`` for an
+    accept through the timed allow-all window, ``"down"`` for an accept the
+    shield made only because it is down, ``"security_deny"`` for a refusal by
+    the t20 deny set and ``"private_range"`` for one by a range floor.  Only a
+    terminal refusal is a question the operator can answer with an allow, so
+    only ``"blocked"`` reaches the clearance wire.
+    """
 
 
 def _open_nflog_socket(
@@ -876,9 +999,9 @@ def _open_nflog_socket(
         return None
 
 
-def _drain(sock: socket.socket) -> list[_RawBlockEvent]:  # pragma: no cover — real socket recv
+def _drain(sock: socket.socket) -> list[_RawPacketEvent]:  # pragma: no cover — real socket recv
     """Read every pending NFLOG message and extract its block events."""
-    events: list[_RawBlockEvent] = []
+    events: list[_RawPacketEvent] = []
     while True:
         try:
             data = sock.recv(65535)
@@ -890,9 +1013,9 @@ def _drain(sock: socket.socket) -> list[_RawBlockEvent]:  # pragma: no cover —
     return events
 
 
-def _parse_messages(data: bytes) -> list[_RawBlockEvent]:
-    """Pull ``BLOCKED``-prefixed packet events out of a netlink message batch."""
-    events: list[_RawBlockEvent] = []
+def _parse_messages(data: bytes) -> list[_RawPacketEvent]:
+    """Pull the recorded packet events (``_TAG_ACTIONS``) out of a netlink message batch."""
+    events: list[_RawPacketEvent] = []
     offset = 0
     while offset + _NLMSG_HDR.size <= len(data):
         nl_len, nl_type, _flags, _seq, _pid = _NLMSG_HDR.unpack_from(data, offset)
@@ -923,15 +1046,32 @@ def _parse_attrs(data: bytes) -> dict[int, bytes]:
     return attrs
 
 
-def _attrs_to_event(attrs: dict[int, bytes]) -> _RawBlockEvent | None:
-    """Keep only ``BLOCKED``-prefixed packets; drop everything else."""
+def _prefix_tag(prefix: str) -> str:
+    """The bare tag of an nflog prefix: ``TEROK_SHIELD_DENIED: `` → ``DENIED``.
+
+    The ruleset writes every prefix as the stem, the tag and ``": "``; the
+    stem and the separator are optional here, so a bare ``DENIED`` reads the
+    same.  Nothing else is stripped — the tag that remains is looked up
+    exactly.
+    """
+    return prefix.removesuffix(": ").removesuffix(":").removeprefix(_PREFIX_STEM)
+
+
+def _attrs_to_event(attrs: dict[int, bytes]) -> _RawPacketEvent | None:
+    """Keep the packets whose prefix tag the reader records; drop everything else.
+
+    An accept by the policy (``ALLOWED``) and any tag missing from
+    ``_TAG_ACTIONS`` yield ``None`` — exact matching, so a new tag that
+    happens to contain an old one is dropped rather than misread.
+    """
     prefix = attrs.get(_NFULA_PREFIX, b"").rstrip(b"\x00").decode("ascii", errors="replace")
-    if _BLOCKED_PREFIX_TAG not in prefix:
+    action = _TAG_ACTIONS.get(_prefix_tag(prefix))
+    if action is None:
         return None
     dest, proto, port = _extract_ip_dest(attrs.get(_NFULA_PAYLOAD, b""))
     if not dest:
         return None
-    return _RawBlockEvent(dest=dest, port=port, proto=proto)
+    return _RawPacketEvent(dest=dest, port=port, proto=proto, action=action)
 
 
 def _extract_ip_dest(payload: bytes) -> tuple[str, int, int]:
@@ -994,20 +1134,37 @@ class _DomainCache:
         """Watch the dnsmasq log under *state_dir*."""
         self._log_path = state_dir / "dnsmasq.log"
         self._mapping: dict[str, str] = {}
+        self._parsed: tuple[int, int] | None = None
 
     def lookup(self, ip: str) -> str:
         """Return the last-seen domain for *ip* or ``""`` when no reply is cached."""
         return self._mapping.get(ip, "")
 
     def refresh(self) -> None:
-        """Re-parse the dnsmasq log; preserves the previous cache on read errors."""
+        """Re-parse the dnsmasq log when it changed; keeps the previous cache on read errors.
+
+        Every lookup miss lands here, before dedup, and most misses are for
+        addresses the log will never name — a sinkholed vault host, a LAN
+        address, a raw IP.  So the log is re-read only when its size or mtime
+        moved since the last parse: an unchanged log costs one ``stat``, not a
+        full read and regex pass per packet.  The stat comes before the read,
+        so a reply appended in between shows up as a change next time.
+        """
+        try:
+            stat = self._log_path.stat()
+        except OSError:
+            return
+        signature = (stat.st_size, stat.st_mtime_ns)
+        if signature == self._parsed:
+            return
         try:
             text = self._log_path.read_text()
-        except OSError:
+        except (OSError, ValueError):  # unreadable, or non-UTF-8 content
             return
         self._mapping = {
             m.group(2): m.group(1).lower().rstrip(".") for m in _REPLY_RE.finditer(text)
         }
+        self._parsed = signature
 
 
 # ── Utility helpers ───────────────────────────────────────────────────

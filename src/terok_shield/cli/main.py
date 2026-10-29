@@ -25,11 +25,12 @@ from typing import TYPE_CHECKING, Any
 
 from terok_util import CommandDef, configure, find_host_tool, require_host_tool
 
-from .. import Shield, ShieldConfig, ShieldMode
+from .. import Shield, ShieldConfig, ShieldMode, ShieldState
 from ..commands import COMMANDS, needs_container
 from ..container import resolve_state_dir as resolve_container_state_dir
 from ..run import ExecError
 from ..state import recorded_dns_tier
+from ..verbs._common import print_rotation_risk
 
 if TYPE_CHECKING:
     from ..config_file import ShieldFileConfig
@@ -218,8 +219,14 @@ def _cmd_prepare(
     profiles: list[str] | None,
     output_json: bool = False,
 ) -> None:
-    """Print podman flags for a shielded container launch."""
+    """Print podman flags for a shielded container launch.
+
+    The flags alone go to stdout, which callers eval; the names the DNS tier
+    pins go to stderr, worded for UP — the posture a standalone container
+    boots into and keeps.
+    """
     podman_args = shield.pre_start(container, profiles)
+    print_rotation_risk(shield, ShieldState.UP)
     podman_args += ["--name", container]
     if output_json:
         print(json.dumps(podman_args))
@@ -244,6 +251,7 @@ def _cmd_run(
 
     podman = _find_podman()
     shield_args = shield.pre_start(container, profiles)
+    print_rotation_risk(shield, ShieldState.UP)
     argv = [podman, "run", "--name", container, *shield_args, *podman_args]
     # Exec replaces the current process; argv is constructed locally and uses
     # an absolute podman path, so shell injection and PATH spoofing do not apply.
@@ -406,6 +414,7 @@ def _build_config(
         profiles_dir=profiles_dir,
         dns_cache_dir=dns_cache_dir,
         dnsmasq_path=file_cfg.dnsmasq_path,
+        bypass_duration=file_cfg.bypass_duration,
     )
 
 

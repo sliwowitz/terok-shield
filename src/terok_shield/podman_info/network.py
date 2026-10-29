@@ -11,9 +11,13 @@ package just to derive a host address or DNS server.
 import ipaddress
 import os
 import tomllib
+from collections.abc import Iterable
 from pathlib import Path
 
-from ..nft.constants import SLIRP4NETNS_CIDR as _DEFAULT_SLIRP4NETNS_CIDR
+from ..nft.constants import (
+    PASTA_HOST_LOOPBACK_MAP,
+    SLIRP4NETNS_CIDR as _DEFAULT_SLIRP4NETNS_CIDR,
+)
 from ._conf import _SYSTEM_CONF_PATHS, _user_containers_conf
 
 
@@ -28,6 +32,31 @@ def slirp4netns_gateway(cidr: str | None = None) -> str:
     except ValueError:
         net = ipaddress.IPv4Network(_DEFAULT_SLIRP4NETNS_CIDR)
     return str(net.network_address + 2)
+
+
+def host_loopback_addresses(network_mode: str, gateways: Iterable[str] = ()) -> frozenset[str]:
+    """The addresses through which a container in *network_mode* reaches the host's own loopback.
+
+    ``host.containers.internal`` names them.  pasta maps the host's
+    ``127.0.0.1`` to ``PASTA_HOST_LOOPBACK_MAP``, a constant.  slirp4netns,
+    launched with ``allow_host_loopback``, forwards its *gateways* there —
+    the ones the container launched with, as its bundle records them, never
+    a ``containers.conf`` read now: a ``cidr=`` changed since moves no
+    running container's gateway.  The shield opens a host service through a
+    ``+localhost:PORT`` grant in the preamble, one port at a time, so any
+    wider path to these addresses — a break-glass override, a promotion
+    offering one — would open every port the host listens on locally.  An
+    unrecognised mode has none.
+
+    A set, because every caller asks whether an address is one of them or
+    lies around one: how many there are depends on the mode, and no
+    position among them means anything.
+    """
+    if network_mode == "pasta":
+        return frozenset({PASTA_HOST_LOOPBACK_MAP})
+    if network_mode == "slirp4netns":
+        return frozenset(gateway for gateway in gateways if gateway)
+    return frozenset()
 
 
 def parse_slirp4netns_cidr() -> str:

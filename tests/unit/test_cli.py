@@ -10,13 +10,21 @@ import json
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import pytest
 
-from terok_shield import ExecError, ShieldState
+from terok_shield import (
+    AllowResult,
+    ExecError,
+    OverrideRevocation,
+    SecurityTierRefusal,
+    ShieldReading,
+    ShieldState,
+)
 from terok_shield.cli.main import (
     _auto_detect_mode,
     _build_config,
@@ -90,6 +98,7 @@ def cli_dispatch() -> Iterator[CliDispatchHarness]:
         mock.patch("terok_shield.cli.main._build_config") as build_config,
         mock.patch("terok_shield.cli.main.Shield") as shield_cls,
     ):
+        shield_cls.return_value.inspect.return_value = ShieldReading(state=ShieldState.UP)
         yield CliDispatchHarness(build_config=build_config, shield_cls=shield_cls)
 
 
@@ -339,6 +348,39 @@ def test_prepare_dispatches_and_prints_flags(
     assert _CONTAINER in output
 
 
+def _pin_names(state_dir: Path) -> None:
+    """Record a lookup-tier bundle that pins one allowlisted name."""
+    bundle = StateBundle(state_dir)
+    bundle.ensure_dirs()
+    bundle.dns_tier.write_text(f"{DnsTier.LOOKUP.value}\n")
+    bundle.write_tier("project_allow", f"+{TEST_DOMAIN}\n")
+
+
+def test_prepare_warns_on_stderr_and_keeps_stdout_eval_ready(
+    cli_dispatch: CliDispatchHarness, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """``eval "$(terok-shield prepare …)"`` sees the flags alone; the warning goes to stderr."""
+    _pin_names(tmp_path)
+    cli_dispatch.shield.config.state_dir = tmp_path
+    cli_dispatch.shield.pre_start.return_value = ["--annotation", "a=b"]
+    main(["prepare", _CONTAINER])
+    out, err = capsys.readouterr()
+    assert out.strip() == f"--annotation a=b --name {_CONTAINER}"
+    assert TEST_DOMAIN in err
+
+
+def test_run_warns_before_it_hands_over_to_podman(
+    cli_run: CliRunHarness, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """``run`` execs podman — the warning has to land before it does."""
+    _pin_names(tmp_path)
+    cli_run.shield.config.state_dir = tmp_path
+    cli_run.shield.pre_start.return_value = []
+    main(["run", _CONTAINER, "--", _IMAGE])
+    assert TEST_DOMAIN in capsys.readouterr().err
+    cli_run.execv.assert_called_once()
+
+
 def test_prepare_json_output(
     cli_dispatch: CliDispatchHarness, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -556,19 +598,20 @@ def test_resolve_on_the_live_tier_says_dnsmasq_resolves_per_query(
 
 
 @pytest.mark.parametrize(
-    ("command", "method_name"),
+    ("command", "method_name", "outcome"),
     [
-        pytest.param("allow", "allow", id="allow"),
-        pytest.param("deny", "deny", id="deny"),
+        pytest.param("allow", "allow", AllowResult(TEST_IP1, (TEST_IP1,)), id="allow"),
+        pytest.param("deny", "deny", [TEST_IP1], id="deny"),
     ],
 )
 def test_allow_and_deny_dispatch_to_shield(
     cli_dispatch: CliDispatchHarness,
     command: str,
     method_name: str,
+    outcome: object,
 ) -> None:
     """allow/deny dispatch to the corresponding facade methods."""
-    getattr(cli_dispatch.shield, method_name).return_value = [TEST_IP1]
+    getattr(cli_dispatch.shield, method_name).return_value = outcome
     main([command, _CONTAINER, TEST_IP1])
     getattr(cli_dispatch.shield, method_name).assert_called_once_with(_CONTAINER, TEST_IP1)
 
@@ -640,6 +683,70 @@ def test_misc_dispatch_paths(
     assert dispatched.call_args == expected_call
 
 
+_SOON = date.today() + timedelta(days=7)
+
+
+def test_override_parses_its_expiry_as_a_date(parser: argparse.ArgumentParser) -> None:
+    """``--expires`` arrives as a date, so the record is always the plain day it names."""
+    args = parser.parse_args(
+        ["override", _CONTAINER, TEST_DOMAIN, "--expires", _SOON.isoformat(), "--reason", "outage"]
+    )
+    assert (args.target, args.expires, args.reason, args.off) == (
+        TEST_DOMAIN,
+        _SOON,
+        "outage",
+        False,
+    )
+
+
+def test_override_with_an_expiry_that_is_no_date_is_a_usage_error(
+    parser: argparse.ArgumentParser, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """argparse refuses it before any shield is built, naming the form it wants."""
+    with pytest.raises(SystemExit) as ctx:
+        parser.parse_args(["override", _CONTAINER, TEST_DOMAIN, "--expires", "soon"])
+    assert ctx.value.code == 2
+    assert "expected YYYY-MM-DD" in capsys.readouterr().err
+
+
+def test_override_grant_dispatches_with_its_expiry_and_reason(
+    cli_dispatch: CliDispatchHarness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both flags reach the facade, and the grant is reported with the day it holds through."""
+    cli_dispatch.shield.override.return_value = [TEST_IP1]
+    main(
+        ["override", _CONTAINER, TEST_DOMAIN, "--expires", _SOON.isoformat(), "--reason", "outage"]
+    )
+    cli_dispatch.shield.override.assert_called_once_with(
+        _CONTAINER, TEST_DOMAIN, _SOON, reason="outage"
+    )
+    assert f"Valid through {_SOON.isoformat()}" in capsys.readouterr().out
+
+
+def test_override_off_dispatches_the_revoke(
+    cli_dispatch: CliDispatchHarness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--off`` reaches ``revoke_override`` and nothing else."""
+    cli_dispatch.shield.revoke_override.return_value = OverrideRevocation(
+        target=TEST_DOMAIN, closed=(TEST_IP1,)
+    )
+    main(["override", _CONTAINER, TEST_DOMAIN, "--off"])
+    cli_dispatch.shield.revoke_override.assert_called_once_with(_CONTAINER, TEST_DOMAIN)
+    cli_dispatch.shield.override.assert_not_called()
+    assert f"closed {TEST_IP1}" in capsys.readouterr().out
+
+
+def test_override_grant_without_its_flags_exits_1(
+    cli_dispatch: CliDispatchHarness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A bare grant is an error naming both missing flags; nothing is opened."""
+    with pytest.raises(SystemExit) as ctx:
+        main(["override", _CONTAINER, TEST_DOMAIN])
+    assert ctx.value.code == 1
+    assert "needs --expires and --reason" in capsys.readouterr().err
+    cli_dispatch.shield.override.assert_not_called()
+
+
 def test_rules_dispatches_to_state_and_rules(cli_dispatch: CliDispatchHarness) -> None:
     """rules shows state first and then the rendered nft ruleset."""
     cli_dispatch.shield.state.return_value = ShieldState.UP
@@ -686,22 +793,55 @@ def test_status_output_formatting(
 
 
 @pytest.mark.parametrize(
-    ("command", "method_name"),
+    ("command", "method_name", "outcome"),
     [
-        pytest.param("allow", "allow", id="allow"),
-        pytest.param("deny", "deny", id="deny"),
+        pytest.param("allow", "allow", AllowResult(TEST_DOMAIN), id="allow"),
+        pytest.param("deny", "deny", [], id="deny"),
     ],
 )
 def test_allow_and_deny_exit_1_when_nothing_changes(
     cli_dispatch: CliDispatchHarness,
     command: str,
     method_name: str,
+    outcome: object,
 ) -> None:
     """allow/deny fail with exit code 1 when no IPs are changed."""
-    getattr(cli_dispatch.shield, method_name).return_value = []
+    getattr(cli_dispatch.shield, method_name).return_value = outcome
     with pytest.raises(SystemExit) as ctx:
         main([command, _CONTAINER, TEST_DOMAIN])
     assert ctx.value.code == 1
+
+
+def test_allow_refused_by_the_security_tier_exits_1_naming_the_way_through(
+    cli_dispatch: CliDispatchHarness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A security-tier refusal is an exit-1 error that names the shared address and the override.
+
+    The clearance popup shows this stderr verbatim, so it carries the reason
+    and the one remedy rather than a generic failure.
+    """
+    cli_dispatch.shield.allow.side_effect = SecurityTierRefusal(
+        TEST_DOMAIN, entry=TEST_IP1, address=TEST_IP1
+    )
+    with pytest.raises(SystemExit) as ctx:
+        main(["allow", _CONTAINER, TEST_DOMAIN])
+    assert ctx.value.code == 1
+    err = capsys.readouterr().err
+    assert TEST_IP1 in err
+    assert "break-glass only: use a shield.override" in err
+
+
+def test_allow_on_a_stopped_container_says_it_applies_at_the_next_start(
+    cli_dispatch: CliDispatchHarness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An offline grant is a success, worded as one that waits for the next start."""
+    cli_dispatch.shield.allow.return_value = AllowResult(TEST_DOMAIN, live=False)
+    main(["allow", _CONTAINER, TEST_DOMAIN])
+    out = capsys.readouterr().out
+    assert "applies at its next start" in out
+    assert TEST_DOMAIN in out
 
 
 def test_rules_output_for_missing_rules(
@@ -793,10 +933,9 @@ def test_profiles_output_lists_one_profile_per_line(
 
 
 def test_status_with_container_dispatches(cli_dispatch: CliDispatchHarness) -> None:
-    """status <container> dispatches to shield.state()."""
-    cli_dispatch.shield.state.return_value = ShieldState.UP
+    """status <container> reads one listing through shield.inspect()."""
     main(["status", _CONTAINER])
-    cli_dispatch.shield.state.assert_called_once_with(_CONTAINER)
+    cli_dispatch.shield.inspect.assert_called_once_with(_CONTAINER)
 
 
 def test_status_container_output(
@@ -804,9 +943,21 @@ def test_status_container_output(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """status <container> prints the state value, not the enum repr."""
-    cli_dispatch.shield.state.return_value = ShieldState.DOWN
+    cli_dispatch.shield.inspect.return_value = ShieldReading(state=ShieldState.DOWN)
     main(["status", _CONTAINER])
     assert capsys.readouterr().out.strip() == "down"
+
+
+def test_status_container_names_an_open_window(
+    cli_dispatch: CliDispatchHarness,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An open window rides on the posture's line, so it is never read as the trusted UP."""
+    cli_dispatch.shield.inspect.return_value = ShieldReading(
+        state=ShieldState.UP, bypass_remaining=299
+    )
+    main(["status", _CONTAINER])
+    assert capsys.readouterr().out.strip() == "up (bypass window open, 4m59s left)"
 
 
 @pytest.mark.parametrize(

@@ -30,6 +30,12 @@ PASTA_DNS = "169.254.1.1"  # pasta default DNS forwarder (link-local)
 # where container→127.0.0.1 + pasta→127.0.0.1 causes Connection reset.
 PASTA_HOST_LOOPBACK_MAP = "169.254.1.2"
 
+# The name podman gives the host inside every container.  Shield pins it with
+# ``--add-host`` to the address its backend actually forwards to the host —
+# PASTA_HOST_LOOPBACK_MAP under pasta, the slirp4netns gateway under
+# slirp4netns — so it never resolves through DNS and never rotates.
+CONTAINER_HOST_ALIAS = "host.containers.internal"
+
 # ── Tier denial floors (two distinct, differently-overridable classes) ──
 #
 # HARD_DENY_RANGES — link-local, including the cloud-metadata IMDS
@@ -77,15 +83,23 @@ DNSMASQ_BIND_DEFAULT = "127.0.0.1"
 DNSMASQ_BIND_KRUN = "169.254.1.3"
 NFT_SET_TIMEOUT_DNSMASQ = "30m"  # set element timeout when dnsmasq manages IPs
 
+# Longest element timeout the shield writes, in seconds (~3.2 years).  nft
+# 1.1.6 refuses a seconds literal of 100000000 or more ("value too large"),
+# so a deadline further out is written as this cap — the element runs out
+# early, never late, and every rebuild re-times it from the deadline.
+ELEMENT_TIMEOUT_MAX_SECONDS = 99_999_999
+
 # ── NFLOG ──────────────────────────────────────────────
 # nflog is a superset of log — it still writes to the kernel log AND makes
 # packets available via AF_NETLINK for userspace consumers (shield watch).
 NFLOG_GROUP = 100  # nflog group number for terok-shield rules
 
 # ── Log prefixes ───────────────────────────────────────
+# The NFLOG reader (resources/nflog_reader.py) mirrors each tag after the
+# ``TEROK_SHIELD_`` stem and matches it exactly; test_nflog_reader pins the two.
 BLOCKED_LOG_PREFIX = "TEROK_SHIELD_BLOCKED"  # terminal default-deny (unclassified)
-DENIED_LOG_PREFIX = "TEROK_SHIELD_DENIED"  # explicit deny set (operator refused)
-PRIVATE_LOG_PREFIX = "TEROK_SHIELD_PRIVATE"
-ALLOWED_LOG_PREFIX = "TEROK_SHIELD_ALLOWED"
+DENIED_LOG_PREFIX = "TEROK_SHIELD_DENIED"  # t20 deny set (security tier + operator's live denies)
+PRIVATE_LOG_PREFIX = "TEROK_SHIELD_PRIVATE"  # range floors: t00 hard-deny and t20 private ranges
+ALLOWED_LOG_PREFIX = "TEROK_SHIELD_ALLOWED"  # accepted by an allow tier (t10/t30/t40), any posture
 BYPASS_LOG_PREFIX = "TEROK_SHIELD_BYPASS"  # accepted through the timed bypass window
-DOWN_LOG_PREFIX = "TEROK_SHIELD_DOWN"  # new connection accepted while the shield is down
+DOWN_LOG_PREFIX = "TEROK_SHIELD_DOWN"  # accepted only because the shield is down

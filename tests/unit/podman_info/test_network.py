@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from terok_shield.nft.constants import PASTA_HOST_LOOPBACK_MAP
 from terok_shield.podman_info.network import (
     _parse_network_cmd_options,
+    host_loopback_addresses,
     parse_resolv_conf,
     parse_slirp4netns_cidr,
     slirp4netns_gateway,
@@ -19,6 +21,7 @@ from tests.testnet import (
     SLIRP4NETNS_CIDR_DEFAULT,
     SLIRP4NETNS_DNS,
     SLIRP4NETNS_GATEWAY,
+    SLIRP4NETNS_GATEWAY_V6,
     TEST_CUSTOM_CIDR_10_1,
     TEST_CUSTOM_CIDR_172,
     TEST_CUSTOM_CIDR_192,
@@ -124,3 +127,37 @@ class TestSlirp4netnsGateway:
         conf = tmp_path / "containers.conf"
         conf.write_text('engine = "scalar-not-table"\n')
         assert _parse_network_cmd_options(conf) == []
+
+
+# ── host_loopback_addresses ───────────────────────────
+
+
+class TestHostLoopbackAddresses:
+    """Where ``host.containers.internal`` takes a container, per network mode."""
+
+    def test_pasta_maps_the_host_loopback(self) -> None:
+        """pasta's ``--map-host-loopback`` address, inside the hard-deny floor."""
+        assert host_loopback_addresses("pasta") == {PASTA_HOST_LOOPBACK_MAP}
+
+    def test_slirp4netns_forwards_its_gateways(self) -> None:
+        """``allow_host_loopback`` makes the gateways, both families, the host's loopback."""
+        gateways = (SLIRP4NETNS_GATEWAY, SLIRP4NETNS_GATEWAY_V6)
+        assert host_loopback_addresses("slirp4netns", gateways) == set(gateways)
+
+    def test_slirp4netns_takes_the_recorded_gateways_never_containers_conf(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``cidr=`` changed since the launch moves no running container's gateway."""
+        conf = tmp_path / "containers" / "containers.conf"
+        conf.parent.mkdir()
+        conf.write_text(f'[engine]\nnetwork_cmd_options = ["cidr={TEST_CUSTOM_CIDR_192}"]\n')
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        monkeypatch.setattr("terok_shield.podman_info.network._SYSTEM_CONF_PATHS", ())
+        recorded = (SLIRP4NETNS_GATEWAY, SLIRP4NETNS_GATEWAY_V6)
+        assert host_loopback_addresses("slirp4netns", recorded) == set(recorded)
+        assert TEST_CUSTOM_GATEWAY_192 not in host_loopback_addresses("slirp4netns", recorded)
+
+    @pytest.mark.parametrize("mode", ["", "bridge"])
+    def test_an_unrecorded_or_unknown_mode_has_none(self, mode: str) -> None:
+        """Nothing recorded, nothing known: no address to treat as the host."""
+        assert host_loopback_addresses(mode) == frozenset()

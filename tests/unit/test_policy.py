@@ -3,18 +3,27 @@
 
 """Tests for the unified ``+``/``-`` policy line format (``terok_shield.policy``)."""
 
+from datetime import UTC, date, datetime, time, timedelta
+from urllib.parse import unquote
+
 import pytest
 
 from terok_shield.policy import (
+    EXPIRES_MARKER,
     LOCALHOST,
+    REASON_MARKER,
     PolicyEntry,
     domain_targets,
+    entry_deadline,
+    expiry_deadline,
     ip_targets,
     is_ip,
     localhost_ports,
+    marker_value,
     parse_policy,
     render_policy,
     render_target,
+    validate_target,
 )
 from tests.testfs import FORBIDDEN_TRAVERSAL
 from tests.testnet import (
@@ -183,3 +192,103 @@ def test_rejects_malformed(bad: str) -> None:
     """Malformed lines fail fast with a ``ValueError``."""
     with pytest.raises(ValueError):
         parse_policy(bad)
+
+
+@pytest.mark.parametrize(
+    "target", [TEST_DOMAIN, WILDCARD, TEST_IP1, TEST_NET1, IPV6_VERBOSE_CANONICAL, IPV6_NET1]
+)
+def test_validate_target_accepts_what_a_policy_line_may_name(target: str) -> None:
+    """The public target rule is the line grammar's own: domains, wildcards, IPs, CIDRs."""
+    validate_target(target)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param("", id="empty"),
+        pytest.param(f"+{TEST_DOMAIN}", id="action-prefix"),
+        pytest.param(f"{TEST_DOMAIN}:443", id="port"),
+        pytest.param(TEST_DOMAIN_ATTACK, id="control-bytes"),
+        pytest.param(FORBIDDEN_TRAVERSAL, id="path-traversal"),
+        pytest.param("a/b", id="slash"),
+    ],
+)
+def test_validate_target_rejects_anything_else(bad: str) -> None:
+    """A bare target carries no action, port or path — anything of the sort is a ValueError."""
+    with pytest.raises(ValueError, match="invalid target"):
+        validate_target(bad)
+
+
+def test_validate_target_is_the_packages_public_rule() -> None:
+    """Exported at the top level, for callers that keep host lists of their own."""
+    import terok_shield
+
+    assert terok_shield.validate_target is validate_target
+
+
+# ── %expires ─────────────────────────────────────────────
+
+_A_DAY = date(2026, 6, 9)
+
+
+def test_an_expiry_date_holds_through_that_day_in_host_local_time() -> None:
+    """``%expires=<date>`` runs out at the local midnight that ends the day — not at its start."""
+    deadline = expiry_deadline(_A_DAY.isoformat())
+    assert deadline == datetime.combine(_A_DAY + timedelta(days=1), time.min).astimezone()
+    assert deadline.tzinfo is not None
+
+
+def test_an_expiry_timestamp_runs_out_at_that_instant() -> None:
+    """A full ISO timestamp is taken as given; one without an offset is host local time."""
+    noon = datetime.combine(_A_DAY, time(12, 0))
+    assert expiry_deadline(f"{noon.isoformat()}Z") == noon.replace(tzinfo=UTC)
+    assert expiry_deadline(noon.isoformat()) == noon.astimezone()
+
+
+def test_an_expiry_on_the_calendars_last_days_saturates() -> None:
+    """No midnight follows 9999-12-31 — the deadline is the last instant there is, not an error."""
+    for day in (date.max, date.max - timedelta(days=1)):
+        assert expiry_deadline(day.isoformat()).year == date.max.year
+
+
+@pytest.mark.parametrize("bad", ["", "soon", "2026-13-01", "2026-06-09 noon"])
+def test_an_expiry_that_names_no_date_is_refused(bad: str) -> None:
+    """Anything but an ISO date or timestamp raises — never a guess."""
+    with pytest.raises(ValueError):
+        expiry_deadline(bad)
+
+
+def test_entry_deadline_reads_the_marker() -> None:
+    """An entry without ``%expires`` never runs out; one with it runs out at its deadline."""
+    (forever, dated) = parse_policy(
+        f"+{TEST_DOMAIN}\n+{TEST_DOMAIN2} %{EXPIRES_MARKER}={_A_DAY.isoformat()}\n"
+    )
+    assert entry_deadline(forever) is None
+    assert entry_deadline(dated) == expiry_deadline(_A_DAY.isoformat())
+
+
+def test_entry_deadline_names_the_entry_and_the_bad_value() -> None:
+    """A malformed marker says which entry carries it and what was written."""
+    (entry,) = parse_policy(f"+{TEST_DOMAIN} %{EXPIRES_MARKER}=someday\n")
+    with pytest.raises(ValueError, match=f"someday.*{TEST_DOMAIN}"):
+        entry_deadline(entry)
+
+
+# ── marker values: free text in one token ─────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("vendor outage", id="spaces"),
+        pytest.param("ticket #42", id="comment-char"),
+        pytest.param("100% down", id="percent"),
+        pytest.param("a=b, c: (d)", id="punctuation"),
+        pytest.param("plain", id="plain"),
+    ],
+)
+def test_a_marker_value_survives_the_line_it_rides_on(text: str) -> None:
+    """Spaces end a marker and ``#`` starts a comment: encoded, the text comes back whole."""
+    (entry,) = parse_policy(f"+{TEST_DOMAIN} %{REASON_MARKER}={marker_value(text)} %expires=x")
+    assert unquote(entry.meta[REASON_MARKER]) == text
+    assert entry.meta[EXPIRES_MARKER] == "x"

@@ -150,6 +150,11 @@ class ShieldState(enum.Enum):
     DISENGAGED: Accept-everything posture — no deny set, no private-range or hard-deny reject.
     OFFLINE: No ruleset found (container stopped or unshielded).
     ERROR: Ruleset present but unrecognised.
+
+    [`confirmed_posture`][terok_shield.config.ShieldModeBackend.confirmed_posture],
+    which a live allow and a revoke route on, keeps OFFLINE for a container podman says runs
+    no process — stopped, or gone.  A running container whose ruleset could
+    not be read, or that carries none (unshielded), is ERROR there.
     """
 
     QUARANTINE = "quarantine"
@@ -158,6 +163,58 @@ class ShieldState(enum.Enum):
     DISENGAGED = "disengaged"
     OFFLINE = "offline"
     ERROR = "error"
+
+
+@dataclass(frozen=True)
+class ShieldReading:
+    """One reading of a container's live ruleset: its posture and its timed window.
+
+    Both come out of a single ``nft -T list table`` — the listing that
+    classifies the posture already holds the window set — so a caller that
+    shows both (a status line, a task pane) pays for one netns entry, not two,
+    and never pairs a posture with a window read a moment apart.
+
+    Attributes:
+        state: The posture the listing classifies as.
+        bypass_remaining: Whole seconds left on the timed allow-all window
+            (``0`` in its last second), or ``None`` when none is open.  Only the
+            UP chain reads the window set, so any other posture reads ``None``.
+    """
+
+    state: ShieldState
+    bypass_remaining: int | None = None
+
+
+@dataclass(frozen=True)
+class OverrideRevocation:
+    """What revoking a break-glass override closed, and when the revoke takes hold.
+
+    Returned by [`Shield.revoke_override`][terok_shield.Shield.revoke_override].
+    An operator told that a break-glass ended needs two things a bare success
+    would hide.  A running container drops the override at once, while a
+    stopped one only stops opening it at its next start.  And an address the
+    override held can stay reachable above the security tier through another
+    override that covers it — a range, say — which a revoke of this one
+    leaves alone.  So the addresses are split into the ones closed and the
+    ones still open.
+
+    Attributes:
+        target: The domain, IP or CIDR whose override ended, as its tier entry
+            recorded it.
+        closed: The addresses the override held that no t10 element admits
+            any more.
+        kept: The addresses the override held that another override still in
+            force admits above the security tier, because it covers them.
+        live: True when the container was running, so its ruleset no longer
+            holds the override now; False when podman said no process runs
+            for it — it is stopped, or gone — so the revoke applies from its
+            next start.
+    """
+
+    target: str
+    closed: tuple[str, ...] = ()
+    kept: tuple[str, ...] = ()
+    live: bool = True
 
 
 # ── ShieldRuntime ───────────────────────────────────────
@@ -216,6 +273,12 @@ class ShieldConfig:
     same allowlist share one resolve.  ``None`` selects
     [`dns_cache_dir`][terok_shield.paths.dns_cache_dir] under the shield state
     root.  Only the tiers that resolve at launch use it.
+    """
+    bypass_duration: str = "5m"
+    """How long the timed allow-all window stays open when a caller names no duration.
+
+    An nft timeout (``30s``, ``5m``, ``2h``).  The kernel closes the window when
+    the element expires, so nothing outlives the timeout it was opened with.
     """
     dnsmasq_path: Path | None = None
     """The dnsmasq binary to run; ``None`` finds one on the current host PATH.
@@ -280,12 +343,28 @@ class ShieldModeBackend(Protocol):
         """
         ...
 
+    def check_security_tier(self, target: str, ips: Sequence[str]) -> None:
+        """Raise when the t20 security tier refuses *target* (by name, suffix or any of *ips*)."""
+        ...
+
     def allow_ip(self, container: str, ip: str) -> None:
-        """Live-allow an IP for a running container."""
+        """Live-allow an IP for a running container; an address in the security tier is refused."""
+        ...
+
+    def allow_offline(self, target: str) -> None:
+        """Record an allow of *target* for a stopped container, applied at its next start."""
         ...
 
     def allow_domain(self, container: str, domain: str) -> None:
         """Live-allow a domain (reload dnsmasq if active)."""
+        ...
+
+    def override(self, container: str, target: str, expires: str, *, reason: str) -> list[str]:
+        """Break glass for *target* on a running container until *expires* runs out, for *reason*; return its addresses."""
+        ...
+
+    def revoke_override(self, container: str, target: str) -> OverrideRevocation:
+        """End *target*'s break-glass now, ahead of its expiry; raise when none is in force."""
         ...
 
     def deny_ip(self, container: str, ip: str) -> None:
@@ -318,6 +397,28 @@ class ShieldModeBackend(Protocol):
 
     def shield_state(self, container: str) -> ShieldState:
         """Query a container's shield state from the live ruleset."""
+        ...
+
+    def confirmed_posture(self, container: str) -> ShieldState:
+        """The posture allow and revoke route on: OFFLINE only when podman says no process runs.
+
+        A container podman has no record of runs no process either.  A
+        running one whose ruleset could not be read, or that carries none,
+        is ERROR.  When podman cannot say whether it runs, a RuntimeError is
+        raised before anything changes.
+        """
+        ...
+
+    def inspect(self, container: str) -> ShieldReading:
+        """Read the posture and the timed window's countdown from one ruleset listing."""
+        ...
+
+    def arm_window(self, container: str, timeout: str) -> None:
+        """Open the timed allow-all window for *timeout*; refused outside the UP posture."""
+        ...
+
+    def disarm_window(self, container: str) -> None:
+        """Close the timed allow-all window now."""
         ...
 
     def preview(

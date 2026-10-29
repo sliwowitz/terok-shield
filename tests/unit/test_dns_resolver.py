@@ -3,6 +3,7 @@
 
 """Tests for the DnsResolver class."""
 
+import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from unittest import mock
 import pytest
 
 from terok_shield.dns.resolver import DnsResolver
-from terok_shield.state import StateBundle
+from terok_shield.state import StateBundle, read_name_resolution
 
 from ..testfs import NONEXISTENT_DIR, TEST_CACHE_FILENAME, TEST_SUBDIR_NAME
 from ..testnet import (
@@ -210,6 +211,24 @@ def test_logs_warning_for_unresolvable(
 
     unresolvable = [m for m in caplog.messages if NONEXISTENT_DOMAIN in m]
     assert len(unresolvable) == 1
+
+
+def test_quiet_resolution_logs_an_unresolvable_name_but_keeps_stderr_clear(
+    make_resolver: ResolverHarnessFactory,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A background check still logs the miss, but leaves stderr to its caller's own message."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {CLOUDFLARE_DOMAIN: [TEST_IP1]})
+    _getent_returns(harness.runner, {})
+
+    with caplog.at_level("WARNING", logger="terok_shield.dns.resolver"):
+        ips = harness.resolver.resolve_domains([CLOUDFLARE_DOMAIN, NONEXISTENT_DOMAIN], quiet=True)
+
+    assert ips == [TEST_IP1]
+    assert any(NONEXISTENT_DOMAIN in m for m in caplog.messages)
+    assert capsys.readouterr().err == ""
 
 
 # ── dig-missing and broken-dig fallbacks ────────────────
@@ -497,6 +516,300 @@ def test_host_cache_not_poisoned_by_total_failure(
     assert result == []
     assert cache_path.is_file()  # per-container view written (existing semantics)
     assert _host_files(host_dir) == []  # but the host layer is NOT poisoned
+
+
+def test_a_total_failure_keeps_a_cache_that_only_aged_out(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """Not one name answered: an answer for this very policy, merely old, stands.
+
+    Stale addresses beat none.  The cache is left stale, so the next resolve
+    tries again.  (The deny caches go further, name by name — see
+    ``test_a_deny_cache_keeps_the_addresses_of_a_name_that_went_silent``.)
+    """
+    harness = make_resolver()
+    _dig_returns(harness.runner, {})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).resolved_cache
+    cache_path.write_text(f"{TEST_IP1}\n")
+    os.utime(cache_path, (0, 0))
+
+    assert harness.resolver.resolve_and_cache([TEST_DOMAIN], cache_path) == [TEST_IP1]
+    assert cache_path.read_text() == f"{TEST_IP1}\n"
+    assert cache_path.stat().st_mtime == 0
+
+
+def test_a_total_failure_never_keeps_an_answer_for_an_older_policy(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """Once the authored policy changed, the old answer is no answer: rewritten, as before."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).resolved_cache
+    cache_path.write_text(f"{TEST_IP1}\n")
+    edited_after = cache_path.stat().st_mtime + 10
+
+    result = harness.resolver.resolve_and_cache(
+        [TEST_DOMAIN], cache_path, source_mtime=edited_after
+    )
+    assert result == []
+    assert cache_path.read_text() == ""
+
+
+def test_resolve_each_keeps_every_name_apart(make_resolver: ResolverHarnessFactory) -> None:
+    """Per name, in input order — a shared address stays with both, a dead name maps to none."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {TEST_DOMAIN: [TEST_IP1], TEST_DOMAIN2: [TEST_IP1, TEST_IP2]})
+    _getent_returns(harness.runner, {})
+
+    assert harness.resolver.resolve_each([TEST_DOMAIN, TEST_DOMAIN2, NONEXISTENT_DOMAIN]) == {
+        TEST_DOMAIN: [TEST_IP1],
+        TEST_DOMAIN2: [TEST_IP1, TEST_IP2],
+        NONEXISTENT_DOMAIN: [],
+    }
+
+
+def test_resolve_names_and_cache_writes_one_line_per_resolved_name(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """Each name keeps its own addresses; a name that resolved to nothing has no line."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {TEST_DOMAIN: [TEST_IP1, IPV6_CLOUDFLARE]})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).override_resolved
+
+    result = harness.resolver.resolve_names_and_cache([TEST_DOMAIN, NONEXISTENT_DOMAIN], cache_path)
+    assert result == {TEST_DOMAIN: [TEST_IP1, IPV6_CLOUDFLARE]}
+    assert cache_path.read_text() == f"{TEST_DOMAIN} {TEST_IP1} {IPV6_CLOUDFLARE}\n"
+
+
+def test_resolve_names_and_cache_answers_from_a_fresh_cache(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """Fresh means no lookup — and only the names asked for come back."""
+    harness = make_resolver()
+    cache_path = StateBundle(tmp_path).override_resolved
+    cache_path.write_text(f"{TEST_DOMAIN} {TEST_IP1}\n{TEST_DOMAIN2} {TEST_IP2}\n")
+
+    assert harness.resolver.resolve_names_and_cache([TEST_DOMAIN], cache_path) == {
+        TEST_DOMAIN: [TEST_IP1]
+    }
+    harness.runner.lookup_all.assert_not_called()
+
+
+def test_resolve_names_and_cache_treats_a_flat_cache_as_unresolved(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """A cache that kept no names cannot answer per name, however fresh it is."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {TEST_DOMAIN: [TEST_IP2]})
+    cache_path = StateBundle(tmp_path).override_resolved
+    cache_path.write_text(f"{TEST_IP1}\n")
+
+    assert harness.resolver.resolve_names_and_cache([TEST_DOMAIN], cache_path) == {
+        TEST_DOMAIN: [TEST_IP2]
+    }
+    assert cache_path.read_text() == f"{TEST_DOMAIN} {TEST_IP2}\n"
+
+
+def test_resolve_names_and_cache_keeps_an_aged_answer_through_a_total_failure(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """No name answered: the break-glass keeps its last addresses rather than none."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).override_resolved
+    cache_path.write_text(f"{TEST_DOMAIN} {TEST_IP1}\n")
+    os.utime(cache_path, (0, 0))
+
+    assert harness.resolver.resolve_names_and_cache([TEST_DOMAIN], cache_path) == {
+        TEST_DOMAIN: [TEST_IP1]
+    }
+    assert cache_path.stat().st_mtime == 0
+
+
+def test_a_total_failure_leaves_a_flat_cache_standing(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """An outage never empties a flat-format cache that still seeds the deny set."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).deny_resolved
+    cache_path.write_text(f"{TEST_IP1}\n")
+    os.utime(cache_path, (0, 0))
+
+    assert (
+        harness.resolver.resolve_names_and_cache(
+            [TEST_DOMAIN], cache_path, keep_unanswered=True, kind="deny"
+        )
+        == {}
+    )
+    assert cache_path.read_text() == f"{TEST_IP1}\n"
+    assert cache_path.stat().st_mtime == 0
+
+
+def _aged(cache_path: Path, text: str) -> None:
+    """Write *text* as a cache that aged out an hour ago — what a posture change re-resolves."""
+    cache_path.write_text(text)
+    os.utime(cache_path, (0, 0))
+
+
+def test_a_deny_cache_keeps_the_addresses_of_a_name_that_went_silent(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """One vault host's lookup times out: it keeps its addresses, the other takes its new ones.
+
+    Pooled into one list, the refresh would drop the silent host's addresses
+    and the next rebuild would seed t20 without them — opening the host while
+    the shield is down, and wherever nothing sinkholes its name.
+    """
+    harness = make_resolver()
+    _dig_returns(harness.runner, {TEST_DOMAIN: [TEST_IP2]})  # TEST_DOMAIN2 answers nothing
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).deny_resolved
+    _aged(cache_path, f"{TEST_DOMAIN} {TEST_IP1}\n{TEST_DOMAIN2} {IPV6_CLOUDFLARE}\n")
+
+    result = harness.resolver.resolve_names_and_cache(
+        [TEST_DOMAIN, TEST_DOMAIN2], cache_path, keep_unanswered=True, kind="denied"
+    )
+
+    assert result == {TEST_DOMAIN: [TEST_IP2], TEST_DOMAIN2: [IPV6_CLOUDFLARE]}
+    assert read_name_resolution(cache_path) == result
+
+
+def test_an_override_cache_lets_a_silent_name_go(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """The override keeps nothing it no longer resolves: an address its name left is not reached."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {TEST_DOMAIN: [TEST_IP2]})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).override_resolved
+    _aged(cache_path, f"{TEST_DOMAIN} {TEST_IP1}\n{TEST_DOMAIN2} {IPV6_CLOUDFLARE}\n")
+
+    result = harness.resolver.resolve_names_and_cache([TEST_DOMAIN, TEST_DOMAIN2], cache_path)
+
+    assert result == {TEST_DOMAIN: [TEST_IP2]}
+
+
+def test_a_deny_cache_drops_a_name_the_policy_no_longer_holds(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """Only the names asked for are kept: a name removed from the tier goes with its addresses."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).deny_resolved
+    _aged(cache_path, f"{TEST_DOMAIN} {TEST_IP1}\n{TEST_DOMAIN2} {TEST_IP2}\n")
+    edited_after = cache_path.stat().st_mtime + 10
+
+    result = harness.resolver.resolve_names_and_cache(
+        [TEST_DOMAIN], cache_path, source_mtime=edited_after, keep_unanswered=True
+    )
+
+    assert result == {TEST_DOMAIN: [TEST_IP1]}
+    assert cache_path.read_text() == f"{TEST_DOMAIN} {TEST_IP1}\n"
+
+
+def test_resolve_names_and_cache_says_which_names_it_waits_on(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The launcher is waiting on the batch, so stderr says what kind of names it is."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {TEST_DOMAIN: [TEST_IP1]})
+
+    harness.resolver.resolve_names_and_cache(
+        [TEST_DOMAIN], StateBundle(tmp_path).deny_resolved, kind="denied"
+    )
+
+    assert "Resolving 1 denied names" in capsys.readouterr().err
+
+
+def test_resolve_names_and_cache_of_no_names_is_empty(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """Nothing to resolve is an empty answer, and no lookup runs."""
+    harness = make_resolver()
+
+    assert harness.resolver.resolve_names_and_cache([], StateBundle(tmp_path).deny_resolved) == {}
+    harness.runner.lookup_all.assert_not_called()
+
+
+def test_resolve_names_answers_as_the_cache_would_yet_writes_nothing(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """The caching rules, the cache only read: a live grant persists answers once the kernel took them."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {TEST_DOMAIN: [TEST_IP2]})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).override_resolved
+    _aged(cache_path, f"{TEST_DOMAIN} {TEST_IP1}\n")
+
+    answered = harness.resolver.resolve_names([TEST_DOMAIN, TEST_DOMAIN2], cache_path)
+
+    assert answered == {TEST_DOMAIN: [TEST_IP2]}
+    assert cache_path.read_text() == f"{TEST_DOMAIN} {TEST_IP1}\n"
+    assert cache_path.stat().st_mtime == 0
+
+
+def test_resolve_names_leaves_a_fresh_cache_standing(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """``None`` says the cache is the answer: fresh, so nothing is looked up."""
+    harness = make_resolver()
+    cache_path = StateBundle(tmp_path).override_resolved
+    cache_path.write_text(f"{TEST_DOMAIN} {TEST_IP1}\n")
+
+    assert harness.resolver.resolve_names([TEST_DOMAIN], cache_path) is None
+    harness.runner.lookup_all.assert_not_called()
+
+
+def test_resolve_names_keeps_an_aged_cache_through_a_total_failure(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """Not one name answered, and the cache still answers for this policy: it stands, untouched."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).override_resolved
+    _aged(cache_path, f"{TEST_DOMAIN} {TEST_IP1}\n")
+
+    assert harness.resolver.resolve_names([TEST_DOMAIN], cache_path) is None
+    assert cache_path.stat().st_mtime == 0
+
+
+def test_resolve_names_past_an_edit_no_cache_predates_keeps_nothing(
+    tmp_path: Path,
+    make_resolver: ResolverHarnessFactory,
+) -> None:
+    """An edit not yet on disk post-dates every cache: a name that fails now has no answer at all."""
+    harness = make_resolver()
+    _dig_returns(harness.runner, {})
+    _getent_returns(harness.runner, {})
+    cache_path = StateBundle(tmp_path).override_resolved
+    cache_path.write_text(f"{TEST_DOMAIN} {TEST_IP1}\n")  # fresh by the hour
+
+    assert harness.resolver.resolve_names([TEST_DOMAIN], cache_path, source_mtime=math.inf) == {}
+    assert cache_path.read_text() == f"{TEST_DOMAIN} {TEST_IP1}\n"
 
 
 def test_host_cache_shares_when_raw_ips_only(

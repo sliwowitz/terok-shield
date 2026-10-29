@@ -11,6 +11,7 @@ import pytest
 from terok_shield.config import DnsTier
 from terok_shield.dns.dnsmasq import (
     _validate_domain,
+    config_is_current,
     deny_config_lines,
     generate_config,
     has_nftset_support,
@@ -20,6 +21,7 @@ from terok_shield.dns.dnsmasq import (
     read_merged_domains,
     read_override_domains,
     reload,
+    rewrite_config,
 )
 from terok_shield.nft.constants import (
     DNSMASQ_BIND_DEFAULT,
@@ -337,11 +339,80 @@ def test_reload_falls_back_to_default_when_listen_address_missing(tmp_path: Path
     )
 
 
-def test_reload_noop_when_not_running(tmp_path: Path) -> None:
-    """reload() is a no-op (no relaunch) when the dnsmasq PID file is absent."""
-    StateBundle(tmp_path).ensure_dirs()
-    runner = _run_reload(tmp_path, PASTA_DNS, [TEST_DOMAIN])
+def test_rewrite_config_keeps_the_listen_address_and_the_query_log(tmp_path: Path) -> None:
+    """A rewrite for a stopped container keeps what it launched with, and starts nothing.
+
+    The caller may hold a default config — the CLI does — so the krun bind
+    and the query log come off the conf being replaced, never off the caller.
+    """
+    bundle = _launched(tmp_path)
+    bundle.dnsmasq_conf.write_text(f"listen-address={DNSMASQ_BIND_KRUN}\nlog-queries\n")
+
+    rewrite_config(tmp_path, PASTA_DNS, [TEST_DOMAIN], deny_domains=[TEST_DOMAIN2])
+
+    conf = bundle.dnsmasq_conf.read_text().splitlines()
+    assert f"listen-address={DNSMASQ_BIND_KRUN}" in conf
+    assert "log-queries" in conf
+    assert f"local=/{TEST_DOMAIN2}/" in conf
+    assert any(line.startswith(f"nftset=/{TEST_DOMAIN}/") for line in conf)
+
+
+def test_a_config_is_current_whatever_process_wrote_it(tmp_path: Path) -> None:
+    """The generator's comment names its pid; two writes of one policy still match."""
+    bundle = _launched(tmp_path)
+    rewrite_config(tmp_path, PASTA_DNS, [TEST_DOMAIN], deny_domains=[TEST_DOMAIN2])
+    conf = bundle.dnsmasq_conf.read_text()
+    first, rest = conf.split("\n", 1)
+    bundle.dnsmasq_conf.write_text(first.replace("(pid ", "(pid 9") + "\n" + rest)
+
+    assert config_is_current(tmp_path, PASTA_DNS, [TEST_DOMAIN], deny_domains=[TEST_DOMAIN2])
+
+
+def test_a_config_is_stale_once_a_punch_through_lapses(tmp_path: Path) -> None:
+    """An override that ran out leaves the conf punching its name through: stale, so reload it."""
+    _launched(tmp_path)
+    rewrite_config(
+        tmp_path, PASTA_DNS, [], deny_domains=[TEST_DOMAIN2], override_domains=[TEST_DOMAIN2]
+    )
+
+    assert config_is_current(
+        tmp_path, PASTA_DNS, [], deny_domains=[TEST_DOMAIN2], override_domains=[TEST_DOMAIN2]
+    )
+    assert not config_is_current(tmp_path, PASTA_DNS, [], deny_domains=[TEST_DOMAIN2])
+
+
+def test_reload_without_a_running_dnsmasq_still_rewrites_the_config(tmp_path: Path) -> None:
+    """No PID file: nothing to relaunch, and it says so — but the conf follows the policy anyway.
+
+    The next start's OCI hook reads this conf; a reload that returned before
+    rewriting it left a revoked name punched through the sinkhole on disk.
+    """
+    bundle = _launched(tmp_path)
+    bundle.dnsmasq_pid.unlink()
+    rewrite_config(
+        tmp_path, PASTA_DNS, [], deny_domains=[TEST_DOMAIN2], override_domains=[TEST_DOMAIN2]
+    )
+    runner = mock.MagicMock()
+
+    reloaded = reload(
+        tmp_path, PASTA_DNS, [], deny_domains=[TEST_DOMAIN2], container="c", runner=runner
+    )
+
+    assert reloaded is False
+    assert f"local=/{TEST_DOMAIN2}/" in bundle.dnsmasq_conf.read_text()
     runner.dnsmasq_via_nsenter.assert_not_called()
+
+
+def test_reload_says_when_it_relaunched_dnsmasq(tmp_path: Path) -> None:
+    """A running dnsmasq is relaunched on the new conf, and the caller hears it was."""
+    _launched(tmp_path)
+    with (
+        mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.dns.dnsmasq.require_host_tool", return_value=DNSMASQ_SBIN),
+        mock.patch("terok_shield.dns.dnsmasq._terminate"),
+        mock.patch("terok_shield.dns.dnsmasq._await_restart"),
+    ):
+        assert reload(tmp_path, PASTA_DNS, [TEST_DOMAIN], container="c", runner=mock.MagicMock())
 
 
 def test_reload_raises_on_stale_pid(tmp_path: Path) -> None:
