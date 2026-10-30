@@ -29,7 +29,7 @@ class AuditLogWatcher:
         self._audit_path = audit_path
         self._container = container
         audit_path.touch(exist_ok=True)
-        self._fh = open(audit_path)  # noqa: SIM115 — needs fileno() for select
+        self._fh = open(audit_path)  # noqa: SIM115 - needs fileno() for select
         self._fh.seek(0, os.SEEK_END)
 
     def fileno(self) -> int:

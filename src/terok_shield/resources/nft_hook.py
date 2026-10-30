@@ -36,7 +36,7 @@ from pathlib import Path
 # setup-owned directory so the copied ballast is importable, without importing
 # installed terok packages or accepting ambient PYTHONPATH.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _oci_state  # noqa: E402 — sys.path bootstrap precedes import
+import _oci_state  # noqa: E402 - sys.path bootstrap precedes import
 
 # WORKAROUND(selinux-nft-stdin): nft runs as iptables_t (SELinux
 # domain), which cannot read files in data_home_t (~/.local/share/…).

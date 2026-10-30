@@ -89,7 +89,7 @@ class ClearanceSession:
         self._queue: list[_Pending] = []
         self._stop_requested = False
 
-    def run(self) -> None:  # pragma: no cover — real subprocess + tty I/O, integration path
+    def run(self) -> None:  # pragma: no cover - real subprocess + tty I/O, integration path
         """Spawn the reader, then multiplex its stdout with stdin prompts."""
         reader = self._spawn_reader()
         if reader.stdout is None:

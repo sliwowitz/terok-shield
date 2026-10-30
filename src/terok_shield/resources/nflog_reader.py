@@ -59,7 +59,7 @@ import select
 import signal
 import socket
 import struct
-import subprocess  # nosec B404 — podman/nsenter re-exec for container netns
+import subprocess  # nosec B404 - podman/nsenter re-exec for container netns
 import sys
 import time
 from dataclasses import dataclass, field
@@ -220,7 +220,7 @@ class BlockedEvent:
 # ── Entry point ───────────────────────────────────────────────────────
 
 
-def main() -> None:  # pragma: no cover — real argparse + subprocess re-exec
+def main() -> None:  # pragma: no cover - real argparse + subprocess re-exec
     """Parse arguments, cross into the container netns if needed, and run the loop.
 
     On first entry (``_TEROK_SHIELD_NFLOG_NSENTER`` unset) this process re-execs
@@ -341,7 +341,7 @@ def _reexec_inside_container_netns(
     annotations_raw: str,
     container_id: str,
     hub_socket: str,
-) -> None:  # pragma: no cover — real subprocess re-exec
+) -> None:  # pragma: no cover - real subprocess re-exec
     """Re-enter this script inside the container's netns so NFLOG is reachable.
 
     When we're already in ``NS_ROOTLESS`` (uid 0 inside the rootless userns
@@ -390,7 +390,7 @@ def _reexec_inside_container_netns(
         raise SystemExit(exc.returncode) from exc
 
 
-def _podman_container_pid(container: str) -> str:  # pragma: no cover — real podman subprocess
+def _podman_container_pid(container: str) -> str:  # pragma: no cover - real podman subprocess
     """Resolve a container's host PID so nsenter can target its network namespace."""
     podman = _resolve_binary("podman")
     # argv is a fixed literal plus the caller-supplied container name; no
@@ -972,7 +972,7 @@ class _RawPacketEvent:
 
 def _open_nflog_socket(
     group: int,
-) -> socket.socket | None:  # pragma: no cover — real AF_NETLINK socket
+) -> socket.socket | None:  # pragma: no cover - real AF_NETLINK socket
     """Bind an ``AF_NETLINK`` socket to *group*, or ``None`` if unavailable.
 
     Returns ``None`` in environments without NFLOG support (non-Linux, missing
@@ -999,7 +999,7 @@ def _open_nflog_socket(
         return None
 
 
-def _drain(sock: socket.socket) -> list[_RawPacketEvent]:  # pragma: no cover — real socket recv
+def _drain(sock: socket.socket) -> list[_RawPacketEvent]:  # pragma: no cover - real socket recv
     """Read every pending NFLOG message and extract its block events."""
     events: list[_RawPacketEvent] = []
     while True:
@@ -1170,7 +1170,7 @@ class _DomainCache:
 # ── Utility helpers ───────────────────────────────────────────────────
 
 
-def _parse_args() -> argparse.Namespace:  # pragma: no cover — thin argparse wrapper
+def _parse_args() -> argparse.Namespace:  # pragma: no cover - thin argparse wrapper
     """Define the CLI surface — positional state_dir + container, ``--emit``, dossier."""
     parser = argparse.ArgumentParser(
         prog="nflog-reader",
@@ -1248,5 +1248,5 @@ def _print_json(payload: dict) -> None:
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
 
-if __name__ == "__main__":  # pragma: no cover — script entry point
+if __name__ == "__main__":  # pragma: no cover - script entry point
     main()

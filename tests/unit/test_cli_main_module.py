@@ -22,7 +22,7 @@ from terok_shield.subprocess_env import child_process_env
 
 def test_cli_module_runs_via_dash_m() -> None:
     """``python -m terok_shield.cli --help`` exits 0 and prints usage text."""
-    result = subprocess.run(  # nosec B603 — fixed argv, no shell
+    result = subprocess.run(  # nosec B603 - fixed argv, no shell
         [sys.executable, "-m", "terok_shield.cli", "--help"],
         capture_output=True,
         env=child_process_env(),
