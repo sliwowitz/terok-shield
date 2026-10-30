@@ -1008,7 +1008,7 @@ class TestLogHardening:
         """
         # ``/tmp/terok-hook-error.log`` must not exist (clean slate)
         # and must not be created by the call.
-        sentinel = Path("/tmp/terok-hook-error.log")  # nosec B108 — assertion-only
+        sentinel = Path("/tmp/terok-hook-error.log")  # nosec B108 - assertion-only
         existed_before = sentinel.exists()
         _oci_state.log("something failed")
         captured = capsys.readouterr()

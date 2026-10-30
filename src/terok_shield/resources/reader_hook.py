@@ -27,7 +27,7 @@ from pathlib import Path
 # auditors can read either file in isolation.  Imported qualified so
 # unit tests have a single canonical attribute to patch.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _oci_state  # noqa: E402 — sys.path bootstrap precedes import
+import _oci_state  # noqa: E402 - sys.path bootstrap precedes import
 
 # SIGTERM→SIGKILL grace: how long to wait for the reader to exit
 # cleanly after poststop sends SIGTERM.  10 × 0.2s poll intervals = 2s.

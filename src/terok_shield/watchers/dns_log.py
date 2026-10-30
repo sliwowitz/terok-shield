@@ -36,7 +36,7 @@ class DnsLogWatcher:
         self._log_path = log_path
         self._state_dir = state_dir
         self._container = container
-        self._fh = open(log_path)  # noqa: SIM115 — needs fileno() for select
+        self._fh = open(log_path)  # noqa: SIM115 - needs fileno() for select
         try:
             self._fh.seek(0, os.SEEK_END)
             self._allowed_domains: set[str] = set()

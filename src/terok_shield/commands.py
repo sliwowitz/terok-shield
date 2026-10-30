@@ -74,7 +74,7 @@ def standalone_only(cmd: CommandDef) -> bool:
     return bool(cmd.extras.get("standalone_only", False))
 
 
-def _lazy(name: str, help: str, source: str) -> CommandDef:  # noqa: A002 — argparse vocabulary
+def _lazy(name: str, help: str, source: str) -> CommandDef:  # noqa: A002 - argparse vocabulary
     """Build a lazy root referencing *source* (``"module:CONST"`` under verbs)."""
     return CommandDef(name=name, help=help, source=f"terok_shield.verbs.{source}")
 

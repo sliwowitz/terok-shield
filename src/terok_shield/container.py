@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess  # nosec B404 — podman is a trusted host binary
+import subprocess  # nosec B404 - podman is a trusted host binary
 from dataclasses import dataclass
 from pathlib import Path
 
