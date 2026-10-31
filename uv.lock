@@ -1722,8 +1722,8 @@ test = [
 
 [[package]]
 name = "terok-util"
-version = "0.5.0a2.dev160+g395cae1e7"
-source = { git = "https://github.com/sliwowitz/terok-util?rev=fix%2F1315-rootless-storage#395cae1e704cb623f9a5e99bfb4c4888fdb90b6a" }
+version = "0.5.0a2.dev161+g89255169a"
+source = { git = "https://github.com/sliwowitz/terok-util?rev=fix%2F1315-rootless-storage#89255169a2b518f8a5b25f3dedbc6632094956f7" }
 dependencies = [
     { name = "jinja2" },
     { name = "packaging" },
